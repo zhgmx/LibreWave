@@ -1,6 +1,6 @@
 # Linux audio integration
 
-Status: the ownership policy and capture-first lifecycle contract are implemented. The direct ALSA and PipeWire backend is not implemented.
+Status: the direct host owns ALSA resources and inspects PipeWire through the safe Rust wrappers. Product endpoint processing and live validation are not implemented.
 
 ## Reference system
 
@@ -12,7 +12,11 @@ Some Wave microphones produce silent capture when playback starts before capture
 
 LibreWave uses one physical audio owner. `librewaved` will open the Wave:3 ALSA capture PCM directly, consume capture frames, confirm that capture is active, and then open the playback PCM. WirePlumber must not create or reserve the admitted physical card. PipeWire will carry only the product endpoints that `librewave-core` defines.
 
-The repository now contains typed policy artifacts, prerequisites, and the ordered ownership plan in `librewave-platform-linux`. These types render files for setup and define the contract for the future ALSA and PipeWire adapter. They do not install files, open PCMs, create PipeWire objects, or change the running audio graph.
+`librewave-platform-linux` contains the policy artifacts, ordered lifecycle, and direct host. The host uses `alsa` 0.12.1 and `pipewire` 0.9.2. It is not connected to daemon startup, setup, or the running graph.
+
+The host correlates an admitted USB candidate to one ALSA card. It requires one stable ALSA card identifier and one PCM device for each direction. It repeats the sysfs and procfs correlation immediately before each open. The open uses the revalidated card identifier, device number, and subdevice zero. A changed card number, identifier, topology, or PCM set stops startup.
+
+The daemon must supply an exact physical PCM format. The host has no default sample rate, channel count, period size, or buffer size. It currently supports interleaved signed 32-bit little-endian samples. ALSA must apply the complete requested format without adjustment.
 
 ## WirePlumber policy
 
@@ -56,13 +60,21 @@ flowchart TD
 
 The daemon must not open playback when capture is inactive or has produced no frames. A failed step tears down objects from that attempt and reports a named degraded state. Recovery after hotplug or a PipeWire or WirePlumber restart uses the same sequence.
 
-The current lifecycle state machine enforces this order through a host trait. It has no production host implementation yet, so it cannot touch ALSA or PipeWire.
+The lifecycle state machine enforces this order through one host trait. The production host configures and starts capture before its first bounded ALSA wait. Before the worker starts, the host allocates one buffer from the checked period size, channel count, and sample width.
+
+The capture loop does not allocate or lock. Atomic counters report frames and recovered xruns. After ALSA recovers an xrun, the host restarts capture only if the PCM is prepared. It accepts a running PCM and fails for any other state. Timeout, disconnect, an unrecoverable PCM error, worker shutdown, and worker join have distinct outcomes. Playback cannot open until the worker has consumed at least one frame.
+
+The host owns its PipeWire core connection, capture worker, and playback PCM. One idempotent teardown path disconnects PipeWire and closes both PCM resources. Its resource snapshot reports whether it owns a PipeWire connection resource. It also reports capture and playback activity, frame and xrun counts, deliberate endpoint identities, and the readiness boundary. The snapshot does not contain ALSA card numbers, PCM names, USB topology, or PipeWire object identifiers.
 
 ## Product endpoints
 
 The desktop may see only deliberate product endpoints. The current `librewave-core` contract defines microphone, monitor mix, and stream mix as public sources. Future sink flows must enter that core contract before the Linux adapter publishes them.
 
 The physical Wave capture and playback PCMs are not desktop endpoints. LibreWave must not publish a keepalive sink, null sink, raw helper source, duplicate physical Wave node, or another implementation object as an ordinary device. KDE, `wpctl status`, and PulseAudio-compatible listings form the visibility acceptance test. Low-level diagnostic tools may still show internal objects needed to inspect the graph.
+
+The host connects to the user's existing PipeWire instance and completes a registry round trip. It checks the admitted candidate's exact ALSA card number. A Device global must have the Wave:3 vendor and product values, and its `api.alsa.card` value must identify that card. A Node global matches through the card component of `api.alsa.path`. Node globals do not need vendor or product properties. Startup fails while any matching Device or Node global remains visible.
+
+Endpoint plans come only from `librewave-core`. The current plans are three PipeWire output streams with `media.class=Audio/Source`, `node.virtual=true`, and stable `librewave.*` names. The current portable code has no engine that can supply negotiated frames for these streams. The production adapter therefore returns `engine unavailable` before it creates an endpoint. Playback remains prepared, not active, at this boundary. The adapter does not publish silence or report the graph as ready.
 
 ## Volume ownership
 
@@ -87,11 +99,11 @@ The final mapping must also match the observed Wave Link behavior on Windows and
 
 `librewavectl setup` shows its plan before it changes the system. It stages the current CLI and daemon, switches stable links, installs an inactive daemon unit, and requests elevation only for the exact udev access rule.
 
-Setup does not install or reload the WirePlumber fragment. It does not enable the unit, start the daemon, open ALSA, or publish PipeWire objects. `librewavectl doctor` reports production audio ownership as blocked and graph inspection as not implemented. The lifecycle contract in [Setup, development installs, and removal](setup.md) governs installation, rollback, diagnostics, and removal.
+Setup does not install or reload the WirePlumber fragment. It does not enable the unit, start the daemon, open ALSA, or publish PipeWire objects. `librewavectl doctor` reports production audio ownership as blocked and graph inspection as not implemented. The host resource snapshot is not yet part of daemon reconciliation or doctor output. The lifecycle contract in [Setup, development installs, and removal](setup.md) governs installation, rollback, diagnostics, and removal.
 
 ## Work still required
 
-The direct ALSA and PipeWire backend needs a focused implementation and hardware test plan. Completion requires all of these results:
+The endpoint engine, daemon composition, and live hardware plan remain required. Completion requires all of these results:
 
 - `librewaved` owns the physical capture and playback PCMs directly.
 - Capture consumption produces confirmed frames before playback opens.
@@ -99,6 +111,8 @@ The direct ALSA and PipeWire backend needs a focused implementation and hardware
 - No helper, null sink, or physical Wave node appears as a desktop device.
 - Restart, reconnect, sleep, login, teardown, and rollback tests pass on the reference system.
 - Software volume changes cannot write microphone gain or headphone hardware level.
+
+Native validation must confirm the PCM state transitions after ALSA recovers `EPIPE` and `ESTRPIPE`. The default fake test confirms xrun observation, but it cannot reproduce the driver's recovery state.
 
 Do not claim Linux audio backend support until these tests pass.
 

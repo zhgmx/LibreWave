@@ -35,6 +35,52 @@ The persistent journal records setup or removal progress. Setup validates the co
 
 Removal validates every owned path before its first deletion. If one path was already changed, removal stops and leaves all paths in place. It also revalidates each path at its mutation boundary. If a path changes after removal starts, removal stops there; earlier owned removals can already be complete, and the journal keeps the operation resumable. LibreWave never removes an extra path because it is under a broad directory or matches a filename pattern.
 
+## Build prerequisites
+
+Install the Rust toolchain from `rust-toolchain.toml` and the native development files before you run a Cargo or `xtask` build.
+
+On Ubuntu 24.04, install the same packages that CI uses:
+
+```text
+sudo apt-get update
+sudo apt-get install --no-install-recommends \
+  clang \
+  fontconfig \
+  libasound2-dev \
+  libfontconfig1-dev \
+  libpipewire-0.3-dev \
+  libusb-1.0-0-dev \
+  libx11-dev \
+  libxcb1-dev \
+  libxcb-render0-dev \
+  libxcb-shape0-dev \
+  libxcb-xfixes0-dev \
+  libxkbcommon-dev \
+  libxkbcommon-x11-dev \
+  libwayland-dev \
+  pkg-config
+```
+
+On Fedora, install these packages:
+
+```text
+sudo dnf install \
+  alsa-lib-devel \
+  clang \
+  fontconfig \
+  fontconfig-devel \
+  libusb1-devel \
+  libX11-devel \
+  libxcb-devel \
+  libxkbcommon-devel \
+  libxkbcommon-x11-devel \
+  pipewire-devel \
+  pkgconf-pkg-config \
+  wayland-devel
+```
+
+These packages are prerequisites for builds from source. They do not install or configure LibreWave.
+
 ## Source setup
 
 Build both runnable binaries before setup. A test build does not guarantee that the plain executable files are current.
@@ -61,7 +107,7 @@ Setup then:
 
 A failure before the manifest switch restores the previous paths byte for byte. A failure after the switch leaves a journal so the next setup can finish exact cleanup.
 
-Setup does not install or reload the WirePlumber card-disable rule. It does not enable the unit, start the daemon, open ALSA, or publish PipeWire objects. The production ALSA and PipeWire host does not exist yet, so setup cannot take ownership of the physical Wave card.
+Setup does not install or reload the WirePlumber card-disable rule. It does not enable the unit, start the daemon, open ALSA, or publish PipeWire objects. The direct host now owns and cleans up ALSA resources in code, but the portable endpoint engine does not exist and the live recovery tests have not run. Setup cannot take ownership of the physical Wave card.
 
 The udev refresh matches USB vendor `0fd9` and product `0070`. It does not trigger another USB product, a device interface, or firmware mode. If the privileged install or refresh operation fails, setup fails and does not claim that access is current. Rollback or journal recovery preserves or restores the prior rule state.
 

@@ -24,7 +24,9 @@ jobs:
           sudo apt-get install --no-install-recommends \
             clang \
             fontconfig \
+            libasound2-dev \
             libfontconfig1-dev \
+            libpipewire-0.3-dev \
             libusb-1.0-0-dev \
             libx11-dev \
             libxcb1-dev \

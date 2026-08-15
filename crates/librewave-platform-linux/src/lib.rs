@@ -1,16 +1,18 @@
-//! Linux USB control, discovery, and host-audio inventory.
+//! Linux USB control, discovery, and host-audio ownership.
 //!
 //! This crate can inspect the reviewed Wave:3 normal-mode USB device or open one
 //! exclusive vendor-control connection. The connection admits reads and typed,
 //! reversible writes through one handle. It does not claim audio interfaces,
-//! detach kernel drivers, change ALSA controls, create or remove `PipeWire`
-//! objects, or modify `WirePlumber`, udev, or systemd state.
+//! detach kernel drivers, change ALSA controls, or modify `WirePlumber`, udev,
+//! or systemd state. The audio host opens only a revalidated physical PCM. It
+//! does not publish product endpoints until a portable engine can supply them.
 
 use std::io;
 use std::path::PathBuf;
 
 pub use librewave_device::{DeviceIdentity, DeviceModel, UsbIdentity};
 
+pub mod audio_host;
 pub mod audio_lifecycle;
 pub mod audio_policy;
 mod discovery;

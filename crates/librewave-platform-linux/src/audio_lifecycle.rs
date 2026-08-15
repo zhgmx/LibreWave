@@ -1,11 +1,9 @@
 //! Deterministic, host-independent capture-first audio lifecycle.
 //!
-//! This module models the Linux graph contract without opening ALSA, talking
-//! to `PipeWire`, or changing `WirePlumber` state. A future platform adapter can
-//! implement [`AudioHost`] at this boundary after the physical graph design
-//! has been validated.
+//! The coordinator is host independent. The production Linux implementation
+//! lives in [`crate::audio_host`].
 
-use crate::{DeviceIdentity, UsbDeviceCandidate};
+use crate::UsbDeviceCandidate;
 use librewave_core::{DELIBERATE_ENDPOINTS, EndpointId};
 
 /// A physical node owned by the daemon and hidden from ordinary desktop
@@ -57,9 +55,8 @@ pub struct CaptureObservation {
 
 /// A host operation used by the lifecycle state machine.
 ///
-/// Implementations own all host mutation. This milestone provides no
-/// production implementation, so using the state machine cannot touch a live
-/// audio session.
+/// Implementations own all host mutation. The Linux implementation opens only
+/// resources that belong to the admitted candidate.
 pub trait AudioHost {
     /// The host-specific error type.
     type Error;
@@ -72,7 +69,7 @@ pub trait AudioHost {
     /// Returns the host-specific error when the verification cannot complete.
     fn verify_physical_nodes_hidden(
         &mut self,
-        device: DeviceIdentity,
+        candidate: &UsbDeviceCandidate,
         hidden_nodes: &[HiddenPhysicalNode],
     ) -> Result<(), Self::Error>;
 
@@ -81,7 +78,10 @@ pub trait AudioHost {
     /// # Errors
     ///
     /// Returns the host-specific error when capture cannot start.
-    fn start_capture(&mut self, device: DeviceIdentity) -> Result<CaptureConsumption, Self::Error>;
+    fn start_capture(
+        &mut self,
+        candidate: &UsbDeviceCandidate,
+    ) -> Result<CaptureConsumption, Self::Error>;
 
     /// Observes whether physical capture is active and making progress.
     ///
@@ -90,7 +90,7 @@ pub trait AudioHost {
     /// Returns the host-specific error when the observation cannot complete.
     fn observe_capture(
         &mut self,
-        device: DeviceIdentity,
+        candidate: &UsbDeviceCandidate,
         capture: &CaptureConsumption,
     ) -> Result<CaptureObservation, Self::Error>;
 
@@ -99,7 +99,7 @@ pub trait AudioHost {
     /// # Errors
     ///
     /// Returns the host-specific error when playback cannot start.
-    fn start_playback(&mut self, device: DeviceIdentity) -> Result<(), Self::Error>;
+    fn start_playback(&mut self, candidate: &UsbDeviceCandidate) -> Result<(), Self::Error>;
 
     /// Publishes only the deliberate user-facing endpoints.
     ///
@@ -108,7 +108,7 @@ pub trait AudioHost {
     /// Returns the host-specific error when endpoint publication cannot complete.
     fn publish_endpoints(
         &mut self,
-        device: DeviceIdentity,
+        candidate: &UsbDeviceCandidate,
         endpoints: &[EndpointId],
     ) -> Result<(), Self::Error>;
 
@@ -117,7 +117,10 @@ pub trait AudioHost {
     /// # Errors
     ///
     /// Returns the host-specific error when route restoration cannot complete.
-    fn restore_software_routing(&mut self, device: DeviceIdentity) -> Result<(), Self::Error>;
+    fn restore_software_routing(
+        &mut self,
+        candidate: &UsbDeviceCandidate,
+    ) -> Result<(), Self::Error>;
 
     /// Removes every object created by the current attempt.
     ///
@@ -243,17 +246,16 @@ impl AudioLifecycle {
         }
 
         self.cleanup_complete = false;
-        let device = candidate.identity;
         self.run_host_step(host, DegradedState::PhysicalNodesExposed, |host| {
-            host.verify_physical_nodes_hidden(device, &HIDDEN_PHYSICAL_NODES)
+            host.verify_physical_nodes_hidden(candidate, &HIDDEN_PHYSICAL_NODES)
         })?;
-        let capture = match host.start_capture(device) {
+        let capture = match host.start_capture(candidate) {
             Ok(capture) => capture,
             Err(source) => {
                 return self.host_failure(host, DegradedState::CaptureStartFailed, source);
             }
         };
-        let observation = match host.observe_capture(device, &capture) {
+        let observation = match host.observe_capture(candidate, &capture) {
             Ok(observation) => observation,
             Err(source) => {
                 return self.host_failure(host, DegradedState::CaptureNotConfirmed, source);
@@ -263,13 +265,13 @@ impl AudioLifecycle {
             return self.fail(host, DegradedState::CaptureNotConfirmed);
         }
         self.run_host_step(host, DegradedState::PlaybackStartFailed, |host| {
-            host.start_playback(device)
+            host.start_playback(candidate)
         })?;
         self.run_host_step(host, DegradedState::EndpointPublicationFailed, |host| {
-            host.publish_endpoints(device, DELIBERATE_ENDPOINTS)
+            host.publish_endpoints(candidate, DELIBERATE_ENDPOINTS)
         })?;
         self.run_host_step(host, DegradedState::RoutingRestoreFailed, |host| {
-            host.restore_software_routing(device)
+            host.restore_software_routing(candidate)
         })?;
         self.state = LifecycleState::Ready;
         Ok(())
@@ -411,7 +413,7 @@ impl AudioLifecycle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AlsaCardInfo, UsbTopology};
+    use crate::{AlsaCardInfo, DeviceIdentity, UsbTopology};
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Operation {
@@ -458,7 +460,7 @@ mod tests {
 
         fn verify_physical_nodes_hidden(
             &mut self,
-            _device: DeviceIdentity,
+            _candidate: &UsbDeviceCandidate,
             hidden_nodes: &[HiddenPhysicalNode],
         ) -> Result<(), Self::Error> {
             assert_eq!(hidden_nodes, &HIDDEN_PHYSICAL_NODES);
@@ -467,7 +469,7 @@ mod tests {
 
         fn start_capture(
             &mut self,
-            _device: DeviceIdentity,
+            _candidate: &UsbDeviceCandidate,
         ) -> Result<CaptureConsumption, Self::Error> {
             self.call(Operation::StartCapture)?;
             Ok(CaptureConsumption::new())
@@ -475,7 +477,7 @@ mod tests {
 
         fn observe_capture(
             &mut self,
-            _device: DeviceIdentity,
+            _candidate: &UsbDeviceCandidate,
             _capture: &CaptureConsumption,
         ) -> Result<CaptureObservation, Self::Error> {
             self.calls.push(Operation::ObserveCapture);
@@ -486,20 +488,23 @@ mod tests {
             }
         }
 
-        fn start_playback(&mut self, _device: DeviceIdentity) -> Result<(), Self::Error> {
+        fn start_playback(&mut self, _candidate: &UsbDeviceCandidate) -> Result<(), Self::Error> {
             self.call(Operation::StartPlayback)
         }
 
         fn publish_endpoints(
             &mut self,
-            _device: DeviceIdentity,
+            _candidate: &UsbDeviceCandidate,
             endpoints: &[EndpointId],
         ) -> Result<(), Self::Error> {
             assert_eq!(endpoints, DELIBERATE_ENDPOINTS);
             self.call(Operation::PublishEndpoints)
         }
 
-        fn restore_software_routing(&mut self, _device: DeviceIdentity) -> Result<(), Self::Error> {
+        fn restore_software_routing(
+            &mut self,
+            _candidate: &UsbDeviceCandidate,
+        ) -> Result<(), Self::Error> {
             self.call(Operation::RestoreRouting)
         }
 
