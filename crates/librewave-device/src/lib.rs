@@ -1,4 +1,4 @@
-//! Portable identity types and read-only sessions for supported Wave hardware.
+//! Portable identity types and admitted sessions for supported Wave hardware.
 
 use std::fmt;
 
@@ -7,10 +7,15 @@ pub use librewave_protocol::{
 };
 
 mod session;
+mod transaction;
 
 pub use session::{
     CONTROL_TRANSFER_TIMEOUT, ReadOnlyTransport, SessionError, SessionSchemaError, TransportError,
-    Wave3Session, probe_wave3,
+    Wave3Session, Wave3WriteState, probe_wave3,
+};
+pub use transaction::{
+    ControlWriteRequest, ControlWriteTransport, RestorationOutcome, TransactionError,
+    TransactionOutcome, TransactionPhase,
 };
 
 /// A USB vendor and product pair.

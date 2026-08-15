@@ -15,8 +15,8 @@ pub use setup::{
     SetupError, SetupPacket, decode_version_response, message_transfer, version_probe,
 };
 pub use wave3::{
-    VolumeSelect, Wave3Config, Wave3ConfigField, Wave3ControlState, Wave3GainDb, Wave3HeadphoneDb,
-    Wave3MonitorPercent, config_fields,
+    VolumeSelect, Wave3Config, Wave3ConfigField, Wave3ControlChange, Wave3ControlState,
+    Wave3GainDb, Wave3HeadphoneDb, Wave3MonitorPercent, config_fields,
 };
 
 #[cfg(test)]
@@ -224,6 +224,65 @@ mod tests {
                 reason: ValueError::WrongStep { .. }
             })
         ));
+    }
+
+    #[test]
+    fn typed_control_changes_use_the_schema_ranges_and_steps() {
+        assert_eq!(Wave3GainDb::from_raw_q8_8(10_240).map(Wave3GainDb::raw_q8_8), Ok(10_240));
+        assert!(matches!(Wave3GainDb::from_raw_q8_8(10_241), Err(ValueError::OutsideRange { .. })));
+        assert!(matches!(Wave3GainDb::from_raw_q8_8(1), Err(ValueError::WrongStep { .. })));
+        assert_eq!(
+            Wave3HeadphoneDb::from_raw_q8_8(-15_360).map(Wave3HeadphoneDb::raw_q8_8),
+            Ok(-15_360)
+        );
+        assert!(matches!(
+            Wave3HeadphoneDb::from_raw_q8_8(128),
+            Err(ValueError::OutsideRange { .. })
+        ));
+        assert_eq!(
+            Wave3MonitorPercent::from_raw_q8_8(25_600).map(Wave3MonitorPercent::raw_q8_8),
+            Ok(25_600)
+        );
+        assert!(matches!(Wave3MonitorPercent::from_raw_q8_8(1), Err(ValueError::WrongStep { .. })));
+    }
+
+    #[test]
+    fn every_reviewed_control_change_patches_only_its_schema_field() {
+        let changes = [
+            Wave3ControlChange::MicrophoneGain(
+                Wave3GainDb::from_raw_q8_8(512).expect("schema value"),
+            ),
+            Wave3ControlChange::MicrophoneMute(true),
+            Wave3ControlChange::Clipguard(true),
+            Wave3ControlChange::Lowcut(true),
+            Wave3ControlChange::HeadphoneVolume(
+                Wave3HeadphoneDb::from_raw_q8_8(-512).expect("schema value"),
+            ),
+            Wave3ControlChange::HeadphoneMute(true),
+            Wave3ControlChange::DirectMonitor(
+                Wave3MonitorPercent::from_raw_q8_8(1_280).expect("schema value"),
+            ),
+            Wave3ControlChange::VolumeSelect(VolumeSelect::Headphone),
+            Wave3ControlChange::AllLedsOff(true),
+            Wave3ControlChange::LedsFlip(true),
+            Wave3ControlChange::GainLock(true),
+        ];
+
+        for change in changes {
+            let mut config = config();
+            let original = *config.as_bytes();
+            assert_eq!(config.apply_control(change), Ok(PatchResult::Changed));
+            let changed_indexes: Vec<_> = original
+                .iter()
+                .zip(config.as_bytes())
+                .enumerate()
+                .filter_map(|(index, (before, after))| (before != after).then_some(index))
+                .collect();
+            let spec = config_field(change.field());
+            assert!(changed_indexes.iter().all(|index| *index >= spec.offset()));
+            assert!(changed_indexes.iter().all(|index| *index <= spec.offset() + 1));
+            assert_eq!(config.as_bytes()[2..4], original[2..4]);
+        }
     }
 
     #[test]

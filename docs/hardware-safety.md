@@ -71,7 +71,9 @@ A normal control write follows one path:
 8. Compare the selected field and all protected bytes.
 9. Report success or a precise mismatch.
 
-The session serializes writes per device. It rejects stale transactions instead of merging them with a newer baseline.
+One daemon-owned session accepts one mutable transaction at a time. The code that owns the platform transport and daemon session must ensure that only one admitted session exists for each device connection. A session rejects stale transactions instead of merging them with a newer baseline.
+
+If a failure occurs after a write attempt, the transaction makes one restoration attempt. It writes the complete original payload and reads the message again. The result includes both the first failure and the restoration result. If restoration cannot be verified, the session rejects more writes until a new admission probe succeeds.
 
 ## Physical test rules
 

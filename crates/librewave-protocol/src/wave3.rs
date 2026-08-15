@@ -28,6 +28,16 @@ impl VolumeSelect {
 pub struct Wave3GainDb(i32);
 
 impl Wave3GainDb {
+    /// Creates a microphone gain from a signed Q8.8 wire value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the value is outside the admitted range or step.
+    pub fn from_raw_q8_8(raw: i32) -> Result<Self, ValueError> {
+        validate_fixed(Wave3ConfigField::InputGain, raw)?;
+        Ok(Self(raw))
+    }
+
     /// Returns the signed Q8.8 wire value.
     #[must_use]
     pub const fn raw_q8_8(self) -> i32 {
@@ -50,6 +60,16 @@ impl Wave3GainDb {
 pub struct Wave3HeadphoneDb(i32);
 
 impl Wave3HeadphoneDb {
+    /// Creates a headphone level from a signed Q8.8 wire value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the value is outside the admitted range or step.
+    pub fn from_raw_q8_8(raw: i32) -> Result<Self, ValueError> {
+        validate_fixed(Wave3ConfigField::HeadphoneVolume, raw)?;
+        Ok(Self(raw))
+    }
+
     /// Returns the signed Q8.8 wire value.
     #[must_use]
     pub const fn raw_q8_8(self) -> i32 {
@@ -72,6 +92,16 @@ impl Wave3HeadphoneDb {
 pub struct Wave3MonitorPercent(i32);
 
 impl Wave3MonitorPercent {
+    /// Creates a direct-monitor balance from a Q8.8 percent wire value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the value is outside the admitted range or step.
+    pub fn from_raw_q8_8(raw: i32) -> Result<Self, ValueError> {
+        validate_fixed(Wave3ConfigField::DirectMonitor, raw)?;
+        Ok(Self(raw))
+    }
+
     /// Returns the Q8.8 wire value.
     #[must_use]
     pub const fn raw_q8_8(self) -> i32 {
@@ -129,6 +159,66 @@ pub enum Wave3ConfigField {
     AllLedsOff,
     LedsFlip,
     GainLock,
+}
+
+/// One reviewed Wave:3 hardware control change.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Wave3ControlChange {
+    MicrophoneGain(Wave3GainDb),
+    MicrophoneMute(bool),
+    Clipguard(bool),
+    Lowcut(bool),
+    HeadphoneVolume(Wave3HeadphoneDb),
+    HeadphoneMute(bool),
+    DirectMonitor(Wave3MonitorPercent),
+    VolumeSelect(VolumeSelect),
+    AllLedsOff(bool),
+    LedsFlip(bool),
+    GainLock(bool),
+}
+
+impl Wave3ControlChange {
+    #[must_use]
+    pub const fn field(self) -> Wave3ConfigField {
+        match self {
+            Self::MicrophoneGain(_) => Wave3ConfigField::InputGain,
+            Self::MicrophoneMute(_) => Wave3ConfigField::InputMute,
+            Self::Clipguard(_) => Wave3ConfigField::ClipguardEnable,
+            Self::Lowcut(_) => Wave3ConfigField::LowcutEnable,
+            Self::HeadphoneVolume(_) => Wave3ConfigField::HeadphoneVolume,
+            Self::HeadphoneMute(_) => Wave3ConfigField::HeadphoneMute,
+            Self::DirectMonitor(_) => Wave3ConfigField::DirectMonitor,
+            Self::VolumeSelect(_) => Wave3ConfigField::VolumeSelect,
+            Self::AllLedsOff(_) => Wave3ConfigField::AllLedsOff,
+            Self::LedsFlip(_) => Wave3ConfigField::LedsFlip,
+            Self::GainLock(_) => Wave3ConfigField::GainLock,
+        }
+    }
+
+    const fn value(self) -> crate::SemanticValue {
+        match self {
+            Self::MicrophoneGain(value) => crate::SemanticValue::FixedPoint {
+                raw: value.raw_q8_8(),
+                fractional_bits: Q8_8_FRACTIONAL_BITS,
+            },
+            Self::MicrophoneMute(value)
+            | Self::Clipguard(value)
+            | Self::Lowcut(value)
+            | Self::HeadphoneMute(value)
+            | Self::AllLedsOff(value)
+            | Self::LedsFlip(value)
+            | Self::GainLock(value) => crate::SemanticValue::Boolean(value),
+            Self::HeadphoneVolume(value) => crate::SemanticValue::FixedPoint {
+                raw: value.raw_q8_8(),
+                fractional_bits: Q8_8_FRACTIONAL_BITS,
+            },
+            Self::DirectMonitor(value) => crate::SemanticValue::FixedPoint {
+                raw: value.raw_q8_8(),
+                fractional_bits: Q8_8_FRACTIONAL_BITS,
+            },
+            Self::VolumeSelect(value) => crate::SemanticValue::Enum(value as u8),
+        }
+    }
 }
 
 const RW: Access = Access::READ_WRITE;
@@ -204,6 +294,13 @@ pub(crate) fn field_spec(field: Wave3ConfigField) -> &'static FieldSpec {
         .iter()
         .find(|spec| spec.field() == field)
         .expect("every Wave3ConfigField has a schema entry")
+}
+
+fn validate_fixed(field: Wave3ConfigField, raw: i32) -> Result<(), ValueError> {
+    crate::codec::validate(
+        &field_spec(field).codec(),
+        crate::SemanticValue::FixedPoint { raw, fractional_bits: Q8_8_FRACTIONAL_BITS },
+    )
 }
 
 pub(crate) fn is_config_schema(schema: &MessageSchema) -> bool {
@@ -328,5 +425,17 @@ impl Wave3Config {
         value: crate::SemanticValue,
     ) -> Result<crate::PatchResult, crate::CodecError> {
         crate::codec::patch_field(self.schema, *field_spec(field), &mut self.bytes, value)
+    }
+
+    /// Applies one typed control change to this complete baseline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the admitted schema rejects the field or value.
+    pub fn apply_control(
+        &mut self,
+        change: Wave3ControlChange,
+    ) -> Result<crate::PatchResult, crate::CodecError> {
+        self.set(change.field(), change.value())
     }
 }

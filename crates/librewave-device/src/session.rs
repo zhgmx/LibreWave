@@ -7,13 +7,13 @@ use librewave_protocol::{
 use std::fmt;
 use std::time::Duration;
 
-/// The maximum duration of every Wave USB control read.
+/// The maximum duration of every reviewed Wave USB control transfer.
 pub const CONTROL_TRANSFER_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// A transport that can perform only device-to-host USB control transfers.
 ///
-/// The portable session deliberately has no write operation. Platform adapters
-/// must return the number of bytes completed by the underlying transfer.
+/// This trait deliberately has no write operation. Platform adapters must
+/// return the number of bytes completed by the underlying transfer.
 pub trait ReadOnlyTransport {
     /// Performs one control read into `response`.
     ///
@@ -45,7 +45,7 @@ impl fmt::Display for TransportError {
             Self::NotFound => "USB device not found",
             Self::PermissionDenied => "USB device access denied",
             Self::Busy => "USB device interface is busy",
-            Self::TimedOut => "USB control read timed out",
+            Self::TimedOut => "USB control transfer timed out",
             Self::Disconnected => "USB device disconnected",
             Self::Io => "USB transport error",
         })
@@ -129,12 +129,21 @@ impl std::error::Error for SessionError {
     }
 }
 
-/// The admitted API version and complete initial configuration for a Wave:3.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// The admitted API version and current complete configuration for a Wave:3.
+#[derive(Debug, Eq, PartialEq)]
 pub struct Wave3Session {
-    identity: DeviceIdentity,
-    api: ApiVersion,
-    config: Wave3Config,
+    pub(crate) identity: DeviceIdentity,
+    pub(crate) api: ApiVersion,
+    pub(crate) control_interface: u8,
+    pub(crate) config: Wave3Config,
+    pub(crate) write_state: Wave3WriteState,
+}
+
+/// Whether a Wave:3 session can start a reviewed control transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Wave3WriteState {
+    Ready,
+    NeedsReprobe,
 }
 
 impl Wave3Session {
@@ -151,6 +160,11 @@ impl Wave3Session {
     #[must_use]
     pub const fn config(&self) -> &Wave3Config {
         &self.config
+    }
+
+    #[must_use]
+    pub const fn write_state(&self) -> Wave3WriteState {
+        self.write_state
     }
 
     /// Returns the typed, read-only hardware controls from the admitted baseline.
@@ -196,7 +210,13 @@ pub fn probe_wave3(
             .map_err(|error| SessionError::Schema(SessionSchemaError::Configuration(error)))?;
     }
 
-    Ok(Wave3Session { identity: DeviceIdentity::wave3(), api, config })
+    Ok(Wave3Session {
+        identity: DeviceIdentity::wave3(),
+        api,
+        control_interface: interface,
+        config,
+        write_state: Wave3WriteState::Ready,
+    })
 }
 
 fn read_exact(

@@ -97,7 +97,7 @@ fn check_payload(payload: &[u8], expected: usize) -> Result<(), CodecError> {
     }
 }
 
-fn validate(field: &FieldCodec, value: SemanticValue) -> Result<(), ValueError> {
+pub(crate) fn validate(field: &FieldCodec, value: SemanticValue) -> Result<(), ValueError> {
     match *field {
         FieldCodec::Boolean => match value {
             SemanticValue::Boolean(_) => Ok(()),
