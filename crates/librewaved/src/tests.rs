@@ -1,6 +1,6 @@
 use super::*;
 use crate::PersistenceError;
-use librewave_core::{AudioSnapshot, ServiceFailureReason, ServiceState};
+use librewave_core::{AudioSnapshot, FaderGain, ServiceFailureReason, ServiceState};
 use librewave_platform_linux::ServiceAvailability;
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -74,6 +74,51 @@ struct FakeStore {
     state: Rc<RefCell<DesiredState>>,
     actions: Rc<RefCell<VecDeque<SaveAction>>>,
     saves: Rc<RefCell<usize>>,
+}
+
+struct FakeMixerStore {
+    profile: Rc<RefCell<MixerProfile>>,
+    actions: Rc<RefCell<VecDeque<SaveAction>>>,
+    saves: Rc<RefCell<usize>>,
+}
+
+impl MixerStateStore for FakeMixerStore {
+    fn load(&mut self) -> Result<MixerProfile, PersistenceError> {
+        Ok(self.profile.borrow().clone())
+    }
+
+    fn save(&mut self, profile: &MixerProfile) -> Result<(), PersistenceError> {
+        *self.saves.borrow_mut() += 1;
+        match self.actions.borrow_mut().pop_front().unwrap_or(SaveAction::Ok) {
+            SaveAction::Ok => {
+                *self.profile.borrow_mut() = profile.clone();
+                Ok(())
+            }
+            SaveAction::Before => Err(PersistenceError::SaveBeforeRename(std::io::Error::other(
+                "injected mixer save failure",
+            ))),
+            SaveAction::After => {
+                *self.profile.borrow_mut() = profile.clone();
+                Err(PersistenceError::SaveAfterRename(std::io::Error::other(
+                    "injected mixer directory sync failure",
+                )))
+            }
+        }
+    }
+}
+
+fn mixer_daemon(
+    actions: Vec<SaveAction>,
+) -> (Daemon, Rc<RefCell<MixerProfile>>, Rc<RefCell<usize>>) {
+    let profile = Rc::new(RefCell::new(MixerProfile::default()));
+    let saves = Rc::new(RefCell::new(0));
+    let store = FakeMixerStore {
+        profile: Rc::clone(&profile),
+        actions: Rc::new(RefCell::new(VecDeque::from(actions))),
+        saves: Rc::clone(&saves),
+    };
+    let daemon = Daemon::with_mixer_store(Snapshot::empty(), Box::new(store));
+    (daemon, profile, saves)
 }
 
 impl DesiredStateStore for FakeStore {
@@ -180,6 +225,7 @@ fn harness(
             pipewire: ServiceState::Available,
             wireplumber: ServiceState::Available,
         },
+        mixer: librewave_core::MixerSnapshot::default(),
     };
     let calls = Rc::new(RefCell::new(Vec::new()));
     let connections = Rc::new(RefCell::new(0));
@@ -240,9 +286,180 @@ fn deterministic_snapshot_is_returned_by_status_and_devices() {
             pipewire: ServiceState::Available,
             wireplumber: ServiceState::Unavailable { reason: ServiceFailureReason::NotRunning },
         },
+        mixer: librewave_core::MixerSnapshot::default(),
     };
     let daemon = Daemon::from_snapshot(snapshot);
     assert_eq!(daemon.snapshot().devices.len(), 1);
+}
+
+#[test]
+fn mixer_get_and_route_change_persist_before_advancing_both_generations() {
+    let (mut daemon, persisted, saves) = mixer_daemon(vec![SaveAction::Ok]);
+    let response =
+        daemon.handle(Command::GetMixer, librewave_core::Origin::Client).expect("get mixer");
+    assert_eq!(response, Response::Mixer { mixer: MixerSnapshot::default() });
+
+    let route = MixRoute::new(false, FaderGain::from_half_decibel_steps(-1).expect("valid fader"));
+    let response = daemon
+        .handle(
+            Command::SetMixerRoute {
+                expected_generation: MixerGeneration(0),
+                source: librewave_core::SYSTEM_SOURCE_ID,
+                target: MixTarget::Stream,
+                route,
+            },
+            librewave_core::Origin::Client,
+        )
+        .expect("change mixer route");
+    let Response::MixerRouteChanged { mixer } = response else {
+        panic!("unexpected mixer response")
+    };
+    assert_eq!(mixer.generation(), MixerGeneration(1));
+    assert_eq!(daemon.snapshot().generation, 1);
+    assert_eq!(
+        mixer
+            .profile
+            .source(librewave_core::SYSTEM_SOURCE_ID)
+            .expect("system source")
+            .controls
+            .stream(),
+        route
+    );
+    assert_eq!(*saves.borrow(), 1);
+    assert_eq!(*persisted.borrow(), mixer.profile);
+}
+
+#[test]
+fn unchanged_mixer_route_is_success_without_persistence_or_generation_change() {
+    let (mut daemon, persisted, saves) = mixer_daemon(Vec::new());
+    let response = daemon
+        .handle(
+            Command::SetMixerRoute {
+                expected_generation: MixerGeneration(0),
+                source: librewave_core::MICROPHONE_SOURCE_ID,
+                target: MixTarget::Monitor,
+                route: MixRoute::new(true, FaderGain::UNITY),
+            },
+            librewave_core::Origin::Client,
+        )
+        .expect("unchanged mixer route");
+    assert_eq!(response, Response::MixerRouteChanged { mixer: MixerSnapshot::default() });
+    assert_eq!(daemon.snapshot().generation, 0);
+    assert_eq!(*saves.borrow(), 0);
+    assert_eq!(*persisted.borrow(), MixerProfile::default());
+}
+
+#[test]
+fn mixer_route_rejects_stale_generation_and_unknown_source_without_saving() {
+    let (mut daemon, _persisted, saves) = mixer_daemon(Vec::new());
+    let route = MixRoute::new(false, FaderGain::UNITY);
+    let stale = daemon
+        .handle(
+            Command::SetMixerRoute {
+                expected_generation: MixerGeneration(4),
+                source: librewave_core::MICROPHONE_SOURCE_ID,
+                target: MixTarget::Monitor,
+                route,
+            },
+            librewave_core::Origin::Client,
+        )
+        .expect_err("stale generation");
+    assert_eq!(
+        stale.kind,
+        IpcErrorKind::StaleMixerGeneration {
+            expected: MixerGeneration(4),
+            actual: MixerGeneration(0),
+        }
+    );
+    let unknown = daemon
+        .handle(
+            Command::SetMixerRoute {
+                expected_generation: MixerGeneration(0),
+                source: SourceId::new(99),
+                target: MixTarget::Monitor,
+                route,
+            },
+            librewave_core::Origin::Client,
+        )
+        .expect_err("unknown source");
+    assert_eq!(unknown.kind, IpcErrorKind::MixerSourceNotFound { id: SourceId::new(99) });
+    assert_eq!(*saves.borrow(), 0);
+    assert_eq!(daemon.snapshot().generation, 0);
+}
+
+#[test]
+fn exhausted_mixer_generation_rejects_without_saving_or_changing_state() {
+    let mut snapshot = Snapshot::empty();
+    snapshot.mixer.profile.generation = MixerGeneration(u64::MAX);
+    let profile = Rc::new(RefCell::new(snapshot.mixer.profile.clone()));
+    let saves = Rc::new(RefCell::new(0));
+    let store = FakeMixerStore {
+        profile: Rc::clone(&profile),
+        actions: Rc::new(RefCell::new(VecDeque::new())),
+        saves: Rc::clone(&saves),
+    };
+    let mut daemon = Daemon::with_mixer_store(snapshot, Box::new(store));
+    let before = daemon.snapshot().clone();
+    let error = daemon
+        .handle(
+            Command::SetMixerRoute {
+                expected_generation: MixerGeneration(u64::MAX),
+                source: librewave_core::MICROPHONE_SOURCE_ID,
+                target: MixTarget::Monitor,
+                route: MixRoute::new(false, FaderGain::UNITY),
+            },
+            librewave_core::Origin::Client,
+        )
+        .expect_err("generation exhaustion");
+    assert_eq!(error.kind, IpcErrorKind::MixerGenerationExhausted);
+    assert_eq!(daemon.snapshot(), &before);
+    assert_eq!(*saves.borrow(), 0);
+    assert_eq!(profile.borrow().generation, MixerGeneration(u64::MAX));
+}
+
+#[test]
+fn mixer_pre_rename_failure_leaves_persisted_and_retained_state_unchanged() {
+    let (mut daemon, persisted, saves) = mixer_daemon(vec![SaveAction::Before]);
+    let error = daemon
+        .handle(
+            Command::SetMixerRoute {
+                expected_generation: MixerGeneration(0),
+                source: librewave_core::MICROPHONE_SOURCE_ID,
+                target: MixTarget::Stream,
+                route: MixRoute::new(false, FaderGain::UNITY),
+            },
+            librewave_core::Origin::Client,
+        )
+        .expect_err("pre-rename failure");
+    assert_eq!(error.kind, IpcErrorKind::MixerPersistence);
+    assert_eq!(daemon.snapshot(), &Snapshot::empty());
+    assert_eq!(*persisted.borrow(), MixerProfile::default());
+    assert_eq!(*saves.borrow(), 1);
+}
+
+#[test]
+fn mixer_post_rename_ambiguity_keeps_retained_state_and_retry_converges() {
+    let (mut daemon, persisted, saves) = mixer_daemon(vec![SaveAction::After, SaveAction::Ok]);
+    let command = Command::SetMixerRoute {
+        expected_generation: MixerGeneration(0),
+        source: librewave_core::MICROPHONE_SOURCE_ID,
+        target: MixTarget::Stream,
+        route: MixRoute::new(false, FaderGain::UNITY),
+    };
+    let error =
+        daemon.handle(command, librewave_core::Origin::Client).expect_err("post-rename ambiguity");
+    assert_eq!(error.kind, IpcErrorKind::MixerPersistenceAmbiguous);
+    assert_eq!(daemon.snapshot(), &Snapshot::empty());
+    assert_eq!(persisted.borrow().generation, MixerGeneration(1));
+
+    let response = daemon.handle(command, librewave_core::Origin::Client).expect("retry converges");
+    let Response::MixerRouteChanged { mixer } = response else {
+        panic!("unexpected mixer response")
+    };
+    assert_eq!(mixer.profile, *persisted.borrow());
+    assert_eq!(mixer.generation(), MixerGeneration(1));
+    assert_eq!(daemon.snapshot().generation, 1);
+    assert_eq!(*saves.borrow(), 2);
 }
 
 #[test]
@@ -267,6 +484,7 @@ fn from_snapshot_seeds_allocator_above_existing_ids() {
             pipewire: ServiceState::Available,
             wireplumber: ServiceState::Available,
         },
+        mixer: librewave_core::MixerSnapshot::default(),
     };
     let mut daemon = Daemon::from_snapshot(snapshot);
     let (refreshed, _) = daemon.snapshot_from_inventory(HostAudioInventory {
@@ -304,6 +522,7 @@ fn listed_candidate_survives_disconnect_and_can_reconnect_without_refresh() {
             pipewire: ServiceState::Available,
             wireplumber: ServiceState::Available,
         },
+        mixer: librewave_core::MixerSnapshot::default(),
     };
     let admitted = DeviceAdmissionSnapshot::Admitted {
         api: librewave_core::ApiVersion::new(5, 4),
@@ -1026,6 +1245,7 @@ fn invalid_loaded_topology_or_control_fails_before_connection() {
             LinuxInventory::new(),
             librewave_platform_linux::DiscoveryPaths::default(),
             Box::new(store),
+            Box::new(MemoryMixerStore::default()),
             move |_| {
                 *connector_calls.borrow_mut() += 1;
                 Err(AdmissionError::Transport)

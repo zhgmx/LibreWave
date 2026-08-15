@@ -1,10 +1,10 @@
-use crate::config::{CHANNELS, MAX_SOURCES, MixerConfig, SourceId};
+use crate::ENDPOINT_COUNT;
+use crate::config::{CHANNELS, MAX_SOURCES, MixerConfig};
 use crate::meter::{BlockMeters, StereoAccumulator, endpoint_index, finish_block};
 use crate::transfer::{
     ControlConsumer, ControlMappingError, ControlSnapshot, ControlStager, compile_snapshot,
 };
-use crate::{ENDPOINT_COUNT, SourceControls};
-use librewave_core::EndpointId;
+use librewave_core::{EndpointId, SourceControls, SourceId};
 use std::fmt;
 
 /// One explicitly identified stereo interleaved input buffer.

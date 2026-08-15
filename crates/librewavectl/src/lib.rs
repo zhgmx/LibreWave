@@ -1,8 +1,10 @@
 #![doc = "The complete headless `LibreWave` command-line client."]
 
 use librewave_core::{
-    DeviceAdmissionSnapshot, DeviceGeneration, DeviceId, DeviceSnapshot, FixedPointValue,
-    ServiceState, Snapshot, VolumeSelection, Wave3ConfigSnapshot, Wave3Control,
+    DeviceAdmissionSnapshot, DeviceGeneration, DeviceId, DeviceSnapshot, FaderGain,
+    FixedPointValue, MeterAvailability, MixRoute, MixTarget, MixerGeneration, MixerRuntimeState,
+    MixerSnapshot, ServiceState, Snapshot, SourceId, VolumeSelection, Wave3ConfigSnapshot,
+    Wave3Control,
 };
 use librewave_ipc::Response;
 use librewave_platform_linux::ipc::{Client, ClientError};
@@ -49,11 +51,113 @@ where
         [devices, set, id, generation, control, value] if devices == "devices" && set == "set" => {
             request_control_change(socket_path, id, generation, control, value, output, errors)
         }
+        [mixer, show] if mixer == "mixer" && show == "show" => {
+            request_mixer(socket_path, output, errors)
+        }
+        [mixer, set, source, generation, target, enabled, level]
+            if mixer == "mixer" && set == "set" =>
+        {
+            request_mixer_change(
+                socket_path,
+                source,
+                generation,
+                target,
+                enabled,
+                level,
+                output,
+                errors,
+            )
+        }
         _ => {
             writeln!(errors, "error: invalid command; run `librewavectl help`")?;
             Ok(2)
         }
     }
+}
+
+fn request_mixer<O, E>(socket_path: &Path, output: &mut O, errors: &mut E) -> io::Result<i32>
+where
+    O: Write,
+    E: Write,
+{
+    match request(socket_path, librewave_core::Command::GetMixer) {
+        Ok(Response::Mixer { mixer }) => {
+            write_mixer(output, &mixer)?;
+            Ok(0)
+        }
+        Ok(_) => {
+            writeln!(errors, "error: daemon returned an unexpected mixer response")?;
+            Ok(1)
+        }
+        Err(error) => write_client_error(error, errors),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn request_mixer_change<O, E>(
+    socket_path: &Path,
+    source: &str,
+    generation: &str,
+    target: &str,
+    enabled: &str,
+    level: &str,
+    output: &mut O,
+    errors: &mut E,
+) -> io::Result<i32>
+where
+    O: Write,
+    E: Write,
+{
+    let command = match parse_mixer_change(source, generation, target, enabled, level) {
+        Ok(command) => command,
+        Err(message) => {
+            writeln!(errors, "error: {message}")?;
+            return Ok(2);
+        }
+    };
+    match request(socket_path, command) {
+        Ok(Response::MixerRouteChanged { mixer }) => {
+            write_mixer(output, &mixer)?;
+            Ok(0)
+        }
+        Ok(_) => {
+            writeln!(errors, "error: daemon returned an unexpected mixer response")?;
+            Ok(1)
+        }
+        Err(error) => write_client_error(error, errors),
+    }
+}
+
+fn parse_mixer_change(
+    source: &str,
+    generation: &str,
+    target: &str,
+    enabled: &str,
+    level: &str,
+) -> Result<librewave_core::Command, String> {
+    let source = source
+        .parse::<u16>()
+        .map(SourceId::new)
+        .map_err(|_| "source ID must be an integer from 0 through 65535".to_owned())?;
+    let expected_generation = generation
+        .parse::<u64>()
+        .map(MixerGeneration)
+        .map_err(|_| "mixer generation must be a nonnegative integer".to_owned())?;
+    let target = match target {
+        "monitor" => MixTarget::Monitor,
+        "stream" => MixTarget::Stream,
+        _ => return Err("mix target must be monitor or stream".to_owned()),
+    };
+    let enabled = parse_switch(enabled)?;
+    let decibels =
+        level.parse::<f32>().map_err(|_| "fader level must be a decimal number".to_owned())?;
+    let fader = FaderGain::from_decibels(decibels).map_err(|error| error.to_string())?;
+    Ok(librewave_core::Command::SetMixerRoute {
+        expected_generation,
+        source,
+        target,
+        route: MixRoute::new(enabled, fader),
+    })
 }
 
 fn request_control_change<O, E>(
@@ -302,8 +406,49 @@ fn write_status<W: Write>(output: &mut W, snapshot: &Snapshot) -> io::Result<()>
     writeln!(output, "Protocol: {}", librewave_ipc::PROTOCOL_VERSION)?;
     writeln!(output, "State generation: {}", snapshot.generation)?;
     writeln!(output, "Devices: {}", snapshot.devices.len())?;
+    writeln!(
+        output,
+        "Mixer: generation {}, inactive, {} sources",
+        snapshot.mixer.generation(),
+        snapshot.mixer.profile.sources.len()
+    )?;
     write_service(output, "PipeWire", &snapshot.audio.pipewire)?;
     write_service(output, "WirePlumber", &snapshot.audio.wireplumber)
+}
+
+fn write_mixer<W: Write>(output: &mut W, mixer: &MixerSnapshot) -> io::Result<()> {
+    writeln!(output, "Mixer generation: {}", mixer.generation())?;
+    match mixer.runtime {
+        MixerRuntimeState::Inactive { reason } => {
+            writeln!(output, "Runtime: inactive ({reason})")?;
+        }
+    }
+    match mixer.meters {
+        MeterAvailability::Unavailable { reason } => {
+            writeln!(output, "Meters: unavailable ({reason})")?;
+        }
+    }
+    writeln!(output, "Microphone source: {}", mixer.profile.microphone_source)?;
+    writeln!(output, "Sources:")?;
+    for source in &mixer.profile.sources {
+        writeln!(output, "  {}  {}  role={}", source.controls.source(), source.name, source.role)?;
+        write_mix_route(output, "Monitor", source.controls.monitor())?;
+        write_mix_route(output, "Stream", source.controls.stream())?;
+    }
+    Ok(())
+}
+
+fn write_mix_route<W: Write>(output: &mut W, name: &str, route: MixRoute) -> io::Result<()> {
+    writeln!(output, "    {name}: {}, {} dB", on_off(route.enabled()), format_fader(route.fader()))
+}
+
+fn format_fader(fader: FaderGain) -> String {
+    let steps = i32::from(fader.half_decibel_steps());
+    if steps % 2 == 0 {
+        return (steps / 2).to_string();
+    }
+    let sign = if steps < 0 { "-" } else { "" };
+    format!("{sign}{}.5", steps.abs() / 2)
 }
 
 fn write_service<W: Write>(output: &mut W, name: &str, state: &ServiceState) -> io::Result<()> {
@@ -446,6 +591,8 @@ fn write_help<W: Write>(output: &mut W) -> io::Result<()> {
         output,
         "  devices set <id> <generation> <control> <value>  Set one Wave:3 hardware control"
     )?;
+    writeln!(output, "  mixer show      Show desired mixer state and runtime availability")?;
+    writeln!(output, "  mixer set <source-id> <generation> <monitor|stream> <on|off> <level-db>")?;
     writeln!(output)?;
     writeln!(output, "Wave:3 controls:")?;
     writeln!(output, "  microphone-gain  0 to 40 dB in 0.5 dB steps")?;
@@ -457,6 +604,7 @@ fn write_help<W: Write>(output: &mut W) -> io::Result<()> {
     )?;
     writeln!(output, "  knob-target      microphone, headphone, or mix")?;
     writeln!(output, "Use the device generation shown by `librewavectl devices inspect <id>`.")?;
+    writeln!(output, "Use the mixer generation shown by `librewavectl mixer show`.")?;
     writeln!(output, "  setup           Install the current build")?;
     writeln!(output, "  doctor          Check the installation")?;
     writeln!(output, "  uninstall       Remove manifest-owned files")
@@ -488,6 +636,7 @@ mod tests {
                 pipewire: ServiceState::Available,
                 wireplumber: ServiceState::Unavailable { reason: ServiceFailureReason::NotRunning },
             },
+            mixer: librewave_core::MixerSnapshot::default(),
         }
     }
 
@@ -497,7 +646,7 @@ mod tests {
         write_status(&mut output, &snapshot()).expect("render status");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "Daemon: connected\nProtocol: 3\nState generation: 4\nDevices: 1\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
+            "Daemon: connected\nProtocol: 4\nState generation: 4\nDevices: 1\nMixer: generation 0, inactive, 2 sources\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
         );
     }
 
@@ -680,6 +829,71 @@ mod tests {
         assert!(output.contains("setup"));
         assert!(output.contains("doctor"));
         assert!(output.contains("uninstall"));
+        assert!(output.contains("mixer show"));
+        assert!(output.contains("mixer set <source-id> <generation>"));
+    }
+
+    #[test]
+    fn mixer_parser_uses_the_core_fader_validator() {
+        let command =
+            parse_mixer_change("2", "7", "stream", "off", "-0.5").expect("valid mixer command");
+        assert_eq!(
+            command,
+            librewave_core::Command::SetMixerRoute {
+                expected_generation: MixerGeneration(7),
+                source: SourceId::new(2),
+                target: MixTarget::Stream,
+                route: MixRoute::new(
+                    false,
+                    FaderGain::from_half_decibel_steps(-1).expect("valid fader")
+                ),
+            }
+        );
+        for level in ["NaN", "inf", "-inf", "-60.5", "12.5", "0.25"] {
+            assert!(
+                parse_mixer_change("1", "0", "monitor", "on", level).is_err(),
+                "accepted {level}"
+            );
+        }
+        assert!(parse_mixer_change("1", "0", "auxiliary", "on", "0").is_err());
+        assert!(parse_mixer_change("1", "0", "monitor", "yes", "0").is_err());
+    }
+
+    #[test]
+    fn invalid_mixer_level_exits_before_ipc_through_the_public_run_path() {
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        let exit = run(
+            ["librewavectl", "mixer", "set", "1", "0", "monitor", "on", "0.25"].map(str::to_owned),
+            Path::new("/unused"),
+            &mut output,
+            &mut errors,
+        )
+        .expect("render invalid mixer command");
+        assert_eq!(exit, 2);
+        assert!(output.is_empty());
+        assert_eq!(
+            String::from_utf8(errors).expect("UTF-8"),
+            "error: fader gain must use exact 0.5 dB steps\n"
+        );
+    }
+
+    #[test]
+    fn mixer_output_is_exact_deterministic_and_explicitly_inactive() {
+        let mut mixer = MixerSnapshot::default();
+        mixer.profile.generation = MixerGeneration(3);
+        mixer.profile.sources[0].controls = mixer.profile.sources[0].controls.with_route(
+            MixTarget::Monitor,
+            MixRoute::new(true, FaderGain::from_half_decibel_steps(-1).expect("valid fader")),
+        );
+        let mut output = Vec::new();
+        write_mixer(&mut output, &mixer).expect("render mixer");
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8"),
+            "Mixer generation: 3\nRuntime: inactive (audio host and mixer engine are not connected)\nMeters: unavailable (audio host and mixer engine are not connected)\nMicrophone source: 1\nSources:\n  1  Microphone  role=microphone\n    Monitor: on, -0.5 dB\n    Stream: on, 0 dB\n  2  System  role=system\n    Monitor: on, 0 dB\n    Stream: on, 0 dB\n"
+        );
+        assert_eq!(format_fader(FaderGain::MAX), "12");
+        assert_eq!(format_fader(FaderGain::MIN), "-60");
     }
 
     #[test]

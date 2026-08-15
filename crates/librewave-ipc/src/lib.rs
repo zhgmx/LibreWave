@@ -1,11 +1,13 @@
 #![doc = "Portable versioned messages and codecs for `LibreWave` IPC."]
 
-use librewave_core::{Command, DeviceId, DeviceSnapshot, Snapshot};
+use librewave_core::{
+    Command, DeviceId, DeviceSnapshot, MixerGeneration, MixerSnapshot, Snapshot, SourceId,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// The current local request/response protocol version.
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 /// The maximum encoded JSON payload accepted by the local protocol.
 pub const MAX_FRAME_SIZE: usize = 1024 * 1024;
 
@@ -35,6 +37,10 @@ pub enum Response {
     DeviceInspection { device: DeviceSnapshot },
     /// The retained device snapshot after a verified semantic hardware control request.
     ControlChanged { device: DeviceSnapshot },
+    /// The complete current portable mixer snapshot.
+    Mixer { mixer: MixerSnapshot },
+    /// The mixer snapshot after an accepted route request.
+    MixerRouteChanged { mixer: MixerSnapshot },
 }
 
 /// A framed response sent by the daemon.
@@ -96,6 +102,16 @@ pub enum IpcErrorKind {
     PersistenceAmbiguous,
     /// The reviewed transaction failed.
     TransactionFailed,
+    /// The requested logical mixer source is not in the current product profile.
+    MixerSourceNotFound { id: SourceId },
+    /// The client's mixer baseline is older than the daemon's desired state.
+    StaleMixerGeneration { expected: MixerGeneration, actual: MixerGeneration },
+    /// The mixer generation cannot advance beyond its integer range.
+    MixerGenerationExhausted,
+    /// The mixer profile could not be replaced before rename.
+    MixerPersistence,
+    /// The mixer profile was renamed, but directory-sync durability is ambiguous.
+    MixerPersistenceAmbiguous,
 }
 
 /// An explicit error returned over the local interface.
@@ -239,7 +255,8 @@ mod tests {
     use super::*;
     use librewave_core::{
         DeviceAdmissionSnapshot, DeviceConnection, DeviceGeneration, DeviceId, DeviceModel,
-        FixedPointValue, Wave3Control,
+        FaderGain, FixedPointValue, MixRoute, MixTarget, MixerGeneration, MixerSnapshot, SourceId,
+        Wave3Control,
     };
     use serde_json::json;
 
@@ -312,8 +329,8 @@ mod tests {
     }
 
     #[test]
-    fn semantic_control_command_and_stale_error_round_trip_at_version_three() {
-        assert_eq!(PROTOCOL_VERSION, 3);
+    fn semantic_control_command_and_stale_error_round_trip_at_version_four() {
+        assert_eq!(PROTOCOL_VERSION, 4);
         let request = RequestEnvelope {
             version: PROTOCOL_VERSION,
             request_id: 4,
@@ -326,7 +343,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(request).expect("serialize semantic request"),
             json!({
-                "version": 3,
+                "version": 4,
                 "request_id": 4,
                 "command": {
                     "SetWave3Control": {
@@ -351,7 +368,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response.clone()).expect("serialize stale response"),
             json!({
-                "version": 3,
+                "version": 4,
                 "request_id": 4,
                 "result": {
                     "Err": {
@@ -368,7 +385,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response).expect("serialize control response"),
             json!({
-                "version": 3,
+                "version": 4,
                 "request_id": 4,
                 "result": {
                     "Ok": {
@@ -412,6 +429,69 @@ mod tests {
         let mut error_json = serde_json::to_value(error).expect("serialize error");
         error_json["result"]["Err"]["kind"]["DeviceNotFound"]["unexpected"] = json!(true);
         assert!(decode_response(&serde_json::to_vec(&error_json).expect("encode error")).is_err());
+    }
+
+    #[test]
+    fn mixer_route_round_trip_uses_named_exact_fader_steps_at_version_four() {
+        let request = RequestEnvelope {
+            version: PROTOCOL_VERSION,
+            request_id: 18,
+            command: Command::SetMixerRoute {
+                expected_generation: MixerGeneration(7),
+                source: SourceId::new(2),
+                target: MixTarget::Stream,
+                route: MixRoute::new(
+                    false,
+                    FaderGain::from_half_decibel_steps(-1).expect("valid fader"),
+                ),
+            },
+        };
+        let value = serde_json::to_value(request).expect("serialize mixer request");
+        assert_eq!(
+            value,
+            json!({
+                "version": 4,
+                "request_id": 18,
+                "command": {
+                    "SetMixerRoute": {
+                        "expected_generation": 7,
+                        "source": 2,
+                        "target": "Stream",
+                        "route": {
+                            "enabled": false,
+                            "fader": {"half_decibel_steps": -1}
+                        }
+                    }
+                }
+            })
+        );
+        let bytes = serde_json::to_vec(&value).expect("encode mixer request");
+        assert_eq!(decode_request(&bytes).expect("decode mixer request"), request);
+
+        for old_fader in [json!(-1), json!(-0.5)] {
+            let mut old = value.clone();
+            old["command"]["SetMixerRoute"]["route"]["fader"] = old_fader;
+            assert!(
+                decode_request(&serde_json::to_vec(&old).expect("encode old request")).is_err()
+            );
+        }
+
+        let response = ResponseEnvelope::success(
+            18,
+            Response::MixerRouteChanged { mixer: MixerSnapshot::default() },
+        );
+        let frame = encode_response(&response).expect("encode mixer response");
+        assert_eq!(decode_response(&frame[4..]).expect("decode mixer response"), response);
+
+        let mut wrong_identity = serde_json::to_value(response).expect("serialize mixer response");
+        wrong_identity["result"]["Ok"]["MixerRouteChanged"]["mixer"]["profile"]["sources"][0]["name"] =
+            json!("Wrong microphone");
+        assert!(
+            decode_response(
+                &serde_json::to_vec(&wrong_identity).expect("encode invalid mixer response")
+            )
+            .is_err()
+        );
     }
 
     #[test]

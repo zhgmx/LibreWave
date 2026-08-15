@@ -1,6 +1,7 @@
 use crate::ENDPOINT_COUNT;
-use crate::config::{CHANNELS, MAX_SOURCES, MixerConfig, SourceId};
+use crate::config::{CHANNELS, MAX_SOURCES, MixerConfig};
 use librewave_core::EndpointId;
+use librewave_core::SourceId;
 
 /// Peak and RMS linear amplitude for one channel in one block.
 ///

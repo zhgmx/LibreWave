@@ -1,5 +1,5 @@
-use crate::config::{MAX_SOURCES, MixerConfig, SourceId};
-use crate::{SourceControls, controls::MixRoute};
+use crate::config::{MAX_SOURCES, MixerConfig};
+use librewave_core::{MixRoute, SourceControls, SourceId};
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::sync::Arc;
@@ -164,7 +164,11 @@ pub(crate) fn compile_snapshot(
 
 fn compile_route(route: MixRoute) -> RuntimeRoute {
     RuntimeRoute {
-        coefficient: if route.enabled() { route.fader().linear_coefficient() } else { 0.0 },
+        coefficient: if route.enabled() {
+            10.0_f32.powf(route.fader().decibels() / 20.0)
+        } else {
+            0.0
+        },
     }
 }
 

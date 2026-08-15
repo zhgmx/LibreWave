@@ -1,4 +1,8 @@
-use librewave_core::{FixedPointValue, VolumeSelection, Wave3Control};
+use librewave_core::{
+    FixedPointValue, MixerGeneration, MixerProfile, MixerSourceSnapshot, SourceId, VolumeSelection,
+    Wave3Control,
+};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -8,6 +12,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 const DESIRED_STATE_SCHEMA: u16 = 1;
+const MIXER_STATE_SCHEMA: u16 = 1;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -150,16 +155,19 @@ pub enum PersistenceError {
 impl fmt::Display for PersistenceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(error) => write!(formatter, "desired-state I/O failed: {error}"),
+            Self::Io(error) => write!(formatter, "state-file I/O failed: {error}"),
             Self::SaveBeforeRename(error) => {
-                write!(formatter, "desired-state save did not commit: {error}")
+                write!(formatter, "state-file save did not commit: {error}")
             }
             Self::SaveAfterRename(error) => {
-                write!(formatter, "desired-state directory sync failed after rename: {error}")
+                write!(
+                    formatter,
+                    "state file destination was replaced, but directory sync failed; durability is ambiguous: {error}"
+                )
             }
-            Self::Invalid(error) => write!(formatter, "desired-state file is invalid: {error}"),
+            Self::Invalid(error) => write!(formatter, "state file is invalid: {error}"),
             Self::UnsupportedSchema(schema) => {
-                write!(formatter, "desired-state schema {schema} is not supported")
+                write!(formatter, "state-file schema {schema} is not supported")
             }
             Self::InvalidState(message) => formatter.write_str(message),
         }
@@ -201,24 +209,7 @@ impl FileDesiredStateStore {
 
 impl DesiredStateStore for FileDesiredStateStore {
     fn load(&mut self) -> Result<DesiredState, PersistenceError> {
-        recover_pending(&self.path)?;
-        let metadata = match fs::symlink_metadata(&self.path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(DesiredState::default());
-            }
-            Err(error) => return Err(error.into()),
-        };
-        validate_metadata(&self.path, &metadata)?;
-        let mut file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-            .open(&self.path)?;
-        validate_metadata(&self.path, &file.metadata()?)?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        let state: DesiredState =
-            serde_json::from_slice(&bytes).map_err(PersistenceError::Invalid)?;
+        let state: DesiredState = load_json(&self.path)?.unwrap_or_default();
         if state.schema != DESIRED_STATE_SCHEMA {
             return Err(PersistenceError::UnsupportedSchema(state.schema));
         }
@@ -226,21 +217,111 @@ impl DesiredStateStore for FileDesiredStateStore {
     }
 
     fn save(&mut self, state: &DesiredState) -> Result<(), PersistenceError> {
-        let parent = self.path.parent().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "desired-state path has no parent")
-        })?;
-        ensure_private_directory(parent).map_err(PersistenceError::SaveBeforeRename)?;
-        recover_pending(&self.path).map_err(PersistenceError::SaveBeforeRename)?;
-        match fs::symlink_metadata(&self.path) {
-            Ok(metadata) => validate_metadata(&self.path, &metadata)
-                .map_err(PersistenceError::SaveBeforeRename)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(PersistenceError::SaveBeforeRename(error)),
-        }
-        let bytes = serde_json::to_vec(state).map_err(PersistenceError::Invalid)?;
-        let temporary = pending_path(&self.path);
-        write_atomic(parent, &temporary, &self.path, &bytes)
+        save_json(&self.path, state)
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MixerStateFile {
+    schema: u16,
+    generation: MixerGeneration,
+    microphone_source: SourceId,
+    sources: Vec<MixerSourceSnapshot>,
+}
+
+impl From<MixerProfile> for MixerStateFile {
+    fn from(profile: MixerProfile) -> Self {
+        Self {
+            schema: MIXER_STATE_SCHEMA,
+            generation: profile.generation,
+            microphone_source: profile.microphone_source,
+            sources: profile.sources,
+        }
+    }
+}
+
+impl From<MixerStateFile> for MixerProfile {
+    fn from(file: MixerStateFile) -> Self {
+        Self {
+            generation: file.generation,
+            microphone_source: file.microphone_source,
+            sources: file.sources,
+        }
+    }
+}
+
+pub(crate) trait MixerStateStore {
+    fn load(&mut self) -> Result<MixerProfile, PersistenceError>;
+    fn save(&mut self, profile: &MixerProfile) -> Result<(), PersistenceError>;
+}
+
+pub(crate) struct FileMixerStateStore {
+    path: PathBuf,
+}
+
+impl FileMixerStateStore {
+    pub(crate) fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl MixerStateStore for FileMixerStateStore {
+    fn load(&mut self) -> Result<MixerProfile, PersistenceError> {
+        let file: MixerStateFile =
+            load_json(&self.path)?.unwrap_or_else(|| MixerProfile::default().into());
+        if file.schema != MIXER_STATE_SCHEMA {
+            return Err(PersistenceError::UnsupportedSchema(file.schema));
+        }
+        let profile = MixerProfile::from(file);
+        profile.validate().map_err(|error| {
+            PersistenceError::InvalidState(format!("mixer state is invalid: {error}"))
+        })?;
+        Ok(profile)
+    }
+
+    fn save(&mut self, profile: &MixerProfile) -> Result<(), PersistenceError> {
+        profile.validate().map_err(|error| {
+            PersistenceError::InvalidState(format!("mixer state is invalid: {error}"))
+        })?;
+        save_json(&self.path, &MixerStateFile::from(profile.clone()))
+    }
+}
+
+fn load_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, PersistenceError> {
+    recover_pending(path)?;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    validate_metadata(path, &metadata)?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)?;
+    validate_metadata(path, &file.metadata()?)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    serde_json::from_slice(&bytes).map(Some).map_err(PersistenceError::Invalid)
+}
+
+fn save_json<T: Serialize>(path: &Path, value: &T) -> Result<(), PersistenceError> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "state-file path has no parent")
+    })?;
+    ensure_private_directory(parent).map_err(PersistenceError::SaveBeforeRename)?;
+    recover_pending(path).map_err(PersistenceError::SaveBeforeRename)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            validate_metadata(path, &metadata).map_err(PersistenceError::SaveBeforeRename)?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(PersistenceError::SaveBeforeRename(error)),
+    }
+    let bytes = serde_json::to_vec(value).map_err(PersistenceError::Invalid)?;
+    let temporary = pending_path(path);
+    write_atomic(parent, &temporary, path, &bytes)
 }
 
 fn pending_path(path: &Path) -> PathBuf {
@@ -304,7 +385,7 @@ fn recover_pending(path: &Path) -> io::Result<()> {
     validate_metadata(&pending, &pending_metadata)?;
     fs::remove_file(&pending)?;
     File::open(path.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "desired-state path has no parent")
+        io::Error::new(io::ErrorKind::InvalidInput, "state-file path has no parent")
     })?)?
     .sync_all()
 }
@@ -352,6 +433,7 @@ fn validate_metadata(path: &Path, metadata: &fs::Metadata) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -420,5 +502,114 @@ mod tests {
         assert_eq!(store.load().expect("recover stale pending file"), DesiredState::default());
         assert!(!pending.exists());
         fs::remove_dir_all(root).expect("remove crash fixture");
+    }
+
+    #[test]
+    fn mixer_store_uses_the_exact_direct_schema_and_rejects_wrong_identity() {
+        let nonce =
+            SystemTime::now().duration_since(UNIX_EPOCH).expect("clock before epoch").as_nanos();
+        let root = std::env::temp_dir().join(format!("librewave-mixer-state-{nonce}"));
+        let path = root.join("mixer-state.json");
+        let mut store = FileMixerStateStore::new(path.clone());
+        let profile = MixerProfile::default();
+        store.save(&profile).expect("save mixer state");
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read mixer state"))
+                .expect("decode mixer state");
+        assert_eq!(
+            value,
+            json!({
+                "schema": 1,
+                "generation": 0,
+                "microphone_source": 1,
+                "sources": [
+                    {
+                        "role": "Microphone",
+                        "name": "Microphone",
+                        "controls": {
+                            "source": 1,
+                            "monitor": {
+                                "enabled": true,
+                                "fader": {"half_decibel_steps": 0}
+                            },
+                            "stream": {
+                                "enabled": true,
+                                "fader": {"half_decibel_steps": 0}
+                            }
+                        }
+                    },
+                    {
+                        "role": "System",
+                        "name": "System",
+                        "controls": {
+                            "source": 2,
+                            "monitor": {
+                                "enabled": true,
+                                "fader": {"half_decibel_steps": 0}
+                            },
+                            "stream": {
+                                "enabled": true,
+                                "fader": {"half_decibel_steps": 0}
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+        assert_eq!(store.load().expect("load mixer state"), profile);
+
+        let mut swapped = value;
+        swapped["sources"].as_array_mut().expect("sources array").swap(0, 1);
+        fs::write(&path, serde_json::to_vec(&swapped).expect("encode swapped sources"))
+            .expect("write swapped sources");
+        assert!(matches!(store.load(), Err(PersistenceError::InvalidState(_))));
+
+        fs::write(
+            &path,
+            br#"{"schema":1,"generation":0,"microphone_source":1,"sources":[],"old":true}"#,
+        )
+        .expect("write unknown field");
+        assert!(matches!(store.load(), Err(PersistenceError::Invalid(_))));
+
+        fs::write(
+            &path,
+            br#"{"schema":1,"profile":{"generation":0,"microphone_source":1,"sources":[]}}"#,
+        )
+        .expect("write obsolete nested profile");
+        assert!(matches!(store.load(), Err(PersistenceError::Invalid(_))));
+        fs::remove_dir_all(root).expect("remove mixer-state fixture");
+    }
+
+    #[test]
+    fn mixer_store_enforces_file_safety_and_removes_an_uncommitted_temp() {
+        let nonce =
+            SystemTime::now().duration_since(UNIX_EPOCH).expect("clock before epoch").as_nanos();
+        let root = std::env::temp_dir().join(format!("librewave-mixer-safety-{nonce}"));
+        let path = root.join("mixer-state.json");
+        let mut store = FileMixerStateStore::new(path.clone());
+        store.save(&MixerProfile::default()).expect("save mixer state");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("change mode");
+        assert!(matches!(store.load(), Err(PersistenceError::Io(_))));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("restore mode");
+
+        let pending = pending_path(&path);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&pending)
+            .expect("create stale pending mixer file");
+        file.write_all(b"partial").expect("write pending mixer file");
+        drop(file);
+        assert_eq!(store.load().expect("recover pending mixer file"), MixerProfile::default());
+        assert!(!pending.exists());
+
+        fs::remove_file(&path).expect("remove mixer state");
+        let target = root.join("target.json");
+        fs::write(&target, br#"{"schema":1}"#).expect("write symlink target");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("set target mode");
+        symlink(&target, &path).expect("create mixer state symlink");
+        assert!(matches!(store.load(), Err(PersistenceError::Io(_))));
+        fs::remove_dir_all(root).expect("remove mixer safety fixture");
     }
 }

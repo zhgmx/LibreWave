@@ -1,7 +1,7 @@
 #![allow(clippy::float_cmp)]
 
 use super::*;
-use librewave_core::EndpointId;
+use librewave_core::{EndpointId, FaderGain, FaderGainError, MixRoute, SourceControls, SourceId};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::mpsc;

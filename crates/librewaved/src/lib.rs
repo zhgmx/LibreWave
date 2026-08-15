@@ -60,6 +60,7 @@ fn snapshot_from_inventory(
                 pipewire: service_state(inventory.services.pipewire),
                 wireplumber: service_state(inventory.services.wireplumber),
             },
+            mixer: librewave_core::MixerSnapshot::default(),
         },
         candidates,
     )

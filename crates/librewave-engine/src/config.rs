@@ -1,3 +1,4 @@
+use librewave_core::SourceId;
 use std::fmt;
 
 /// The maximum configured input count supported by one mixer.
@@ -18,28 +19,6 @@ pub const MIXER_FORMAT: MixerFormat = MixerFormat {
     channels: CHANNELS,
     layout: SampleLayout::Interleaved,
 };
-
-/// A stable portable identifier for one configured logical input.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct SourceId(u16);
-
-impl SourceId {
-    #[must_use]
-    pub const fn new(value: u16) -> Self {
-        Self(value)
-    }
-
-    #[must_use]
-    pub const fn get(self) -> u16 {
-        self.0
-    }
-}
-
-impl fmt::Display for SourceId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}", self.0)
-    }
-}
 
 /// The portable sample representation used by the mixer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

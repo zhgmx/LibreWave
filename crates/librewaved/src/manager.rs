@@ -1,12 +1,14 @@
 use crate::control::{ConnectionOutcome, ConnectionRefreshOutcome, ManagedWave3Connection};
 use crate::persistence::{
     DesiredState, DesiredStateStore, DesiredWave3Controls, FileDesiredStateStore,
+    FileMixerStateStore, MixerStateStore,
 };
 use crate::{PersistenceError, control, snapshot_from_inventory};
 use librewave_core::{
     AdmissionError, Command, DeviceAdmissionSnapshot, DeviceConnection, DeviceGeneration, DeviceId,
-    DeviceSnapshot, DeviceWriteAccess, DeviceWriteLockReason, Event, Snapshot, State,
-    Wave3ConfigSnapshot, Wave3Control,
+    DeviceSnapshot, DeviceWriteAccess, DeviceWriteLockReason, Event, MixRoute, MixTarget,
+    MixerGeneration, MixerProfile, MixerSnapshot, Snapshot, SourceId, State, Wave3ConfigSnapshot,
+    Wave3Control,
 };
 use librewave_ipc::{IpcError, IpcErrorKind, Response};
 use librewave_platform_linux::{
@@ -29,6 +31,7 @@ pub struct Daemon {
     device_generations: BTreeMap<String, u64>,
     desired: DesiredState,
     store: Box<dyn DesiredStateStore>,
+    mixer_store: Box<dyn MixerStateStore>,
     allocator: DeviceIdAllocator,
 }
 
@@ -54,11 +57,13 @@ impl Daemon {
     ///
     /// Returns an error when the desired-state path or its strict persisted state is invalid.
     pub fn new() -> Result<Self, PersistenceError> {
-        let store = FileDesiredStateStore::new(desired_state_path()?);
+        let store = FileDesiredStateStore::new(profile_state_path("device-state.json")?);
+        let mixer_store = FileMixerStateStore::new(profile_state_path("mixer-state.json")?);
         Self::with_components(
             LinuxInventory::new(),
             librewave_platform_linux::DiscoveryPaths::default(),
             Box::new(store),
+            Box::new(mixer_store),
             |candidate| {
                 Wave3UsbConnection::open(candidate)
                     .map(|connection| Box::new(connection) as Box<dyn ManagedWave3Connection>)
@@ -71,6 +76,7 @@ impl Daemon {
         inventory: LinuxInventory,
         paths: librewave_platform_linux::DiscoveryPaths,
         mut store: Box<dyn DesiredStateStore>,
+        mut mixer_store: Box<dyn MixerStateStore>,
         connector: impl FnMut(
             &UsbDeviceCandidate,
         ) -> Result<Box<dyn ManagedWave3Connection>, AdmissionError>
@@ -78,16 +84,22 @@ impl Daemon {
     ) -> Result<Self, PersistenceError> {
         let desired = store.load()?;
         validate_desired_state(&desired)?;
+        let mixer = mixer_store.load()?;
+        let mut state = State::default();
+        let mut snapshot = state.snapshot().clone();
+        snapshot.mixer = MixerSnapshot::inactive(mixer);
+        ignore_reconciliation_event(state.replace(snapshot, librewave_core::Origin::Recovery));
         Ok(Self {
             inventory,
             paths,
-            state: State::default(),
+            state,
             candidates: BTreeMap::new(),
             connector: Box::new(connector),
             connections: BTreeMap::new(),
             device_generations: BTreeMap::new(),
             desired,
             store,
+            mixer_store,
             allocator: DeviceIdAllocator::default(),
         })
     }
@@ -95,6 +107,7 @@ impl Daemon {
     /// Creates a daemon with deterministic state for protocol and CLI tests.
     #[must_use]
     pub fn from_snapshot(snapshot: Snapshot) -> Self {
+        let mixer_profile = snapshot.mixer.profile.clone();
         let mut state = State::default();
         ignore_reconciliation_event(state.replace(snapshot, librewave_core::Origin::Recovery));
         let allocator = DeviceIdAllocator::from_snapshot(state.snapshot());
@@ -108,6 +121,7 @@ impl Daemon {
             device_generations: BTreeMap::new(),
             desired: DesiredState::default(),
             store: Box::new(MemoryStore::default()),
+            mixer_store: Box::new(MemoryMixerStore { profile: mixer_profile }),
             allocator,
         }
     }
@@ -133,13 +147,25 @@ impl Daemon {
     }
 
     #[cfg(test)]
+    #[must_use]
+    fn with_mixer_store(snapshot: Snapshot, mixer_store: Box<dyn MixerStateStore>) -> Self {
+        let mut daemon = Self::from_snapshot(snapshot);
+        daemon.mixer_store = mixer_store;
+        daemon
+    }
+
+    #[cfg(test)]
     fn with_inventory(
         inventory: LinuxInventory,
         paths: librewave_platform_linux::DiscoveryPaths,
     ) -> Self {
-        Self::with_components(inventory, paths, Box::new(MemoryStore::default()), |_| {
-            Err(AdmissionError::Disconnected)
-        })
+        Self::with_components(
+            inventory,
+            paths,
+            Box::new(MemoryStore::default()),
+            Box::new(MemoryMixerStore::default()),
+            |_| Err(AdmissionError::Disconnected),
+        )
         .expect("memory store loads")
     }
 
@@ -182,7 +208,76 @@ impl Daemon {
                 let device = self.set_control(id, expected_generation, control, origin)?;
                 Ok(Response::ControlChanged { device })
             }
+            Command::GetMixer => Ok(Response::Mixer { mixer: self.snapshot().mixer.clone() }),
+            Command::SetMixerRoute { expected_generation, source, target, route } => {
+                let mixer =
+                    self.set_mixer_route(expected_generation, source, target, route, origin)?;
+                Ok(Response::MixerRouteChanged { mixer })
+            }
         }
+    }
+
+    fn set_mixer_route(
+        &mut self,
+        expected_generation: MixerGeneration,
+        source: SourceId,
+        target: MixTarget,
+        route: MixRoute,
+        origin: librewave_core::Origin,
+    ) -> Result<MixerSnapshot, IpcError> {
+        let current = &self.snapshot().mixer.profile;
+        if expected_generation != current.generation {
+            return Err(IpcError {
+                kind: IpcErrorKind::StaleMixerGeneration {
+                    expected: expected_generation,
+                    actual: current.generation,
+                },
+                message: format!(
+                    "mixer generation {expected_generation} is stale; current generation is {}",
+                    current.generation
+                ),
+            });
+        }
+        let source_snapshot = current.source(source).ok_or_else(|| IpcError {
+            kind: IpcErrorKind::MixerSourceNotFound { id: source },
+            message: format!("mixer source {source} is not configured"),
+        })?;
+        if source_snapshot.controls.route(target) == route {
+            return Ok(self.snapshot().mixer.clone());
+        }
+        let next = current.with_route(source, target, route).map_err(|error| match error {
+            librewave_core::MixerProfileError::GenerationExhausted => IpcError {
+                kind: IpcErrorKind::MixerGenerationExhausted,
+                message: "mixer generation is exhausted".to_owned(),
+            },
+            other => internal_error(format!("validated mixer profile update failed: {other}")),
+        })?;
+        match self.mixer_store.save(&next) {
+            Ok(()) => {}
+            Err(PersistenceError::SaveAfterRename(_)) => {
+                return Err(IpcError {
+                    kind: IpcErrorKind::MixerPersistenceAmbiguous,
+                    message: "mixer state was replaced, but its crash durability is ambiguous; retained state was not advanced and retrying the command will converge it"
+                        .to_owned(),
+                });
+            }
+            Err(_) => {
+                return Err(IpcError {
+                    kind: IpcErrorKind::MixerPersistence,
+                    message: "mixer state could not be persisted; retained state was not changed"
+                        .to_owned(),
+                });
+            }
+        }
+        let mut snapshot = self.snapshot().clone();
+        snapshot.mixer = MixerSnapshot::inactive(next);
+        let event = self.state.replace(snapshot, origin);
+        if event.is_none() {
+            return Err(internal_error(
+                "persisted mixer state did not change the retained snapshot".to_owned(),
+            ));
+        }
+        Ok(self.snapshot().mixer.clone())
     }
 
     fn inspect(&mut self, id: DeviceId, origin: librewave_core::Origin) -> Result<(), IpcError> {
@@ -692,6 +787,7 @@ impl Daemon {
     fn refresh_inventory(&mut self, origin: librewave_core::Origin) -> Option<Event> {
         let (mut snapshot, candidates) =
             self.snapshot_from_inventory(self.inventory.inspect(&self.paths));
+        snapshot.mixer = self.snapshot().mixer.clone();
         for device in &mut snapshot.devices {
             if let Some(previous) =
                 self.snapshot().devices.iter().find(|previous| previous.id == device.id)
@@ -724,6 +820,22 @@ impl DesiredStateStore for MemoryStore {
 
     fn save(&mut self, state: &DesiredState) -> Result<(), PersistenceError> {
         self.state = state.clone();
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct MemoryMixerStore {
+    profile: MixerProfile,
+}
+
+impl MixerStateStore for MemoryMixerStore {
+    fn load(&mut self) -> Result<MixerProfile, PersistenceError> {
+        Ok(self.profile.clone())
+    }
+
+    fn save(&mut self, profile: &MixerProfile) -> Result<(), PersistenceError> {
+        self.profile = profile.clone();
         Ok(())
     }
 }
@@ -795,9 +907,9 @@ fn controls_to_restore(
     controls
 }
 
-fn desired_state_path() -> Result<PathBuf, PersistenceError> {
+fn profile_state_path(file_name: &str) -> Result<PathBuf, PersistenceError> {
     if let Some(config) = std::env::var_os("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(config).join("librewave/profiles/device-state.json"));
+        return Ok(PathBuf::from(config).join("librewave/profiles").join(file_name));
     }
     let home = std::env::var_os("HOME").ok_or_else(|| {
         std::io::Error::new(
@@ -805,7 +917,7 @@ fn desired_state_path() -> Result<PathBuf, PersistenceError> {
             "HOME is not set and XDG_CONFIG_HOME is unavailable",
         )
     })?;
-    Ok(PathBuf::from(home).join(".config/librewave/profiles/device-state.json"))
+    Ok(PathBuf::from(home).join(".config/librewave/profiles").join(file_name))
 }
 
 fn validate_desired_state(state: &DesiredState) -> Result<(), PersistenceError> {

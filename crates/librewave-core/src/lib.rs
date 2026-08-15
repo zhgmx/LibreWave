@@ -3,6 +3,14 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+mod mixer;
+
+pub use mixer::{
+    FaderGain, FaderGainError, MICROPHONE_SOURCE_ID, MeterAvailability, MixRoute, MixTarget,
+    MixerGeneration, MixerInactiveReason, MixerProfile, MixerProfileError, MixerRuntimeState,
+    MixerSnapshot, MixerSourceSnapshot, SYSTEM_SOURCE_ID, SourceControls, SourceId, SourceRole,
+};
+
 pub use librewave_protocol::ApiVersion;
 pub use librewave_protocol::DeviceModel;
 
@@ -426,6 +434,8 @@ pub struct Snapshot {
     pub devices: Vec<DeviceSnapshot>,
     /// Host audio service status.
     pub audio: AudioSnapshot,
+    /// Portable desired mixer state and its explicit runtime availability.
+    pub mixer: MixerSnapshot,
 }
 
 impl Snapshot {
@@ -439,6 +449,7 @@ impl Snapshot {
                 pipewire: ServiceState::Unavailable { reason: ServiceFailureReason::NotRunning },
                 wireplumber: ServiceState::Unavailable { reason: ServiceFailureReason::NotRunning },
             },
+            mixer: MixerSnapshot::default(),
         }
     }
 }
@@ -457,6 +468,15 @@ pub enum Command {
     InspectDevice { id: DeviceId },
     /// Change one reviewed Wave:3 hardware control through the daemon-owned connection.
     SetWave3Control { id: DeviceId, expected_generation: DeviceGeneration, control: Wave3Control },
+    /// Return the complete current portable mixer snapshot.
+    GetMixer,
+    /// Atomically replace one complete monitor or stream route.
+    SetMixerRoute {
+        expected_generation: MixerGeneration,
+        source: SourceId,
+        target: MixTarget,
+        route: MixRoute,
+    },
 }
 
 /// Events emitted when daemon state changes.
@@ -487,7 +507,10 @@ impl State {
 
     /// Reconciles the observed state and records an event only when it changes.
     pub fn replace(&mut self, mut snapshot: Snapshot, origin: Origin) -> Option<Event> {
-        if self.snapshot.devices == snapshot.devices && self.snapshot.audio == snapshot.audio {
+        if self.snapshot.devices == snapshot.devices
+            && self.snapshot.audio == snapshot.audio
+            && self.snapshot.mixer == snapshot.mixer
+        {
             return None;
         }
         snapshot.generation = self.snapshot.generation.saturating_add(1);
@@ -565,6 +588,24 @@ mod tests {
         assert_eq!(state.snapshot().generation, 0);
         assert_eq!(state.replace(snapshot, Origin::Client), None);
         assert_eq!(state.snapshot().generation, 0);
+    }
+
+    #[test]
+    fn mixer_changes_advance_the_one_overall_snapshot_generation() {
+        let mut state = State::default();
+        let mut snapshot = state.snapshot().clone();
+        snapshot.mixer.profile = snapshot
+            .mixer
+            .profile
+            .with_route(SYSTEM_SOURCE_ID, MixTarget::Stream, MixRoute::new(false, FaderGain::UNITY))
+            .expect("known source");
+        let event = state.replace(snapshot, Origin::Client);
+        assert!(event.is_some());
+        assert_eq!(state.snapshot().generation, 1);
+        assert_eq!(state.snapshot().mixer.generation(), MixerGeneration(1));
+
+        assert_eq!(state.replace(state.snapshot().clone(), Origin::Client), None);
+        assert_eq!(state.snapshot().generation, 1);
     }
 
     #[test]
