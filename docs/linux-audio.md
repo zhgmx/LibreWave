@@ -74,7 +74,15 @@ The physical Wave capture and playback PCMs are not desktop endpoints. LibreWave
 
 The host connects to the user's existing PipeWire instance and completes a registry round trip. It checks the admitted candidate's exact ALSA card number. A Device global must have the Wave:3 vendor and product values, and its `api.alsa.card` value must identify that card. A Node global matches through the card component of `api.alsa.path`. Node globals do not need vendor or product properties. Startup fails while any matching Device or Node global remains visible.
 
-Endpoint plans come only from `librewave-core`. The current plans are three PipeWire output streams with `media.class=Audio/Source`, `node.virtual=true`, and stable `librewave.*` names. The current portable code has no engine that can supply negotiated frames for these streams. The production adapter therefore returns `engine unavailable` before it creates an endpoint. Playback remains prepared, not active, at this boundary. The adapter does not publish silence or report the graph as ready.
+Endpoint plans come only from `librewave-core`. The current plans are three PipeWire output streams with `media.class=Audio/Source`, `node.virtual=true`, and stable `librewave.*` names. The production adapter is not connected to `librewave-engine`. It therefore returns `engine unavailable` before it creates an endpoint. Playback remains prepared, not active, at this boundary. The adapter does not publish silence or report the graph as ready.
+
+## Portable mixer contract
+
+`librewave-engine` processes stereo interleaved 32-bit float audio at 48 kHz. Construction sets a portable logical source collection with a maximum of 12 sources. It also sets the microphone source and the maximum frames that one call can process. Each call can use a different frame count at or below that maximum. The Linux adapter is responsible for bridging ALSA periods and PipeWire quantum sizes to this contract.
+
+Each source has separate monitor and stream routes. A route has an enabled value and a fader from -60.0 dB through +12.0 dB in 0.5 dB steps. The microphone endpoint receives the configured microphone source at unity. Monitor and stream route values do not change that endpoint. Hardware microphone gain, hardware microphone mute, and headphone level stay outside the engine.
+
+The engine reports separate left and right peak and RMS values for each source and endpoint. It applies one complete pending control snapshot at the boundary before a nonzero block. Processing uses fixed-capacity state and does not allocate, free memory, lock, block, log, perform I/O, or call platform code.
 
 ## Volume ownership
 

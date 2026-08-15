@@ -1,0 +1,15 @@
+[package]
+name = "librewave-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Portable realtime mixer engine for LibreWave"
+
+[dependencies]
+librewave-core = { path = "../librewave-core" }
+
+[lints]
+workspace = true

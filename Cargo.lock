@@ -3049,6 +3049,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "librewave-engine"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "librewave-core",
+]
+
+[[package]]
 name = "librewave-ipc"
 version = "0.1.0-alpha.1"
 dependencies = [

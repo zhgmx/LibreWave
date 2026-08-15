@@ -2,6 +2,7 @@
 members = [
     "crates/librewave-device",
     "crates/librewave-core",
+    "crates/librewave-engine",
     "crates/librewave-ipc",
     "crates/librewave-protocol",
     "crates/librewave-platform-linux",
@@ -14,6 +15,7 @@ members = [
 default-members = [
     "crates/librewave-device",
     "crates/librewave-core",
+    "crates/librewave-engine",
     "crates/librewave-ipc",
     "crates/librewave-protocol",
     "crates/librewave-platform-linux",
