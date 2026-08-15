@@ -12,6 +12,12 @@ On Fedora, install:
 clang fontconfig-devel libX11-devel libxcb-devel libxkbcommon-devel wayland-devel
 ```
 
+On Ubuntu, install:
+
+```text
+clang fontconfig libfontconfig1-dev libusb-1.0-0-dev libx11-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev pkg-config
+```
+
 ## Build
 
 Run this command from the repository root:

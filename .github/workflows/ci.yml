@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install Linux build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            clang \
+            fontconfig \
+            libfontconfig1-dev \
+            libusb-1.0-0-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            pkg-config
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          toolchain="$(awk -F '"' '/^channel/ { print $2; exit }' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --profile minimal --component clippy --component rustfmt
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Test headless workspace
+        run: cargo test --workspace --exclude librewave
+
+      - name: Test workspace with all features
+        run: cargo test --workspace --all-features
+
+      - name: Run strict Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Build headless applications
+        run: cargo build --package librewaved --package librewavectl
+
+      - name: Build GPUI application
+        run: cargo build --package librewave
