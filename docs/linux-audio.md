@@ -27,11 +27,13 @@ The rule sets only `device.disabled = true`, which disables the exact card in th
 
 WirePlumber documents `device.disabled` as the property that removes a matched card or device. See the [WirePlumber ALSA configuration reference](https://pipewire.pages.freedesktop.org/wireplumber/daemon/configuration/alsa.html).
 
-The rule has no serial, name, family, class, or regular-expression match. A different vendor ID or adjacent product ID does not match it. Setup, `librewavectl doctor`, and hardware validation must confirm that WirePlumber created no physical nodes and holds no reservation before `librewaved` takes ownership.
+The rule has no serial, name, family, class, or regular-expression match. A different vendor ID or adjacent product ID does not match it. The current setup does not install or activate this rule. A future setup can install it only after the production audio host can take ownership. Hardware validation must then confirm that WirePlumber created no physical nodes and holds no reservation before `librewaved` takes ownership.
 
 ## Device access policy
 
 The Wave:3 policy also renders `70-librewave-wave3.rules`. The udev rule matches the USB device object with vendor `0fd9` and product `0070`, then adds `TAG+="uaccess"`.
+
+After it installs or removes this rule, the lifecycle reloads the udev rules. It then sends a change event only to normal-mode Wave:3 USB device objects with the same vendor and product values. It does not use a broad USB trigger. If the privileged rule or refresh operation fails, the lifecycle fails and does not claim that access is current. Rollback or journal recovery preserves or restores the prior rule state.
 
 The rule does not use `MODE="0666"`. It does not match a USB class or interface, and it does not grant access to DFU or another product mode. `snd_usb_audio` stays bound during normal operation.
 
@@ -81,9 +83,9 @@ The final mapping must also match the observed Wave Link behavior on Windows and
 
 ## Setup and removal
 
-`librewavectl setup` will consume the typed artifact metadata and rendered policy text. It will show its plan, back up any user file that it replaces, install the WirePlumber fragment, install the systemd user service, and request elevation only for the udev rule.
+`librewavectl setup` shows its plan before it changes the system. It stages the current CLI and daemon, switches stable links, installs an inactive read-only daemon unit, and requests elevation only for the exact udev access rule.
 
-This milestone does not implement those setup actions. The lifecycle contract in [Setup, development installs, and removal](setup.md) still governs installation, rollback, repair, and removal.
+Setup does not install or reload the WirePlumber fragment. It does not enable the unit, start the daemon, open ALSA, or publish PipeWire objects. `librewavectl doctor` reports production audio ownership as blocked and graph inspection as not implemented. The lifecycle contract in [Setup, development installs, and removal](setup.md) governs installation, rollback, diagnostics, and removal.
 
 ## Work still required
 
@@ -111,4 +113,4 @@ Do not claim Linux audio backend support until these tests pass.
 - Confirm that only deliberate endpoints appear in KDE and `wpctl status`.
 - Confirm that saved microphone gain and headphone level survive every recovery case.
 - Install a new development build over an older one and confirm that every running path refers to the new build.
-- Uninstall and confirm that the original audio configuration is restored without a LibreWave process, unit, rule, or node.
+- Uninstall and confirm that manifest-owned paths are removed, replaced files are restored, profiles are preserved, and no LibreWave process, unit, rule, or node remains.

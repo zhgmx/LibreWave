@@ -12,6 +12,9 @@ description = "LibreWave command-line client"
 librewave-core = { path = "../librewave-core" }
 librewave-ipc = { path = "../librewave-ipc" }
 librewave-platform-linux = { path = "../librewave-platform-linux" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

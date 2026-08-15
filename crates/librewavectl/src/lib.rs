@@ -8,6 +8,8 @@ use librewave_platform_linux::ipc::{Client, ClientError};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+mod lifecycle;
+
 /// Runs the CLI against one explicit daemon socket.
 ///
 /// # Errors
@@ -73,6 +75,10 @@ where
     O: Write,
     E: Write,
 {
+    let arguments = arguments.into_iter().collect::<Vec<_>>();
+    if lifecycle::is_command(&arguments) {
+        return lifecycle::run(&arguments, output, errors);
+    }
     let socket_path = configured_socket_path();
     run(arguments, &socket_path, output, errors)
 }
@@ -288,7 +294,10 @@ fn write_help<W: Write>(output: &mut W) -> io::Result<()> {
     writeln!(output, "Commands:")?;
     writeln!(output, "  status          Show daemon, device, and audio status")?;
     writeln!(output, "  devices list    List supported devices")?;
-    writeln!(output, "  devices inspect <id>  Inspect one device")
+    writeln!(output, "  devices inspect <id>  Inspect one device")?;
+    writeln!(output, "  setup           Install the current build")?;
+    writeln!(output, "  doctor          Check the installation")?;
+    writeln!(output, "  uninstall       Remove manifest-owned files")
 }
 
 fn configured_socket_path() -> PathBuf {
@@ -424,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn help_omits_unimplemented_setup_commands() {
+    fn help_lists_installation_lifecycle_commands() {
         let mut output = Vec::new();
         let mut errors = Vec::new();
         let exit = run(
@@ -435,6 +444,9 @@ mod tests {
         )
         .expect("run CLI");
         assert_eq!(exit, 0);
-        assert!(!String::from_utf8(output).expect("UTF-8").contains("setup"));
+        let output = String::from_utf8(output).expect("UTF-8");
+        assert!(output.contains("setup"));
+        assert!(output.contains("doctor"));
+        assert!(output.contains("uninstall"));
     }
 }

@@ -1,12 +1,10 @@
 # Setup, development installs, and removal
 
-Status: accepted lifecycle contract. Commands will become available with the daemon and CLI milestones.
-
 ## Goals
 
-Setup and removal are product features. They must be safe for a first-time source user and fast enough for repeated hardware development.
+Setup and removal are product features. They must be safe for a first source build and quick enough for repeated hardware development.
 
-The lifecycle has one implementation in `librewavectl`. `xtask` can build the current checkout and invoke that implementation, but it must not maintain its own file-copy or cleanup logic.
+The lifecycle has one implementation in `librewavectl`. `xtask` builds the current checkout and invokes that implementation. It does not copy or remove installation files itself.
 
 ## Installed build identity
 
@@ -14,59 +12,62 @@ Each installation records:
 
 - The source commit.
 - Whether the source tree had uncommitted changes.
-- A content fingerprint for a dirty development build.
+- A deterministic content fingerprint for a dirty build.
 - The Rust profile and target triple.
-- The installed executable hashes.
+- The installed CLI and daemon hashes.
 - The installation time.
 - The manifest schema version.
 
-`librewavectl status` and `librewavectl doctor` show this identity. A live test report can therefore name the exact code that ran.
+`librewavectl doctor --expect-current` compares this identity with the current checkout. A live test report can name the exact code that ran.
 
-## Installation manifest
+## Installation manifest and journal
 
-The manifest is the source of truth for files LibreWave owns. It records:
+The manifest is the source of truth for paths that LibreWave owns. It records:
 
-- Installed executables and links.
-- The systemd user unit.
-- The WirePlumber rule.
-- The udev rule.
-- LibreWave state directories.
-- User files that setup replaced.
-- Backup paths and original hashes.
+- Versioned executable files and stable links.
+- The inactive systemd user unit.
+- The exact Wave:3 udev access rule.
 - The active build directory.
+- User files that setup replaced.
+- Original file hashes and exact backup paths.
 
-Every installed file includes an ownership marker or expected hash where the file format permits it. Removal does not rely on a broad filename pattern.
+The persistent journal records setup or removal progress. Setup validates the complete manifest and journal before it changes an owned path. Recovery either rolls back a build before the active switch or finishes cleanup after the new manifest becomes active.
+
+Removal validates every owned path before its first deletion. If one path was already changed, removal stops and leaves all paths in place. It also revalidates each path at its mutation boundary. If a path changes after removal starts, removal stops there; earlier owned removals can already be complete, and the journal keeps the operation resumable. LibreWave never removes an extra path because it is under a broad directory or matches a filename pattern.
 
 ## Source setup
 
-The source workflow will be:
+Build both runnable binaries before setup. A test build does not guarantee that the plain executable files are current.
 
 ```text
-cargo build --release --workspace
-cargo run --release -p librewavectl -- setup
+cargo build --release -p librewaved -p librewavectl
+./target/release/librewavectl setup --source-root . --profile release
 ```
 
-The setup command shows the files and services it will change. It asks for confirmation before the first mutation and requests elevation only for the narrow system udev operation.
+The setup command shows its plan and asks for confirmation before its first mutation. It requests elevation only for the exact system udev operation.
 
 Setup then:
 
-1. Validates the built daemon, CLI, optional UI, and policy assets.
-2. Reads any existing LibreWave manifest.
-3. Backs up user-owned files that it must replace.
-4. Stages the complete installation in a new build directory.
-5. Writes and validates the new manifest.
-6. Stops the old LibreWave daemon if one is running.
-7. Switches executable links and service paths to the new build.
-8. Reloads udev, systemd user units, and WirePlumber as required.
-9. Starts the new daemon.
-10. Runs the same checks as `librewavectl doctor`.
-11. Removes superseded LibreWave-owned build directories.
+1. Validates the exact daemon and CLI files that it will install.
+2. Reads the current manifest and any interrupted journal.
+3. Records exact backups for user files that it must replace.
+4. Stages the complete installation in a versioned build directory.
+5. Installs the inactive user unit and exact udev access rule.
+6. Reloads the udev rules and sends a change event only to connected normal-mode Wave:3 devices.
+7. Switches the active link atomically.
+8. Verifies and stores the new manifest.
+9. Removes superseded, unmodified LibreWave build files.
+10. Leaves production audio ownership blocked.
 
-A failure before the switch leaves the old installation active. A failure after the switch attempts one rollback to the prior manifest and reports any remaining manual action.
+A failure before the manifest switch restores the previous paths byte for byte. A failure after the switch leaves a journal so the next setup can finish exact cleanup.
+
+Setup does not install or reload the WirePlumber card-disable rule. It does not enable the unit, start the daemon, open ALSA, or publish PipeWire objects. The production ALSA and PipeWire host does not exist yet, so setup cannot take ownership of the physical Wave card.
+
+The udev refresh matches USB vendor `0fd9` and product `0070`. It does not trigger another USB product, a device interface, or firmware mode. If the privileged install or refresh operation fails, setup fails and does not claim that access is current. Rollback or journal recovery preserves or restores the prior rule state.
 
 ## Development loop
 
-The intended development commands are:
+Use these commands during development:
 
 ```text
 cargo xtask dev-install
@@ -74,45 +75,44 @@ cargo xtask dev-status
 cargo xtask dev-uninstall
 ```
 
-`dev-install` builds the current checkout, includes dirty-source identity, and invokes that newly built `librewavectl setup` in development mode. It never calls an older installed CLI by accident.
+`dev-install` and `dev-status` first ask Cargo to build the runnable `librewavectl` and `librewaved` binaries. `xtask` reads the compiler artifact messages, hashes those exact files, and invokes the exact CLI path that Cargo returned. It does not search `PATH` or call an older installed CLI.
 
-`dev-status` compares the current checkout identity with the installed manifest and running daemon. A mismatch is an error, not a warning.
-
-`dev-uninstall` builds or locates the current lifecycle client, invokes `librewavectl uninstall`, and verifies cleanup. It remains useful when the daemon does not start.
+`dev-install` records the source revision and dirty fingerprint. `dev-status` compares the current source identity and exact binary hashes with the manifest. A mismatch is an error. `dev-uninstall` builds only the current CLI and uses it for cleanup. Broken daemon work cannot prevent removal.
 
 ## Doctor checks
 
-`librewavectl doctor` checks:
+`librewavectl doctor` reports:
 
-- The resolved paths and hashes of `librewavectl`, `librewaved`, and the optional UI.
-- The systemd user unit contents and active process executable.
-- Duplicate or stale LibreWave processes.
-- Installed udev and WirePlumber rule paths.
-- The active installation manifest and backups.
-- PipeWire and WirePlumber connectivity.
-- User-visible and internal LibreWave graph objects.
-- The admitted Wave device and protocol read-only status.
+- The manifest and interrupted journal.
+- CLI and daemon file hashes.
+- Stable link targets and the active build directory.
+- The inactive unit and running daemon executable paths.
+- The exact udev rule and any stale WirePlumber rule.
+- Stale build directories, temporary files, and backups.
+- The blocked production-audio prerequisite.
+- Graph inspection as not implemented until a production graph exists.
 
-The command prints a direct repair action for each failed check. `librewavectl doctor --repair` can perform safe, manifest-scoped repairs after confirmation.
+Doctor also scans fixed LibreWave paths when the manifest is missing. It does not claim that an unavailable PipeWire check passed.
 
 ## Uninstall
 
-`librewavectl uninstall` shows the removal plan before changing the system. It then:
+`librewavectl uninstall` shows its plan and asks for confirmation. It then:
 
-1. Stops and disables the user service.
-2. Tells the daemon to release the physical and virtual audio graph when possible.
-3. Restores saved hardware policy, such as the original gain-lock value, only when the connected device and schema are exact.
-4. Restores user-owned WirePlumber files from verified backups.
-5. Removes manifest-owned WirePlumber and udev rules.
-6. Reloads affected services.
-7. Removes executable links, units, state, and build directories recorded in the manifest.
-8. Checks for stale files, processes, units, rules, and PipeWire nodes.
-9. Reports whether the original configuration was fully restored.
+1. Validates the manifest and journal schema.
+2. Checks all owned paths for local changes.
+3. Stops before any deletion if one owned path was changed.
+4. Restores replaced files from verified backups.
+5. Removes the exact manifest-owned udev rule, reloads udev, and refreshes only connected normal-mode Wave:3 devices.
+6. Removes executable links, the inactive unit, and exact build files.
+7. Removes its exact backup and transaction files.
+8. Verifies that no manifest-owned path, running daemon, active unit, stale policy, or build directory remains.
 
-The default uninstall preserves user profiles only after it tells the user where they remain. A separate `--purge` option can remove them after confirmation.
+Normal uninstall preserves profiles and says where they remain. `librewavectl uninstall --purge` removes profiles only after explicit confirmation. The journal records this choice, so an interrupted removal cannot resume with different profile behavior.
+
+Setup never changes Gain Lock. Uninstall and unmanage do not restore a saved Gain Lock value.
 
 ## Pre-release policy
 
-Development installations support only the current manifest, configuration, and IPC formats. When one changes, the development installer can back up and reset the old test state instead of migrating it.
+Development installations support only the current manifest, configuration, and IPC formats. The lifecycle refuses an unknown manifest or journal schema. Remove an incompatible pre-release installation explicitly before the next setup.
 
-Do not add compatibility shims, deprecated commands, dual readers, dual writers, or fallback installation paths before the first public release. The only supported development state is the state produced by the current checkout.
+Do not add compatibility readers, deprecated commands, dual writers, or fallback installation paths before the first public release.

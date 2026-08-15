@@ -65,7 +65,7 @@ On first adoption, LibreWave reads the current device state and stores it as the
 
 After adoption, the profile is authoritative while the daemon runs. Physical knob, mute, and touch events are user input. The daemon records them in observed state, applies the product rule for that control, and persists the resulting desired state.
 
-An explicit unmanage operation releases the audio graph and restores setup files that LibreWave replaced. It also restores a saved gain-lock value when the device is connected and the exact schema is still known.
+An explicit unmanage operation releases the audio graph and restores setup files that LibreWave replaced. Setup does not change Gain Lock, so unmanage does not restore a saved Gain Lock value.
 
 ## Restart behavior
 
@@ -75,15 +75,17 @@ The daemon must not alternate between two competing graph layouts or repeatedly 
 
 ## Installation ownership
 
-`librewavectl` owns setup, verification, repair, and removal. It records every installed path, backup, service unit, and policy file in an installation manifest. Setup stages a complete new installation, validates it, switches to it atomically, restarts the daemon, and removes the superseded LibreWave-owned files.
+`librewavectl` owns setup, verification, and removal. It records every installed path, backup, service unit, and policy file in one installation manifest. Setup stages a complete new installation, validates it, switches the active link atomically, and removes superseded LibreWave-owned files.
 
-Uninstall stops the daemon, releases the graph, restores saved user configuration, removes only manifest-owned files, reloads affected services, and verifies that no LibreWave process, unit, executable link, policy file, or audio node remains.
+The current setup installs the exact Wave:3 udev access rule and an inactive read-only daemon unit. It does not install the WirePlumber card-disable rule, enable the unit, start the daemon, or take audio ownership. These actions stay blocked until the production ALSA and PipeWire host is ready.
+
+Uninstall removes only unmodified, manifest-owned paths and restores exact user files from verified backups. It preserves profiles by default. An explicit, confirmed purge removes profiles. Setup does not change Gain Lock or other hardware settings, so uninstall has no hardware value to restore.
 
 Development commands build the current checkout and call the same installer. They do not maintain a separate development installation path. See [Setup and removal](setup.md).
 
 ## Pre-release evolution
 
-Before the first public release, the repository supports one current configuration schema, one IPC version, one command vocabulary, and one installation layout. A breaking development change updates or resets local test state. It does not add an adapter for an older development build.
+Before the first public release, the repository supports one current configuration schema, one IPC version, one command vocabulary, and one installation layout. The lifecycle refuses an unknown schema. A breaking development change replaces the only supported test layout instead of adding an adapter for an older development build.
 
 Compatibility migrations begin only when a public release creates state that users need to keep.
 

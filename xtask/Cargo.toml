@@ -1,0 +1,16 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "LibreWave current-checkout development commands"
+publish = false
+
+[dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -18,7 +18,7 @@ The daemon is the only normal writer to Wave hardware. The CLI and UI do not acc
 
 - Control Wave:3 gain, mute, headphone output, direct monitoring, filters, and supported lighting settings.
 - Stop the desktop audio service from changing hardware gain or headphone volume behind the user's back.
-- Replace the current capture-first WirePlumber workaround with daemon-owned recovery and a minimal session-manager rule.
+- Replace the current capture-first workaround with daemon-owned recovery. LibreWave will install the card-disable rule only after the production audio host can take ownership safely.
 - Expose stable software endpoints for applications, monitor output, and stream output.
 - Match established Wave Link behavior when Windows and macOS handle operating-system volume changes differently from physical controls.
 - Provide exact protocol-version checks and refuse unsafe writes to unknown layouts.
