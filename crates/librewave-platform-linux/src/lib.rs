@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 pub use librewave_device::{DeviceIdentity, DeviceModel, UsbIdentity};
 
+pub mod audio_lifecycle;
 mod discovery;
 mod services;
 mod usb;
