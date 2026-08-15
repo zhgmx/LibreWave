@@ -3,6 +3,14 @@ members = [
     "crates/librewave-device",
     "crates/librewave-protocol",
     "crates/librewave-platform-linux",
+    "crates/librewave-ui",
+    "crates/librewave",
+]
+default-members = [
+    "crates/librewave-device",
+    "crates/librewave-protocol",
+    "crates/librewave-platform-linux",
+    "crates/librewave-ui",
 ]
 resolver = "3"
 
