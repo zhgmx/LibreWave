@@ -1,9 +1,10 @@
-//! Read-only Linux USB probing, discovery, and host-audio inventory.
+//! Linux USB control, discovery, and host-audio inventory.
 //!
-//! This crate can open the reviewed Wave:3 normal-mode USB device and send exact
-//! device-to-host control requests. It does not claim audio interfaces, detach
-//! kernel drivers, send control writes, change ALSA controls, create or remove
-//! `PipeWire` objects, or modify `WirePlumber`, udev, or systemd state.
+//! This crate can inspect the reviewed Wave:3 normal-mode USB device or open one
+//! exclusive vendor-control connection. The connection admits reads and typed,
+//! reversible writes through one handle. It does not claim audio interfaces,
+//! detach kernel drivers, change ALSA controls, create or remove `PipeWire`
+//! objects, or modify `WirePlumber`, udev, or systemd state.
 
 use std::io;
 use std::path::PathBuf;
@@ -17,8 +18,8 @@ mod services;
 mod usb;
 
 pub use usb::{
-    DescriptorError, TopologyError, UsbProbeError, admission_snapshot, inspect_wave3_usb,
-    probe_wave3_usb,
+    DescriptorError, TopologyError, UsbProbeError, Wave3UsbConnection, admission_snapshot,
+    inspect_wave3_usb, probe_wave3_usb,
 };
 
 pub mod ipc;

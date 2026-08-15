@@ -1,4 +1,8 @@
-//! Linux endpoint-zero transport for the read-only Wave:3 session probe.
+//! Linux endpoint-zero transport for Wave:3 admission and control.
+
+mod connection;
+
+pub use connection::Wave3UsbConnection;
 
 use librewave_core::{
     AdmissionError, DeviceAdmissionSnapshot, FixedPointValue, VolumeSelection, Wave3ConfigSnapshot,
@@ -74,6 +78,7 @@ pub enum UsbProbeError {
     Topology(TopologyError),
     Descriptor(DescriptorError),
     Session(SessionError),
+    AdmissionCleanup { admission: SessionError, release: TransportError },
 }
 
 impl fmt::Display for UsbProbeError {
@@ -83,6 +88,10 @@ impl fmt::Display for UsbProbeError {
             Self::Topology(error) => error.fmt(formatter),
             Self::Descriptor(error) => error.fmt(formatter),
             Self::Session(error) => error.fmt(formatter),
+            Self::AdmissionCleanup { admission, release } => write!(
+                formatter,
+                "Wave:3 admission failed ({admission}) and releasing the control interface failed ({release})"
+            ),
         }
     }
 }
@@ -94,6 +103,7 @@ impl std::error::Error for UsbProbeError {
             Self::Topology(error) => Some(error),
             Self::Descriptor(error) => Some(error),
             Self::Session(error) => Some(error),
+            Self::AdmissionCleanup { admission, .. } => Some(admission),
         }
     }
 }
@@ -209,6 +219,7 @@ fn admission_error(error: UsbProbeError) -> AdmissionError {
             | SessionError::LongTransfer { .. }
             | SessionError::Schema(_),
         ) => AdmissionError::MalformedResponse,
+        UsbProbeError::AdmissionCleanup { .. } => AdmissionError::Transport,
     }
 }
 
