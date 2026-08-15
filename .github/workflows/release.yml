@@ -103,12 +103,12 @@ jobs:
 
             ### Quick Install (builds from source)
             ```bash
-            curl -sSL https://raw.githubusercontent.com/polariscli/Undertone/main/scripts/install.sh | bash
+            curl -sSL https://raw.githubusercontent.com/zhgmx/LibreWave/undertone/scripts/install.sh | bash
             ```
 
             ### Pre-built Binary (faster)
             ```bash
-            curl -sSL https://raw.githubusercontent.com/polariscli/Undertone/main/scripts/install.sh | bash -s -- --binary
+            curl -sSL https://raw.githubusercontent.com/zhgmx/LibreWave/undertone/scripts/install.sh | bash -s -- --binary
             ```
 
             ### Manual Installation
@@ -124,4 +124,4 @@ jobs:
             - Qt6 runtime libraries
             - KDE Kirigami 6 runtime
 
-            See [README](https://github.com/polariscli/Undertone#readme) for details.
+            See [README](https://github.com/zhgmx/LibreWave#readme) for details.

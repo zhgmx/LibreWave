@@ -1,11 +1,11 @@
 #!/bin/bash
 # Undertone Installation Script
-# https://github.com/polariscli/Undertone
+# https://github.com/zhgmx/LibreWave
 #
 # Usage:
-#   curl -sSL https://raw.githubusercontent.com/polariscli/Undertone/main/scripts/install.sh | bash
-#   curl -sSL https://raw.githubusercontent.com/polariscli/Undertone/main/scripts/install.sh | bash -s -- install --binary
-#   curl -sSL https://raw.githubusercontent.com/polariscli/Undertone/main/scripts/install.sh | bash -s -- uninstall
+#   curl -sSL https://raw.githubusercontent.com/zhgmx/LibreWave/undertone/scripts/install.sh | bash
+#   curl -sSL https://raw.githubusercontent.com/zhgmx/LibreWave/undertone/scripts/install.sh | bash -s -- install --binary
+#   curl -sSL https://raw.githubusercontent.com/zhgmx/LibreWave/undertone/scripts/install.sh | bash -s -- uninstall
 #
 # Or run locally:
 #   ./scripts/install.sh [command] [options]
@@ -13,7 +13,7 @@
 set -e
 
 # Configuration
-GITHUB_REPO="polariscli/Undertone"
+GITHUB_REPO="zhgmx/LibreWave"
 REPO_URL="https://github.com/${GITHUB_REPO}.git"
 INSTALL_DIR="${UNDERTONE_INSTALL_DIR:-$HOME/.local/share/undertone-src}"
 BIN_DIR="${UNDERTONE_BIN_DIR:-$HOME/.cargo/bin}"
@@ -870,10 +870,10 @@ show_help() {
     echo -e "  ${BOLD}--binary${NC}      Download pre-built binaries instead of building"
     echo ""
     echo "Quick install (from source):"
-    echo "  curl -sSL https://raw.githubusercontent.com/polariscli/Undertone/main/scripts/install.sh | bash"
+    echo "  curl -sSL https://raw.githubusercontent.com/zhgmx/LibreWave/undertone/scripts/install.sh | bash"
     echo ""
     echo "Quick install (pre-built binary):"
-    echo "  curl -sSL https://raw.githubusercontent.com/polariscli/Undertone/main/scripts/install.sh | bash -s -- --binary"
+    echo "  curl -sSL https://raw.githubusercontent.com/zhgmx/LibreWave/undertone/scripts/install.sh | bash -s -- --binary"
     echo ""
     echo "Environment variables:"
     echo "  UNDERTONE_INSTALL_DIR  Source directory (default: ~/.local/share/undertone-src)"
