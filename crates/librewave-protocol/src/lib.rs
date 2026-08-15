@@ -14,7 +14,10 @@ pub use schema::{Access, FieldSpec, MessageSchema, SchemaError, admit, config_sc
 pub use setup::{
     SetupError, SetupPacket, decode_version_response, message_transfer, version_probe,
 };
-pub use wave3::{VolumeSelect, Wave3Config, Wave3ConfigField, config_fields};
+pub use wave3::{
+    VolumeSelect, Wave3Config, Wave3ConfigField, Wave3ControlState, Wave3GainDb, Wave3HeadphoneDb,
+    Wave3MonitorPercent, config_fields,
+};
 
 #[cfg(test)]
 mod tests {
@@ -177,6 +180,49 @@ mod tests {
                 SemanticValue::FixedPoint { raw: 0, fractional_bits: 7 }
             ),
             Err(CodecError::Value { reason: ValueError::FractionalBits { .. }, .. })
+        ));
+    }
+
+    #[test]
+    fn typed_controls_decode_units_and_capability_boundaries() {
+        let schema = admitted_config(ApiVersion::new(5, 4));
+        let mut payload = [0; 16];
+        payload[0..2].copy_from_slice(&5_120i16.to_le_bytes());
+        payload[7..9].copy_from_slice(&(-7_680i16).to_le_bytes());
+        payload[10..12].copy_from_slice(&12_800i16.to_le_bytes());
+        payload[12] = VolumeSelect::Mix as u8;
+        payload[4] = 1;
+        payload[9] = 1;
+        payload[15] = 1;
+        let config = Wave3Config::from_schema(schema, &payload).expect("valid controls");
+        let controls = config.controls().expect("typed controls");
+
+        assert_eq!(controls.microphone_gain.raw_q8_8(), 5_120);
+        assert_eq!(controls.microphone_gain.fractional_bits(), 8);
+        assert_eq!(controls.headphone_volume.raw_q8_8(), -7_680);
+        assert_eq!(controls.headphone_volume.fractional_bits(), 8);
+        assert_eq!(controls.direct_monitor.raw_q8_8(), 12_800);
+        assert_eq!(controls.direct_monitor.fractional_bits(), 8);
+        assert!(controls.microphone_mute);
+        assert!(controls.headphone_mute);
+        assert!(controls.gain_lock);
+        assert_eq!(controls.volume_select, VolumeSelect::Mix);
+    }
+
+    #[test]
+    fn typed_controls_reject_invalid_wire_values_through_the_schema() {
+        let schema = admitted_config(ApiVersion::new(5, 4));
+        let mut payload = [0; 16];
+        payload[0..2].copy_from_slice(&1i16.to_le_bytes());
+        payload[12] = VolumeSelect::Mic as u8;
+        let config = Wave3Config::from_schema(schema, &payload).expect("payload shape");
+
+        assert!(matches!(
+            config.controls(),
+            Err(CodecError::Value {
+                field: Wave3ConfigField::InputGain,
+                reason: ValueError::WrongStep { .. }
+            })
         ));
     }
 

@@ -213,48 +213,38 @@ fn admission_error(error: UsbProbeError) -> AdmissionError {
 }
 
 fn config_snapshot(config: &librewave_protocol::Wave3Config) -> Result<Wave3ConfigSnapshot, ()> {
+    let controls = config.controls().map_err(|_| ())?;
     Ok(Wave3ConfigSnapshot {
-        input_gain: fixed(config, Wave3ConfigField::InputGain)?,
-        input_mute: boolean(config, Wave3ConfigField::InputMute)?,
-        clipguard_enable: boolean(config, Wave3ConfigField::ClipguardEnable)?,
-        lowcut_enable: boolean(config, Wave3ConfigField::LowcutEnable)?,
-        headphone_volume: fixed(config, Wave3ConfigField::HeadphoneVolume)?,
-        headphone_mute: boolean(config, Wave3ConfigField::HeadphoneMute)?,
-        direct_monitor: fixed(config, Wave3ConfigField::DirectMonitor)?,
-        volume_select: volume_selection(config)?,
+        input_gain: FixedPointValue {
+            raw: controls.microphone_gain.raw_q8_8(),
+            fractional_bits: controls.microphone_gain.fractional_bits(),
+        },
+        input_mute: controls.microphone_mute,
+        clipguard_enable: controls.clipguard_enabled,
+        lowcut_enable: controls.lowcut_enabled,
+        headphone_volume: FixedPointValue {
+            raw: controls.headphone_volume.raw_q8_8(),
+            fractional_bits: controls.headphone_volume.fractional_bits(),
+        },
+        headphone_mute: controls.headphone_mute,
+        direct_monitor: FixedPointValue {
+            raw: controls.direct_monitor.raw_q8_8(),
+            fractional_bits: controls.direct_monitor.fractional_bits(),
+        },
+        volume_select: match controls.volume_select {
+            librewave_protocol::VolumeSelect::Mic => VolumeSelection::Microphone,
+            librewave_protocol::VolumeSelect::Headphone => VolumeSelection::Headphone,
+            librewave_protocol::VolumeSelect::Mix => VolumeSelection::Mix,
+        },
         all_leds_off: boolean(config, Wave3ConfigField::AllLedsOff)?,
         leds_flip: boolean(config, Wave3ConfigField::LedsFlip)?,
-        gain_lock: boolean(config, Wave3ConfigField::GainLock)?,
+        gain_lock: controls.gain_lock,
     })
 }
 
 fn boolean(config: &librewave_protocol::Wave3Config, field: Wave3ConfigField) -> Result<bool, ()> {
     match config.get(field).map_err(|_| ())? {
         SemanticValue::Boolean(value) => Ok(value),
-        _ => Err(()),
-    }
-}
-
-fn fixed(
-    config: &librewave_protocol::Wave3Config,
-    field: Wave3ConfigField,
-) -> Result<FixedPointValue, ()> {
-    match config.get(field).map_err(|_| ())? {
-        SemanticValue::FixedPoint { raw, fractional_bits } => {
-            Ok(FixedPointValue { raw, fractional_bits })
-        }
-        _ => Err(()),
-    }
-}
-
-fn volume_selection(config: &librewave_protocol::Wave3Config) -> Result<VolumeSelection, ()> {
-    match config.get(Wave3ConfigField::VolumeSelect).map_err(|_| ())? {
-        SemanticValue::Enum(value) => match value {
-            1 => Ok(VolumeSelection::Microphone),
-            2 => Ok(VolumeSelection::Headphone),
-            3 => Ok(VolumeSelection::Mix),
-            _ => Err(()),
-        },
         _ => Err(()),
     }
 }

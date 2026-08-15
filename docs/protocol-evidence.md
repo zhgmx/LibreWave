@@ -26,6 +26,28 @@ The gain-lock field states that it ignores input-volume `SET_CUR` requests from 
 
 One compared implementation agrees with several core offsets but omits fields from the same message and treats one status message as a meter message. LibreWave will use the exact recovered schema and physical reads instead of selecting a layout by USB product identifier alone.
 
+## Wave:3 control semantics
+
+The reviewed API 5.3 and 5.4 `/config` messages use the same 16-byte layout. The following values have enough evidence for typed read-only decoding:
+
+| Control | Wire location | Unit and limits | Confidence |
+| --- | --- | --- | --- |
+| Microphone gain | Bytes 0 to 1, signed little-endian Q8.8 | 0 to 40 dB, 0.5 dB steps | Recovered schema and independent implementation |
+| Microphone mute | Byte 4 | Boolean | Recovered schema |
+| Clipguard | Byte 5 | Boolean | Recovered schema |
+| Low-cut filter | Byte 6 | Boolean | Recovered schema |
+| Headphone output | Bytes 7 to 8, signed little-endian Q8.8 | -60 to 0 dB, 0.5 dB steps | Recovered schema and independent implementation |
+| Headphone mute | Byte 9 | Boolean | Recovered schema |
+| Direct monitor balance | Bytes 10 to 11, signed little-endian Q8.8 | 0 to 100 percent, 5 percent steps | Recovered schema and independent implementation |
+| Physical knob target | Byte 12 | Microphone, headphone, or mix | Recovered schema |
+| Gain Lock | Byte 15 | Boolean. This is a device policy, not a LibreWave software-volume lock. | Recovered schema and vendor behavior description |
+
+LibreWave keeps these hardware values separate from desktop endpoint levels. The typed protocol view is derived from a complete configuration read. The raw baseline stays available so a future reviewed transaction can preserve reserved bytes.
+
+The Wave:3 configuration does not contain Wave Link mixer faders. Mixer channel values belong to the routing and engine layers. LibreWave therefore does not pretend that a hardware configuration read provides mixer state.
+
+No physical control write has been validated yet. The read path and typed limits do not authorize writes. A later write milestone needs a reversible test plan, exact device admission, complete-baseline mutation, readback, and restoration.
+
 ## Generated catalog
 
 Generated protocol code must be reproducible from checked-in normalized evidence. A generator change and its output belong in the same commit.

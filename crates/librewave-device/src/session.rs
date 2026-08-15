@@ -1,7 +1,8 @@
 use crate::DeviceIdentity;
 use librewave_protocol::{
     ApiVersion, CodecError, Direction, SchemaError, SetupError, SetupPacket, Wave3Config,
-    config_fields, config_schema, decode_version_response, message_transfer, version_probe,
+    Wave3ControlState, config_fields, config_schema, decode_version_response, message_transfer,
+    version_probe,
 };
 use std::fmt;
 use std::time::Duration;
@@ -151,6 +152,15 @@ impl Wave3Session {
     pub const fn config(&self) -> &Wave3Config {
         &self.config
     }
+
+    /// Returns the typed, read-only hardware controls from the admitted baseline.
+    ///
+    /// # Errors
+    ///
+    /// Returns a schema error if a value cannot be decoded from the baseline.
+    pub fn controls(&self) -> Result<Wave3ControlState, CodecError> {
+        self.config.controls()
+    }
 }
 
 /// Reads the API version first, admits its exact schema, and then reads the
@@ -271,6 +281,9 @@ mod tests {
         assert_eq!(session.identity(), DeviceIdentity::wave3());
         assert_eq!(session.api(), ApiVersion::new(5, 4));
         assert_eq!(session.config().as_bytes()[12], 1);
+        let controls = session.controls().expect("typed read-only controls");
+        assert_eq!(controls.microphone_gain.raw_q8_8(), 0);
+        assert_eq!(controls.volume_select, librewave_protocol::VolumeSelect::Mic);
         assert_eq!(transport.requests.len(), 2);
         assert_eq!(transport.requests[0], (version_probe(7), 2, CONTROL_TRANSFER_TIMEOUT,));
         assert_eq!(

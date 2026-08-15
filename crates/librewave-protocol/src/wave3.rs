@@ -1,5 +1,7 @@
 use crate::schema::{Access, FieldSpec, MessageSchema};
-use crate::{ApiVersion, DeviceModel, MessageIdentity, MessageKind, SchemaIdentity};
+use crate::{ApiVersion, DeviceModel, MessageIdentity, MessageKind, SchemaIdentity, ValueError};
+
+pub(crate) const Q8_8_FRACTIONAL_BITS: u8 = 8;
 
 /// The three valid Wave:3 knob targets in the API 5 configuration message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -19,6 +21,98 @@ impl VolumeSelect {
             _ => None,
         }
     }
+}
+
+/// A Wave:3 microphone gain in signed Q8.8 dB.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Wave3GainDb(i32);
+
+impl Wave3GainDb {
+    /// Returns the signed Q8.8 wire value.
+    #[must_use]
+    pub const fn raw_q8_8(self) -> i32 {
+        self.0
+    }
+
+    fn from_validated_raw(raw: i32) -> Self {
+        Self(raw)
+    }
+
+    /// Returns the Q-format fractional-bit count admitted by the schema.
+    #[must_use]
+    pub const fn fractional_bits(self) -> u8 {
+        Q8_8_FRACTIONAL_BITS
+    }
+}
+
+/// A Wave:3 headphone output level in signed Q8.8 dB.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Wave3HeadphoneDb(i32);
+
+impl Wave3HeadphoneDb {
+    /// Returns the signed Q8.8 wire value.
+    #[must_use]
+    pub const fn raw_q8_8(self) -> i32 {
+        self.0
+    }
+
+    fn from_validated_raw(raw: i32) -> Self {
+        Self(raw)
+    }
+
+    /// Returns the Q-format fractional-bit count admitted by the schema.
+    #[must_use]
+    pub const fn fractional_bits(self) -> u8 {
+        Q8_8_FRACTIONAL_BITS
+    }
+}
+
+/// A Wave:3 direct-monitor balance in Q8.8 percent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Wave3MonitorPercent(i32);
+
+impl Wave3MonitorPercent {
+    /// Returns the Q8.8 wire value.
+    #[must_use]
+    pub const fn raw_q8_8(self) -> i32 {
+        self.0
+    }
+    fn from_validated_raw(raw: i32) -> Self {
+        Self(raw)
+    }
+
+    /// Returns the Q-format fractional-bit count admitted by the schema.
+    #[must_use]
+    pub const fn fractional_bits(self) -> u8 {
+        Q8_8_FRACTIONAL_BITS
+    }
+}
+
+/// The typed hardware controls decoded from a Wave:3 API 5 configuration.
+///
+/// This is a derived read view. The complete [`Wave3Config`] remains the
+/// baseline for any future reviewed transaction so reserved bytes are kept.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct Wave3ControlState {
+    /// Microphone preamp gain.
+    pub microphone_gain: Wave3GainDb,
+    /// Hardware microphone mute state.
+    pub microphone_mute: bool,
+    /// Clipguard processing state.
+    pub clipguard_enabled: bool,
+    /// Low-cut filter state.
+    pub lowcut_enabled: bool,
+    /// Headphone output level.
+    pub headphone_volume: Wave3HeadphoneDb,
+    /// Hardware headphone mute state.
+    pub headphone_mute: bool,
+    /// Direct monitor balance.
+    pub direct_monitor: Wave3MonitorPercent,
+    /// Physical knob target.
+    pub volume_select: VolumeSelect,
+    /// Device policy that controls operating-system gain requests.
+    pub gain_lock: bool,
 }
 
 /// Every field in the reviewed 16-byte Wave:3 API 5 configuration message.
@@ -41,13 +135,37 @@ const RW: Access = Access::READ_WRITE;
 
 // Reviewed normalized protocol evidence for the Wave:3 API 5.3/5.4 schemas.
 static CONFIG_FIELDS: &[FieldSpec] = &[
-    FieldSpec::signed_fixed(Wave3ConfigField::InputGain, 0, 8, 0, 10_240, 128, RW),
+    FieldSpec::signed_fixed(
+        Wave3ConfigField::InputGain,
+        0,
+        Q8_8_FRACTIONAL_BITS,
+        0,
+        10_240,
+        128,
+        RW,
+    ),
     FieldSpec::boolean(Wave3ConfigField::InputMute, 4, RW),
     FieldSpec::boolean(Wave3ConfigField::ClipguardEnable, 5, RW),
     FieldSpec::boolean(Wave3ConfigField::LowcutEnable, 6, RW),
-    FieldSpec::signed_fixed(Wave3ConfigField::HeadphoneVolume, 7, 8, -15_360, 0, 128, RW),
+    FieldSpec::signed_fixed(
+        Wave3ConfigField::HeadphoneVolume,
+        7,
+        Q8_8_FRACTIONAL_BITS,
+        -15_360,
+        0,
+        128,
+        RW,
+    ),
     FieldSpec::boolean(Wave3ConfigField::HeadphoneMute, 9, RW),
-    FieldSpec::signed_fixed(Wave3ConfigField::DirectMonitor, 10, 8, 0, 25_600, 1_280, RW),
+    FieldSpec::signed_fixed(
+        Wave3ConfigField::DirectMonitor,
+        10,
+        Q8_8_FRACTIONAL_BITS,
+        0,
+        25_600,
+        1_280,
+        RW,
+    ),
     FieldSpec::volume_select(Wave3ConfigField::VolumeSelect, 12, RW),
     FieldSpec::boolean(Wave3ConfigField::AllLedsOff, 13, RW),
     FieldSpec::boolean(Wave3ConfigField::LedsFlip, 14, RW),
@@ -136,6 +254,67 @@ impl Wave3Config {
     /// Returns an error when the stored field contains an invalid wire value.
     pub fn get(&self, field: Wave3ConfigField) -> Result<crate::SemanticValue, crate::CodecError> {
         crate::codec::decode_field(self.schema, *field_spec(field), &self.bytes)
+    }
+
+    /// Decodes the user-facing Wave:3 hardware controls with their units and limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a field contains an invalid wire value.
+    pub fn controls(&self) -> Result<Wave3ControlState, crate::CodecError> {
+        let fixed = |field| match self.get(field)? {
+            crate::SemanticValue::FixedPoint { raw, fractional_bits }
+                if fractional_bits == Q8_8_FRACTIONAL_BITS =>
+            {
+                Ok(raw)
+            }
+            crate::SemanticValue::FixedPoint { fractional_bits, .. } => {
+                Err(crate::CodecError::Value {
+                    field,
+                    reason: ValueError::FractionalBits {
+                        expected: Q8_8_FRACTIONAL_BITS,
+                        actual: fractional_bits,
+                    },
+                })
+            }
+            _ => Err(crate::CodecError::Value { field, reason: ValueError::WrongType }),
+        };
+        let boolean = |field| match self.get(field)? {
+            crate::SemanticValue::Boolean(value) => Ok(value),
+            _ => Err(crate::CodecError::Value { field, reason: ValueError::WrongType }),
+        };
+        let selection = match self.get(Wave3ConfigField::VolumeSelect)? {
+            crate::SemanticValue::Enum(value) => {
+                VolumeSelect::from_wire(value).ok_or(crate::CodecError::Value {
+                    field: Wave3ConfigField::VolumeSelect,
+                    reason: ValueError::UnknownEnum(value),
+                })?
+            }
+            _ => {
+                return Err(crate::CodecError::Value {
+                    field: Wave3ConfigField::VolumeSelect,
+                    reason: ValueError::WrongType,
+                });
+            }
+        };
+        let gain_raw = fixed(Wave3ConfigField::InputGain)?;
+        let headphone_raw = fixed(Wave3ConfigField::HeadphoneVolume)?;
+        let monitor_raw = fixed(Wave3ConfigField::DirectMonitor)?;
+        let microphone_gain = Wave3GainDb::from_validated_raw(gain_raw);
+        let headphone_volume = Wave3HeadphoneDb::from_validated_raw(headphone_raw);
+        let direct_monitor = Wave3MonitorPercent::from_validated_raw(monitor_raw);
+
+        Ok(Wave3ControlState {
+            microphone_gain,
+            microphone_mute: boolean(Wave3ConfigField::InputMute)?,
+            clipguard_enabled: boolean(Wave3ConfigField::ClipguardEnable)?,
+            lowcut_enabled: boolean(Wave3ConfigField::LowcutEnable)?,
+            headphone_volume,
+            headphone_mute: boolean(Wave3ConfigField::HeadphoneMute)?,
+            direct_monitor,
+            volume_select: selection,
+            gain_lock: boolean(Wave3ConfigField::GainLock)?,
+        })
     }
 
     /// Changes one field in a complete baseline and preserves every other byte.
