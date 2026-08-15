@@ -46,7 +46,9 @@ LibreWave keeps these hardware values separate from desktop endpoint levels. The
 
 The Wave:3 configuration does not contain Wave Link mixer faders. Mixer channel values belong to the routing and engine layers. LibreWave therefore does not pretend that a hardware configuration read provides mixer state.
 
-No physical control write has been validated yet. The read path and typed limits do not authorize writes. A later write milestone needs a reversible test plan, exact device admission, complete-baseline mutation, readback, and restoration.
+LibreWave now has a typed transaction path for these reviewed API 5.3 and 5.4 fields. It admits the exact device and API, changes one semantic field in a complete baseline, preserves protected bytes, reads the complete message before and after the write, and attempts restoration after a failure. Default tests use fake transports and do not write to live hardware.
+
+Physical validation of each writable field is still required. The test plan must name the field, original value, requested value, readback, and safe restoration. Product documentation must not claim that physical write validation is complete until those tests pass.
 
 ## Generated catalog
 

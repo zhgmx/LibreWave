@@ -78,6 +78,16 @@ impl fmt::Display for DeviceId {
     }
 }
 
+/// A daemon-issued revision of one device's observed hardware baseline.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct DeviceGeneration(pub u64);
+
+impl fmt::Display for DeviceGeneration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+
 /// The connection state of a managed device.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum DeviceConnection {
@@ -100,8 +110,13 @@ impl fmt::Display for DeviceConnection {
 pub enum DeviceAdmissionSnapshot {
     /// The device has not been probed in this daemon state.
     NotInspected,
-    /// The exact API schema was admitted and its safe configuration was decoded.
-    Admitted { api: ApiVersion, config: Wave3ConfigSnapshot },
+    /// The exact API schema was admitted; the observed configuration can be unavailable.
+    Admitted {
+        api: ApiVersion,
+        generation: DeviceGeneration,
+        write_access: DeviceWriteAccess,
+        config: Option<Wave3ConfigSnapshot>,
+    },
     /// Admission failed without removing the device from inventory.
     Failed { error: AdmissionError },
 }
@@ -118,7 +133,17 @@ impl DeviceAdmissionSnapshot {
     pub const fn control_access(&self) -> ControlAccessState {
         match self {
             Self::NotInspected => ControlAccessState::NotInspected,
-            Self::Admitted { .. } => ControlAccessState::ReadOnly,
+            Self::Admitted { write_access: DeviceWriteAccess::Ready, .. } => {
+                ControlAccessState::Writable
+            }
+            Self::Admitted {
+                write_access:
+                    DeviceWriteAccess::Locked { reason: DeviceWriteLockReason::NoOwnedConnection },
+                ..
+            } => ControlAccessState::ReadOnly,
+            Self::Admitted { write_access: DeviceWriteAccess::Locked { .. }, .. } => {
+                ControlAccessState::WriteLocked
+            }
             Self::Failed { error } => match error {
                 AdmissionError::PermissionDenied => ControlAccessState::PermissionDenied,
                 AdmissionError::UnsupportedApi { .. } | AdmissionError::MalformedResponse => {
@@ -130,6 +155,15 @@ impl DeviceAdmissionSnapshot {
                 | AdmissionError::TimedOut
                 | AdmissionError::Transport => ControlAccessState::Unavailable,
             },
+        }
+    }
+
+    /// Returns the observed device generation, when admission succeeded.
+    #[must_use]
+    pub const fn generation(&self) -> Option<DeviceGeneration> {
+        match self {
+            Self::Admitted { generation, .. } => Some(*generation),
+            Self::NotInspected | Self::Failed { .. } => None,
         }
     }
 
@@ -146,7 +180,7 @@ impl DeviceAdmissionSnapshot {
     #[must_use]
     pub const fn config(&self) -> Option<&Wave3ConfigSnapshot> {
         match self {
-            Self::Admitted { config, .. } => Some(config),
+            Self::Admitted { config, .. } => config.as_ref(),
             Self::NotInspected | Self::Failed { .. } => None,
         }
     }
@@ -166,6 +200,8 @@ impl DeviceAdmissionSnapshot {
 pub enum ControlAccessState {
     NotInspected,
     ReadOnly,
+    Writable,
+    WriteLocked,
     PermissionDenied,
     Unavailable,
 }
@@ -175,8 +211,38 @@ impl fmt::Display for ControlAccessState {
         formatter.write_str(match self {
             Self::NotInspected => "not inspected",
             Self::ReadOnly => "read-only",
+            Self::Writable => "writable",
+            Self::WriteLocked => "write locked",
             Self::PermissionDenied => "permission denied",
             Self::Unavailable => "unavailable",
+        })
+    }
+}
+
+/// Whether the daemon can start a hardware control transaction.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub enum DeviceWriteAccess {
+    Ready,
+    Locked { reason: DeviceWriteLockReason },
+}
+
+/// Why an admitted device rejects hardware writes.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum DeviceWriteLockReason {
+    NoOwnedConnection,
+    PersistenceAmbiguous,
+    RestoreFailed,
+    RestorationUnverified,
+}
+
+impl fmt::Display for DeviceWriteLockReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::NoOwnedConnection => "the daemon does not own an active connection",
+            Self::PersistenceAmbiguous => "desired-state intent or durability is unresolved",
+            Self::RestoreFailed => "desired state could not be restored",
+            Self::RestorationUnverified => "transaction restoration could not be verified",
         })
     }
 }
@@ -205,6 +271,23 @@ pub struct Wave3ConfigSnapshot {
 pub struct FixedPointValue {
     pub raw: i32,
     pub fractional_bits: u8,
+}
+
+/// One typed Wave:3 hardware control change.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub enum Wave3Control {
+    InputGain(FixedPointValue),
+    MicrophoneMute(bool),
+    Clipguard(bool),
+    LowCut(bool),
+    HeadphoneLevel(FixedPointValue),
+    HeadphoneMute(bool),
+    MonitorMix(FixedPointValue),
+    KnobTarget(VolumeSelection),
+    AllLedsOff(bool),
+    LedsFlip(bool),
+    GainLock(bool),
 }
 
 /// A reviewed Wave:3 hardware knob target.
@@ -370,8 +453,10 @@ pub enum Command {
     GetStatus,
     /// Return the devices in the current immutable snapshot.
     ListDevices,
-    /// Probe one current device candidate and return its admission state.
+    /// Return retained admission state, or open and admit a connection when needed.
     InspectDevice { id: DeviceId },
+    /// Change one reviewed Wave:3 hardware control through the daemon-owned connection.
+    SetWave3Control { id: DeviceId, expected_generation: DeviceGeneration, control: Wave3Control },
 }
 
 /// Events emitted when daemon state changes.

@@ -59,11 +59,17 @@ The daemon maintains one desired state and one observed state for each managed d
 
 The UI and CLI receive immutable snapshots followed by ordered events. They do not keep an independent authoritative device model.
 
+Wave:3 hardware commands name one reviewed control and include the device generation shown by the daemon. The daemon rejects a stale generation. The transaction path also reads the complete device configuration before every write. A physical change after the snapshot therefore causes a stale-baseline failure instead of a merge.
+
+The daemon keeps one admitted Linux USB connection for each managed Wave:3. Inspection returns the retained baseline. It does not poll later physical changes in this slice. Physical-event polling remains required work.
+
+Desired hardware state contains only controls that a client explicitly changed through LibreWave. It is stored under the profile directory in one strict pre-release schema. A command is recorded as pending before USB access. The daemon promotes it to managed state only after verified apply or an unchanged result. A pending command after a crash locks restoration for that topology.
+
 ## Device adoption
 
-On first adoption, LibreWave reads the current device state and stores it as the initial profile. It does not reset the microphone to project defaults.
+On first adoption, LibreWave reads the current device state as its observed baseline. It does not store every observed hardware field as desired state, and it does not reset the microphone to project defaults.
 
-After adoption, the profile is authoritative while the daemon runs. Physical knob, mute, and touch events are user input. The daemon records them in observed state, applies the product rule for that control, and persists the resulting desired state.
+An explicit client command places that hardware control under LibreWave management. Managed controls are authoritative during reconnect. Unmanaged controls keep the value reported by the device. Physical knob, mute, and touch events will become user input after event polling is implemented.
 
 An explicit unmanage operation releases the audio graph and restores setup files that LibreWave replaced. Setup does not change Gain Lock, so unmanage does not restore a saved Gain Lock value.
 
@@ -71,13 +77,15 @@ An explicit unmanage operation releases the audio graph and restores setup files
 
 The daemon models startup, device reconnect, PipeWire restart, WirePlumber restart, and shutdown as state transitions. Recovery reuses the same reconciliation path as initial startup.
 
+Reconnect first repeats exact model and API admission on a new connection. It then restores managed controls in a fixed sequence of one-field, complete-payload transactions. This sequence is not atomic. If a later control fails, earlier verified controls can already be applied. The daemon reports the verified partial state and locks more writes. An unverified restoration reports no observed configuration. A disconnect drops the connection and reports the device as disconnected.
+
 The daemon must not alternate between two competing graph layouts or repeatedly fight another volume owner. If the required ownership cannot be obtained, it reports the conflict and leaves hardware writes stopped.
 
 ## Installation ownership
 
 `librewavectl` owns setup, verification, and removal. It records every installed path, backup, service unit, and policy file in one installation manifest. Setup stages a complete new installation, validates it, switches the active link atomically, and removes superseded LibreWave-owned files.
 
-The current setup installs the exact Wave:3 udev access rule and an inactive read-only daemon unit. It does not install the WirePlumber card-disable rule, enable the unit, start the daemon, or take audio ownership. These actions stay blocked until the production ALSA and PipeWire host is ready.
+The current setup installs the exact Wave:3 udev access rule and an inactive daemon unit. It does not install the WirePlumber card-disable rule, enable the unit, start the daemon, or take audio ownership. These actions stay blocked until the production ALSA and PipeWire host is ready.
 
 Uninstall removes only unmodified, manifest-owned paths and restores exact user files from verified backups. It preserves profiles by default. An explicit, confirmed purge removes profiles. Setup does not change Gain Lock or other hardware settings, so uninstall has no hardware value to restore.
 

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// The current local request/response protocol version.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 /// The maximum encoded JSON payload accepted by the local protocol.
 pub const MAX_FRAME_SIZE: usize = 1024 * 1024;
 
@@ -31,8 +31,10 @@ pub enum Response {
     Devices { devices: Vec<DeviceSnapshot> },
     /// The refresh completed and a new snapshot is available.
     Refreshed { snapshot: Snapshot },
-    /// One device snapshot after its read-only admission probe.
+    /// One device snapshot from the daemon's retained connection and admission state.
     DeviceInspection { device: DeviceSnapshot },
+    /// The retained device snapshot after a verified semantic hardware control request.
+    ControlChanged { device: DeviceSnapshot },
 }
 
 /// A framed response sent by the daemon.
@@ -71,10 +73,29 @@ pub enum IpcErrorKind {
     PermissionDenied,
     /// The request envelope was structurally invalid.
     InvalidRequest,
-    /// The daemon could not complete the requested read-only operation.
+    /// The daemon could not complete the requested operation.
     Internal,
     /// The requested logical device is not in the current inventory.
     DeviceNotFound { id: DeviceId },
+    /// The client's device baseline is older than the daemon's observation.
+    StaleDeviceGeneration {
+        expected: librewave_core::DeviceGeneration,
+        actual: librewave_core::DeviceGeneration,
+    },
+    /// The physical baseline changed outside the daemon before a write.
+    StaleDeviceBaseline,
+    /// The semantic control value is outside its reviewed schema.
+    InvalidControl,
+    /// The daemon does not currently permit hardware writes.
+    DeviceWriteLocked { reason: librewave_core::DeviceWriteLockReason },
+    /// The device disconnected during the request.
+    DeviceDisconnected { id: DeviceId },
+    /// The daemon could not persist desired state before the write.
+    Persistence,
+    /// Desired-state intent or crash durability is unresolved.
+    PersistenceAmbiguous,
+    /// The reviewed transaction failed.
+    TransactionFailed,
 }
 
 /// An explicit error returned over the local interface.
@@ -216,7 +237,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use librewave_core::{DeviceAdmissionSnapshot, DeviceConnection, DeviceId, DeviceModel};
+    use librewave_core::{
+        DeviceAdmissionSnapshot, DeviceConnection, DeviceGeneration, DeviceId, DeviceModel,
+        FixedPointValue, Wave3Control,
+    };
     use serde_json::json;
 
     fn device() -> DeviceSnapshot {
@@ -285,6 +309,82 @@ mod tests {
             panic!("version-invalid request reached the command handler")
         });
         assert_eq!(response.result, Err(IpcError::version_mismatch(PROTOCOL_VERSION + 1)));
+    }
+
+    #[test]
+    fn semantic_control_command_and_stale_error_round_trip_at_version_three() {
+        assert_eq!(PROTOCOL_VERSION, 3);
+        let request = RequestEnvelope {
+            version: PROTOCOL_VERSION,
+            request_id: 4,
+            command: Command::SetWave3Control {
+                id: DeviceId(2),
+                expected_generation: DeviceGeneration(7),
+                control: Wave3Control::InputGain(FixedPointValue { raw: 512, fractional_bits: 8 }),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(request).expect("serialize semantic request"),
+            json!({
+                "version": 3,
+                "request_id": 4,
+                "command": {
+                    "SetWave3Control": {
+                        "id": 2,
+                        "expected_generation": 7,
+                        "control": {"InputGain": {"raw": 512, "fractional_bits": 8}}
+                    }
+                }
+            })
+        );
+        let frame = encode_request(&request).expect("encode semantic request");
+        assert_eq!(decode_request(&frame[4..]).expect("decode semantic request"), request);
+
+        let error = IpcError {
+            kind: IpcErrorKind::StaleDeviceGeneration {
+                expected: DeviceGeneration(7),
+                actual: DeviceGeneration(8),
+            },
+            message: "stale device generation".to_owned(),
+        };
+        let response = ResponseEnvelope::failure(4, error.clone());
+        assert_eq!(
+            serde_json::to_value(response.clone()).expect("serialize stale response"),
+            json!({
+                "version": 3,
+                "request_id": 4,
+                "result": {
+                    "Err": {
+                        "kind": {"StaleDeviceGeneration": {"expected": 7, "actual": 8}},
+                        "message": "stale device generation"
+                    }
+                }
+            })
+        );
+        let frame = encode_response(&response).expect("encode stale response");
+        assert_eq!(decode_response(&frame[4..]).expect("decode stale response").result, Err(error));
+
+        let response = ResponseEnvelope::success(4, Response::ControlChanged { device: device() });
+        assert_eq!(
+            serde_json::to_value(response).expect("serialize control response"),
+            json!({
+                "version": 3,
+                "request_id": 4,
+                "result": {
+                    "Ok": {
+                        "ControlChanged": {
+                            "device": {
+                                "id": 1,
+                                "model": "Wave3",
+                                "connection": "Connected",
+                                "audio_cards": [],
+                                "admission": "NotInspected"
+                            }
+                        }
+                    }
+                }
+            })
+        );
     }
 
     #[test]

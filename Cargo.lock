@@ -3008,6 +3008,7 @@ dependencies = [
  "librewave-core",
  "librewave-ipc",
  "librewave-platform-linux",
+ "librewave-protocol",
  "serde",
  "serde_json",
  "sha2",
@@ -3017,9 +3018,14 @@ dependencies = [
 name = "librewaved"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "libc",
  "librewave-core",
+ "librewave-device",
  "librewave-ipc",
  "librewave-platform-linux",
+ "librewave-protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

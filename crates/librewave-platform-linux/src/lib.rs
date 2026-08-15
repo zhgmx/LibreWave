@@ -18,8 +18,9 @@ mod services;
 mod usb;
 
 pub use usb::{
-    DescriptorError, TopologyError, UsbProbeError, Wave3UsbConnection, admission_snapshot,
-    inspect_wave3_usb, probe_wave3_usb,
+    DescriptorError, TopologyError, UsbProbeError, Wave3SnapshotError, Wave3UsbConnection,
+    admission_error, admission_snapshot, inspect_wave3_usb, probe_wave3_usb, validate_usb_topology,
+    wave3_config_snapshot,
 };
 
 pub mod ipc;

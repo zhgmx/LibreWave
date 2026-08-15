@@ -108,3 +108,9 @@ The default system playback target is a LibreWave software input channel, as Wav
 Every synchronized path tags the change origin as device, LibreWave client, or operating system. Applying an observed change must not create a second outgoing change to the origin. This is the Linux equivalent of the feedback guards recovered on Windows.
 
 No product documentation may claim exact Wave Link parity while required cells remain `unknown` or `inferred`.
+
+## Read-only Linux hardware-control observation
+
+A read-only live inspection of the Wave:3 ALSA card found two simple control groups. `Mic Capture Volume` has integer steps from 0 to 80, mapped from 0.00 to 40.00 dB. `PCM Playback Volume` has integer steps from 0 to 120, mapped from -60.00 to 0.00 dB. Each group also has a switch and a read-only channel map.
+
+These ranges match the Wave:3 microphone gain and headphone level ranges. LibreWave therefore treats the physical card controls as hardware aliases. They are not software endpoint volumes, and the future LibreWave endpoints must not use them for desktop volume or mute.

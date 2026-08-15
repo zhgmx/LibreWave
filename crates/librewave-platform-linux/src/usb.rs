@@ -5,7 +5,8 @@ mod connection;
 pub use connection::Wave3UsbConnection;
 
 use librewave_core::{
-    AdmissionError, DeviceAdmissionSnapshot, FixedPointValue, VolumeSelection, Wave3ConfigSnapshot,
+    AdmissionError, DeviceAdmissionSnapshot, DeviceGeneration, DeviceWriteAccess,
+    DeviceWriteLockReason, FixedPointValue, VolumeSelection, Wave3ConfigSnapshot,
 };
 use librewave_device::{
     ReadOnlyTransport, SessionError, SetupPacket, TransportError, Wave3Session, probe_wave3,
@@ -182,15 +183,23 @@ pub fn inspect_wave3_usb(candidate: &super::UsbDeviceCandidate) -> DeviceAdmissi
 #[must_use]
 pub fn admission_snapshot(result: Result<Wave3Session, UsbProbeError>) -> DeviceAdmissionSnapshot {
     match result {
-        Ok(session) => match config_snapshot(session.config()) {
-            Ok(config) => DeviceAdmissionSnapshot::Admitted { api: session.api(), config },
-            Err(()) => DeviceAdmissionSnapshot::Failed { error: AdmissionError::MalformedResponse },
+        Ok(session) => match wave3_config_snapshot(session.config()) {
+            Ok(config) => DeviceAdmissionSnapshot::Admitted {
+                api: session.api(),
+                generation: DeviceGeneration(0),
+                write_access: DeviceWriteAccess::Locked {
+                    reason: DeviceWriteLockReason::NoOwnedConnection,
+                },
+                config: Some(config),
+            },
+            Err(_) => DeviceAdmissionSnapshot::Failed { error: AdmissionError::MalformedResponse },
         },
         Err(error) => DeviceAdmissionSnapshot::Failed { error: admission_error(error) },
     }
 }
 
-fn admission_error(error: UsbProbeError) -> AdmissionError {
+#[must_use]
+pub fn admission_error(error: UsbProbeError) -> AdmissionError {
     match error {
         UsbProbeError::NotFound
         | UsbProbeError::Session(SessionError::Transport(
@@ -223,8 +232,27 @@ fn admission_error(error: UsbProbeError) -> AdmissionError {
     }
 }
 
-fn config_snapshot(config: &librewave_protocol::Wave3Config) -> Result<Wave3ConfigSnapshot, ()> {
-    let controls = config.controls().map_err(|_| ())?;
+/// A reviewed configuration payload could not be decoded into its semantic snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Wave3SnapshotError;
+
+impl fmt::Display for Wave3SnapshotError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("the Wave:3 configuration contains an invalid semantic value")
+    }
+}
+
+impl std::error::Error for Wave3SnapshotError {}
+
+/// Converts a reviewed protocol configuration into its safe public snapshot.
+///
+/// # Errors
+///
+/// Returns an error when any stored field has an invalid semantic encoding.
+pub fn wave3_config_snapshot(
+    config: &librewave_protocol::Wave3Config,
+) -> Result<Wave3ConfigSnapshot, Wave3SnapshotError> {
+    let controls = config.controls().map_err(|_| Wave3SnapshotError)?;
     Ok(Wave3ConfigSnapshot {
         input_gain: FixedPointValue {
             raw: controls.microphone_gain.raw_q8_8(),
@@ -253,10 +281,13 @@ fn config_snapshot(config: &librewave_protocol::Wave3Config) -> Result<Wave3Conf
     })
 }
 
-fn boolean(config: &librewave_protocol::Wave3Config, field: Wave3ConfigField) -> Result<bool, ()> {
-    match config.get(field).map_err(|_| ())? {
+fn boolean(
+    config: &librewave_protocol::Wave3Config,
+    field: Wave3ConfigField,
+) -> Result<bool, Wave3SnapshotError> {
+    match config.get(field).map_err(|_| Wave3SnapshotError)? {
         SemanticValue::Boolean(value) => Ok(value),
-        _ => Err(()),
+        _ => Err(Wave3SnapshotError),
     }
 }
 
@@ -296,6 +327,15 @@ struct InterfaceObservation {
 struct UsbLocation {
     bus: u8,
     ports: Vec<u8>,
+}
+
+/// Validates one serial-free Linux USB bus and port-chain key.
+///
+/// # Errors
+///
+/// Returns an error when the value is not exactly `BUS-PORT[.PORT]`.
+pub fn validate_usb_topology(topology: &str) -> Result<(), TopologyError> {
+    UsbLocation::parse(topology).map(|_| ())
 }
 
 impl UsbLocation {

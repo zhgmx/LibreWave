@@ -1,10 +1,12 @@
 #![doc = "The complete headless `LibreWave` command-line client."]
 
 use librewave_core::{
-    DeviceAdmissionSnapshot, DeviceId, DeviceSnapshot, ServiceState, Snapshot, Wave3ConfigSnapshot,
+    DeviceAdmissionSnapshot, DeviceGeneration, DeviceId, DeviceSnapshot, FixedPointValue,
+    ServiceState, Snapshot, VolumeSelection, Wave3ConfigSnapshot, Wave3Control,
 };
 use librewave_ipc::Response;
 use librewave_platform_linux::ipc::{Client, ClientError};
+use librewave_protocol::{Wave3GainDb, Wave3HeadphoneDb, Wave3MonitorPercent};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -26,42 +28,151 @@ where
     O: Write,
     E: Write,
 {
-    let mut arguments = arguments.into_iter();
-    let _program = arguments.next();
-    let command = arguments.next().unwrap_or_default();
-    let subcommand = arguments.next();
-    let argument = arguments.next();
-    if arguments.next().is_some() {
-        writeln!(errors, "error: unexpected command arguments")?;
-        return Ok(2);
-    }
-    match (command.as_str(), subcommand.as_deref(), argument.as_deref()) {
-        ("" | "help" | "--help" | "-h", None, None) => {
+    let arguments = arguments.into_iter().skip(1).collect::<Vec<_>>();
+    match arguments.as_slice() {
+        [] => {
             write_help(output)?;
             Ok(0)
         }
-        ("status", None, None) => request_status(socket_path, output, errors),
-        ("devices", Some("list"), None) => request_devices(socket_path, output, errors),
-        ("devices", Some("inspect"), Some(id)) => {
+        [command] if matches!(command.as_str(), "help" | "--help" | "-h") => {
+            write_help(output)?;
+            Ok(0)
+        }
+        [command] if command == "status" => request_status(socket_path, output, errors),
+        [devices, list] if devices == "devices" && list == "list" => {
+            request_devices(socket_path, output, errors)
+        }
+        [devices, inspect, id] if devices == "devices" && inspect == "inspect" => {
             request_device_inspection(socket_path, id, output, errors)
         }
-        ("devices", None, None) => {
-            writeln!(errors, "error: expected `librewavectl devices list`")?;
-            Ok(2)
+        [devices, set, id, generation, control, value] if devices == "devices" && set == "set" => {
+            request_control_change(socket_path, id, generation, control, value, output, errors)
         }
-        ("devices", Some("inspect"), None) => {
-            writeln!(errors, "error: expected `librewavectl devices inspect <id>`")?;
-            Ok(2)
-        }
-        ("devices", Some("list"), Some(_)) => {
-            writeln!(errors, "error: unexpected command arguments")?;
-            Ok(2)
-        }
-        (unknown, _, _) => {
-            writeln!(errors, "error: unknown command `{unknown}`")?;
+        _ => {
+            writeln!(errors, "error: invalid command; run `librewavectl help`")?;
             Ok(2)
         }
     }
+}
+
+fn request_control_change<O, E>(
+    socket_path: &Path,
+    id: &str,
+    generation: &str,
+    control: &str,
+    value: &str,
+    output: &mut O,
+    errors: &mut E,
+) -> io::Result<i32>
+where
+    O: Write,
+    E: Write,
+{
+    let Ok(id) = id.parse::<u32>() else {
+        writeln!(errors, "error: device ID must be a number")?;
+        return Ok(2);
+    };
+    let id = DeviceId(id);
+    let Ok(generation) = generation.parse::<u64>() else {
+        writeln!(errors, "error: device generation must be a number")?;
+        return Ok(2);
+    };
+    let expected_generation = DeviceGeneration(generation);
+    let control = match parse_control(control, value) {
+        Ok(control) => control,
+        Err(message) => {
+            writeln!(errors, "error: {message}")?;
+            return Ok(2);
+        }
+    };
+    match request(
+        socket_path,
+        librewave_core::Command::SetWave3Control { id, expected_generation, control },
+    ) {
+        Ok(Response::ControlChanged { device }) => {
+            write_device_inspection(output, &device)?;
+            Ok(0)
+        }
+        Ok(_) => {
+            writeln!(errors, "error: daemon returned an unexpected control response")?;
+            Ok(1)
+        }
+        Err(error) => write_client_error(error, errors),
+    }
+}
+
+fn parse_control(name: &str, value: &str) -> Result<Wave3Control, String> {
+    match name {
+        "microphone-gain" => parse_half_decibels(value)
+            .and_then(|value| validate_fixed(value, Wave3GainDb::from_raw_q8_8, "microphone gain"))
+            .map(Wave3Control::InputGain),
+        "microphone-mute" => parse_switch(value).map(Wave3Control::MicrophoneMute),
+        "clipguard" => parse_switch(value).map(Wave3Control::Clipguard),
+        "low-cut" => parse_switch(value).map(Wave3Control::LowCut),
+        "headphone-level" => parse_half_decibels(value)
+            .and_then(|value| {
+                validate_fixed(value, Wave3HeadphoneDb::from_raw_q8_8, "headphone level")
+            })
+            .map(Wave3Control::HeadphoneLevel),
+        "headphone-mute" => parse_switch(value).map(Wave3Control::HeadphoneMute),
+        "monitor-mix" => parse_percent(value)
+            .and_then(|value| {
+                validate_fixed(value, Wave3MonitorPercent::from_raw_q8_8, "monitor mix")
+            })
+            .map(Wave3Control::MonitorMix),
+        "knob-target" => match value {
+            "microphone" => Ok(Wave3Control::KnobTarget(VolumeSelection::Microphone)),
+            "headphone" => Ok(Wave3Control::KnobTarget(VolumeSelection::Headphone)),
+            "mix" => Ok(Wave3Control::KnobTarget(VolumeSelection::Mix)),
+            _ => Err("knob target must be microphone, headphone, or mix".to_owned()),
+        },
+        "all-leds-off" => parse_switch(value).map(Wave3Control::AllLedsOff),
+        "leds-flip" => parse_switch(value).map(Wave3Control::LedsFlip),
+        "gain-lock" => parse_switch(value).map(Wave3Control::GainLock),
+        _ => Err(format!("unknown Wave:3 control `{name}`")),
+    }
+}
+
+fn parse_switch(value: &str) -> Result<bool, String> {
+    match value {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err("switch value must be on or off".to_owned()),
+    }
+}
+
+fn parse_half_decibels(value: &str) -> Result<FixedPointValue, String> {
+    let (negative, magnitude) =
+        value.strip_prefix('-').map_or((false, value), |value| (true, value));
+    let (whole, fraction) = magnitude.split_once('.').unwrap_or((magnitude, "0"));
+    let whole = whole.parse::<i32>().map_err(|_| "level must use 0.5 dB steps".to_owned())?;
+    let half = match fraction {
+        "0" | "00" => 0,
+        "5" | "50" => 128,
+        _ => return Err("level must use 0.5 dB steps".to_owned()),
+    };
+    let magnitude = whole
+        .checked_mul(256)
+        .and_then(|whole| whole.checked_add(half))
+        .ok_or_else(|| "level is outside the supported numeric range".to_owned())?;
+    Ok(FixedPointValue { raw: if negative { -magnitude } else { magnitude }, fractional_bits: 8 })
+}
+
+fn parse_percent(value: &str) -> Result<FixedPointValue, String> {
+    let percent =
+        value.parse::<i32>().map_err(|_| "monitor mix must be a whole percentage".to_owned())?;
+    let raw = percent
+        .checked_mul(256)
+        .ok_or_else(|| "monitor mix is outside the supported numeric range".to_owned())?;
+    Ok(FixedPointValue { raw, fractional_bits: 8 })
+}
+
+fn validate_fixed<T>(
+    value: FixedPointValue,
+    validate: impl FnOnce(i32) -> Result<T, librewave_protocol::ValueError>,
+    name: &str,
+) -> Result<FixedPointValue, String> {
+    validate(value.raw).map(|_| value).map_err(|error| format!("{name} {error}"))
 }
 
 /// Runs the CLI using `LIBREWAVE_SOCKET` or the default user runtime path.
@@ -234,6 +345,9 @@ fn write_admission<W: Write>(
     if let Some(config) = admission.config() {
         write_config(output, config)?;
     }
+    if let Some(generation) = admission.generation() {
+        writeln!(output, "Device generation: {generation}")?;
+    }
     Ok(())
 }
 
@@ -247,14 +361,14 @@ fn inspection_exit_code(device: &DeviceSnapshot) -> i32 {
 
 fn write_config<W: Write>(output: &mut W, config: &Wave3ConfigSnapshot) -> io::Result<()> {
     writeln!(output, "Configuration:")?;
-    writeln!(output, "  Input gain: {}", fixed_point(config.input_gain))?;
-    writeln!(output, "  Input mute: {}", on_off(config.input_mute))?;
+    writeln!(output, "  Microphone gain: {}", fixed_point(config.input_gain))?;
+    writeln!(output, "  Microphone mute: {}", on_off(config.input_mute))?;
     writeln!(output, "  Clipguard: {}", on_off(config.clipguard_enable))?;
     writeln!(output, "  Low cut: {}", on_off(config.lowcut_enable))?;
-    writeln!(output, "  Headphone volume: {}", fixed_point(config.headphone_volume))?;
+    writeln!(output, "  Headphone level: {}", fixed_point(config.headphone_volume))?;
     writeln!(output, "  Headphone mute: {}", on_off(config.headphone_mute))?;
-    writeln!(output, "  Direct monitor: {}", fixed_point(config.direct_monitor))?;
-    writeln!(output, "  Volume select: {}", config.volume_select)?;
+    writeln!(output, "  Monitor mix: {}", fixed_point(config.direct_monitor))?;
+    writeln!(output, "  Knob target: {}", config.volume_select)?;
     writeln!(output, "  All LEDs off: {}", on_off(config.all_leds_off))?;
     writeln!(output, "  LEDs flip: {}", on_off(config.leds_flip))?;
     writeln!(output, "  Gain lock: {}", on_off(config.gain_lock))
@@ -295,6 +409,21 @@ fn write_help<W: Write>(output: &mut W) -> io::Result<()> {
     writeln!(output, "  status          Show daemon, device, and audio status")?;
     writeln!(output, "  devices list    List supported devices")?;
     writeln!(output, "  devices inspect <id>  Inspect one device")?;
+    writeln!(
+        output,
+        "  devices set <id> <generation> <control> <value>  Set one Wave:3 hardware control"
+    )?;
+    writeln!(output)?;
+    writeln!(output, "Wave:3 controls:")?;
+    writeln!(output, "  microphone-gain  0 to 40 dB in 0.5 dB steps")?;
+    writeln!(output, "  headphone-level  -60 to 0 dB in 0.5 dB steps")?;
+    writeln!(output, "  monitor-mix      0 to 100 percent in 5 percent steps")?;
+    writeln!(
+        output,
+        "  microphone-mute, headphone-mute, clipguard, low-cut, all-leds-off, leds-flip, gain-lock  on or off"
+    )?;
+    writeln!(output, "  knob-target      microphone, headphone, or mix")?;
+    writeln!(output, "Use the device generation shown by `librewavectl devices inspect <id>`.")?;
     writeln!(output, "  setup           Install the current build")?;
     writeln!(output, "  doctor          Check the installation")?;
     writeln!(output, "  uninstall       Remove manifest-owned files")
@@ -335,7 +464,7 @@ mod tests {
         write_status(&mut output, &snapshot()).expect("render status");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "Daemon: connected\nProtocol: 2\nState generation: 4\nDevices: 1\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
+            "Daemon: connected\nProtocol: 3\nState generation: 4\nDevices: 1\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
         );
     }
 
@@ -373,7 +502,9 @@ mod tests {
             audio_cards: vec![],
             admission: DeviceAdmissionSnapshot::Admitted {
                 api: librewave_core::ApiVersion::new(5, 4),
-                config: librewave_core::Wave3ConfigSnapshot {
+                generation: librewave_core::DeviceGeneration(1),
+                write_access: librewave_core::DeviceWriteAccess::Ready,
+                config: Some(librewave_core::Wave3ConfigSnapshot {
                     input_gain: librewave_core::FixedPointValue { raw: 10_240, fractional_bits: 8 },
                     input_mute: false,
                     clipguard_enable: true,
@@ -391,17 +522,17 @@ mod tests {
                     all_leds_off: false,
                     leds_flip: true,
                     gain_lock: true,
-                },
+                }),
             },
         };
         let mut output = Vec::new();
         write_device_inspection(&mut output, &device).expect("render inspection");
         let output = String::from_utf8(output).expect("UTF-8");
         assert_eq!(inspection_exit_code(&device), 0);
-        assert!(output.contains("Control access: read-only"));
+        assert!(output.contains("Control access: writable"));
         assert!(output.contains("Admitted API: 5.4"));
-        assert!(output.contains("Input gain: 40.00"));
-        assert!(output.contains("Volume select: headphone"));
+        assert!(output.contains("Microphone gain: 40.00"));
+        assert!(output.contains("Knob target: headphone"));
         assert!(!output.contains("serial"));
         assert!(!output.contains("topology"));
 
@@ -448,5 +579,35 @@ mod tests {
         assert!(output.contains("setup"));
         assert!(output.contains("doctor"));
         assert!(output.contains("uninstall"));
+    }
+
+    #[test]
+    fn control_parser_enforces_reviewed_units_ranges_and_steps() {
+        for (name, value) in [
+            ("microphone-gain", "0"),
+            ("microphone-gain", "40"),
+            ("microphone-gain", "0.5"),
+            ("headphone-level", "-60"),
+            ("headphone-level", "0"),
+            ("headphone-level", "-59.5"),
+            ("monitor-mix", "0"),
+            ("monitor-mix", "100"),
+            ("monitor-mix", "5"),
+        ] {
+            assert!(parse_control(name, value).is_ok(), "{name} {value}");
+        }
+        for (name, value) in [
+            ("microphone-gain", "-0.5"),
+            ("microphone-gain", "40.5"),
+            ("microphone-gain", "1.25"),
+            ("headphone-level", "-60.5"),
+            ("headphone-level", "0.5"),
+            ("headphone-level", "-1.25"),
+            ("monitor-mix", "-5"),
+            ("monitor-mix", "105"),
+            ("monitor-mix", "1"),
+        ] {
+            assert!(parse_control(name, value).is_err(), "{name} {value}");
+        }
     }
 }

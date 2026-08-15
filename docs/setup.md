@@ -109,6 +109,8 @@ Doctor also scans fixed LibreWave paths when the manifest is missing. It does no
 
 Normal uninstall preserves profiles and says where they remain. `librewavectl uninstall --purge` removes profiles only after explicit confirmation. The journal records this choice, so an interrupted removal cannot resume with different profile behavior.
 
+Daemon-owned desired hardware state is stored at `librewave/profiles/device-state.json` below the selected configuration root. It uses serial-free USB topology keys and contains only controls explicitly managed through LibreWave. Normal uninstall preserves this file with the profile directory. `uninstall --purge` removes it as part of that exact directory.
+
 Setup never changes Gain Lock. Uninstall and unmanage do not restore a saved Gain Lock value.
 
 ## Pre-release policy

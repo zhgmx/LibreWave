@@ -73,6 +73,12 @@ A normal control write follows one path:
 
 One daemon-owned session accepts one mutable transaction at a time. The code that owns the platform transport and daemon session must ensure that only one admitted session exists for each device connection. A session rejects stale transactions instead of merging them with a newer baseline.
 
+The local IPC interface accepts semantic controls only. It does not accept setup packets, payload bytes, field offsets, message names, or arbitrary field names. A command includes the daemon-issued device generation. The daemon validates and persists a pending semantic command before it performs USB I/O.
+
+The daemon clears a pending command after a failed transaction. It promotes the command to managed desired state only after verified apply or an unchanged result. If it cannot verify either persistence step, it locks writes and reports persistence ambiguity. A restart does not restore a topology that still has a pending command.
+
+Reconnect restoration uses the same reversible transaction path. Each managed field is a separate transaction, so restoration can make partial progress. Any failure stops the sequence. The daemon locks the retained connection, or drops it when the device disconnected.
+
 If a failure occurs after a write attempt, the transaction makes one restoration attempt. It writes the complete original payload and reads the message again. The result includes both the first failure and the restoration result. If restoration cannot be verified, the session rejects more writes until a new admission probe succeeds.
 
 ## Physical test rules
