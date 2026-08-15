@@ -1,9 +1,9 @@
-//! Read-only Linux discovery and host-audio inventory.
+//! Read-only Linux USB probing, discovery, and host-audio inventory.
 //!
-//! This crate reads Linux system interfaces and invokes status-only tools. It
-//! does not open USB devices, send control transfers, change ALSA controls,
-//! create or remove `PipeWire` objects, or modify `WirePlumber`, udev, or systemd
-//! state.
+//! This crate can open the reviewed Wave:3 normal-mode USB device and send exact
+//! device-to-host control requests. It does not claim audio interfaces, detach
+//! kernel drivers, send control writes, change ALSA controls, create or remove
+//! `PipeWire` objects, or modify `WirePlumber`, udev, or systemd state.
 
 use std::io;
 use std::path::PathBuf;
@@ -12,6 +12,9 @@ pub use librewave_device::{DeviceIdentity, DeviceModel, UsbIdentity};
 
 mod discovery;
 mod services;
+mod usb;
+
+pub use usb::{DescriptorError, TopologyError, UsbProbeError, probe_wave3_usb};
 
 /// The Wave:3's reviewed normal-mode USB identity.
 pub const WAVE3_USB: UsbIdentity = DeviceIdentity::wave3().usb();

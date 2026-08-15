@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 librewave-device = { path = "../librewave-device" }
+rusb = "0.9.4"
 
 [lints]
 workspace = true

@@ -1,8 +1,17 @@
-//! Portable identity types for supported Wave hardware.
+//! Portable identity types and read-only sessions for supported Wave hardware.
 
 use std::fmt;
 
-pub use librewave_protocol::DeviceModel;
+pub use librewave_protocol::{
+    ApiVersion, CodecError, DeviceModel, SchemaError, SetupError, SetupPacket,
+};
+
+mod session;
+
+pub use session::{
+    CONTROL_TRANSFER_TIMEOUT, ReadOnlyTransport, SessionError, SessionSchemaError, TransportError,
+    Wave3Session, probe_wave3,
+};
 
 /// A USB vendor and product pair.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
