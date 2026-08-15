@@ -4,7 +4,8 @@ use super::{
 };
 use librewave_device::{
     CONTROL_TRANSFER_TIMEOUT, ControlWriteRequest, ControlWriteTransport, DeviceIdentity,
-    ReadOnlyTransport, SetupPacket, TransportError, Wave3Session, Wave3WriteState, probe_wave3,
+    ReadOnlyTransport, SessionError, SetupPacket, TransportError, Wave3RefreshOutcome,
+    Wave3Session, Wave3WriteState, probe_wave3,
 };
 use librewave_protocol::{
     ApiVersion, CodecError, Wave3Config, Wave3ControlChange, Wave3ControlState,
@@ -68,6 +69,19 @@ impl Wave3UsbConnection {
         self.inner.session.write_state()
     }
 
+    /// Reads the complete configuration again through the retained libusb handle.
+    ///
+    /// This operation sends only the exact reviewed device-to-host configuration
+    /// request. It does not open another handle and cannot send a USB write.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified transfer or schema failure. A failure locks later
+    /// writes on this admitted session until a new connection is admitted.
+    pub fn refresh_config(&mut self) -> Result<Wave3RefreshOutcome, SessionError> {
+        self.inner.refresh_config()
+    }
+
     /// Applies one reviewed change using the caller's exact baseline.
     ///
     /// The transaction uses this connection's admitted session, claimed
@@ -103,6 +117,10 @@ struct Connection<H: ControlHandle> {
 }
 
 impl<H: ControlHandle> Connection<H> {
+    fn refresh_config(&mut self) -> Result<Wave3RefreshOutcome, SessionError> {
+        self.session.refresh_config(&mut self.transport)
+    }
+
     fn transact_control(
         &mut self,
         expected_baseline: Wave3Config,

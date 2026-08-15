@@ -11,7 +11,7 @@ mod transaction;
 
 pub use session::{
     CONTROL_TRANSFER_TIMEOUT, ReadOnlyTransport, SessionError, SessionSchemaError, TransportError,
-    Wave3Session, Wave3WriteState, probe_wave3,
+    Wave3RefreshOutcome, Wave3Session, Wave3WriteState, probe_wave3,
 };
 pub use transaction::{
     ControlWriteRequest, ControlWriteTransport, RestorationOutcome, TransactionError,

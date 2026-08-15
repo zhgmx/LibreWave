@@ -39,6 +39,7 @@ where
             Ok(0)
         }
         [command] if command == "status" => request_status(socket_path, output, errors),
+        [command] if command == "refresh" => request_refresh(socket_path, output, errors),
         [devices, list] if devices == "devices" && list == "list" => {
             request_devices(socket_path, output, errors)
         }
@@ -207,6 +208,37 @@ where
         }
         Ok(_) => {
             writeln!(errors, "error: daemon returned an unexpected status response")?;
+            Ok(1)
+        }
+        Err(error) => write_client_error(error, errors),
+    }
+}
+
+fn request_refresh<O, E>(socket_path: &Path, output: &mut O, errors: &mut E) -> io::Result<i32>
+where
+    O: Write,
+    E: Write,
+{
+    request_refresh_with(socket_path, output, errors, request)
+}
+
+fn request_refresh_with<O, E>(
+    socket_path: &Path,
+    output: &mut O,
+    errors: &mut E,
+    mut send: impl FnMut(&Path, librewave_core::Command) -> Result<Response, ClientError>,
+) -> io::Result<i32>
+where
+    O: Write,
+    E: Write,
+{
+    match send(socket_path, librewave_core::Command::Refresh) {
+        Ok(Response::Refreshed { snapshot }) => {
+            write_status(output, &snapshot)?;
+            Ok(0)
+        }
+        Ok(_) => {
+            writeln!(errors, "error: daemon returned an unexpected refresh response")?;
             Ok(1)
         }
         Err(error) => write_client_error(error, errors),
@@ -407,6 +439,7 @@ fn write_help<W: Write>(output: &mut W) -> io::Result<()> {
     writeln!(output)?;
     writeln!(output, "Commands:")?;
     writeln!(output, "  status          Show daemon, device, and audio status")?;
+    writeln!(output, "  refresh         Refresh inventory and retained device state")?;
     writeln!(output, "  devices list    List supported devices")?;
     writeln!(output, "  devices inspect <id>  Inspect one device")?;
     writeln!(
@@ -564,6 +597,73 @@ mod tests {
     }
 
     #[test]
+    fn refreshed_inspection_and_stale_client_diagnostic_show_the_new_generation() {
+        let mut device = snapshot().devices.remove(0);
+        device.admission = DeviceAdmissionSnapshot::Admitted {
+            api: librewave_core::ApiVersion::new(5, 4),
+            generation: DeviceGeneration(2),
+            write_access: librewave_core::DeviceWriteAccess::Ready,
+            config: Some(Wave3ConfigSnapshot {
+                input_gain: FixedPointValue { raw: 0, fractional_bits: 8 },
+                input_mute: true,
+                clipguard_enable: false,
+                lowcut_enable: false,
+                headphone_volume: FixedPointValue { raw: 0, fractional_bits: 8 },
+                headphone_mute: false,
+                direct_monitor: FixedPointValue { raw: 0, fractional_bits: 8 },
+                volume_select: VolumeSelection::Microphone,
+                all_leds_off: false,
+                leds_flip: false,
+                gain_lock: false,
+            }),
+        };
+        let mut output = Vec::new();
+        write_device_inspection(&mut output, &device).expect("render refreshed inspection");
+        let output = String::from_utf8(output).expect("UTF-8");
+        assert!(output.contains("Microphone mute: on"));
+        assert!(output.contains("Device generation: 2"));
+
+        let mut errors = Vec::new();
+        let exit = write_client_error(
+            ClientError::Remote(librewave_ipc::IpcError {
+                kind: librewave_ipc::IpcErrorKind::StaleDeviceGeneration {
+                    expected: DeviceGeneration(1),
+                    actual: DeviceGeneration(2),
+                },
+                message: "device generation 1 is stale; current generation is 2".to_owned(),
+            }),
+            &mut errors,
+        )
+        .expect("render stale diagnostic");
+        assert_eq!(exit, 1);
+        assert_eq!(
+            String::from_utf8(errors).expect("UTF-8"),
+            "error: device generation 1 is stale; current generation is 2\n"
+        );
+    }
+
+    #[test]
+    fn refresh_command_uses_the_semantic_daemon_request() {
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        let exit = request_refresh_with(
+            Path::new("unused.sock"),
+            &mut output,
+            &mut errors,
+            |path, command| {
+                assert_eq!(path, Path::new("unused.sock"));
+                assert_eq!(command, librewave_core::Command::Refresh);
+                Ok(Response::Refreshed { snapshot: snapshot() })
+            },
+        )
+        .expect("run refresh command");
+
+        assert_eq!(exit, 0);
+        assert!(errors.is_empty());
+        assert!(String::from_utf8(output).expect("UTF-8").contains("State generation: 4"));
+    }
+
+    #[test]
     fn help_lists_installation_lifecycle_commands() {
         let mut output = Vec::new();
         let mut errors = Vec::new();
@@ -576,6 +676,7 @@ mod tests {
         .expect("run CLI");
         assert_eq!(exit, 0);
         let output = String::from_utf8(output).expect("UTF-8");
+        assert!(output.contains("refresh"));
         assert!(output.contains("setup"));
         assert!(output.contains("doctor"));
         assert!(output.contains("uninstall"));

@@ -146,6 +146,15 @@ pub enum Wave3WriteState {
     NeedsReprobe,
 }
 
+/// The result of one complete configuration read on an admitted Wave:3 session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Wave3RefreshOutcome {
+    /// The complete configuration still matches the retained baseline.
+    Unchanged { config: Wave3Config },
+    /// The complete configuration changed and is now the retained baseline.
+    Changed { config: Wave3Config },
+}
+
 impl Wave3Session {
     #[must_use]
     pub const fn identity(&self) -> DeviceIdentity {
@@ -175,6 +184,34 @@ impl Wave3Session {
     pub fn controls(&self) -> Result<Wave3ControlState, CodecError> {
         self.config.controls()
     }
+
+    /// Reads and validates the complete configuration on the admitted transport.
+    ///
+    /// The read uses the retained control interface and exact admitted API schema.
+    /// It never sends a host-to-device transfer. A failed read keeps the previous
+    /// baseline and locks later writes until a new admission probe succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified transfer or schema failure when the complete
+    /// configuration cannot be read and validated.
+    pub fn refresh_config(
+        &mut self,
+        transport: &mut impl ReadOnlyTransport,
+    ) -> Result<Wave3RefreshOutcome, SessionError> {
+        let refreshed = match read_config(transport, self.control_interface, self.api) {
+            Ok(config) => config,
+            Err(error) => {
+                self.write_state = Wave3WriteState::NeedsReprobe;
+                return Err(error);
+            }
+        };
+        if refreshed == self.config {
+            return Ok(Wave3RefreshOutcome::Unchanged { config: refreshed });
+        }
+        self.config = refreshed;
+        Ok(Wave3RefreshOutcome::Changed { config: refreshed })
+    }
 }
 
 /// Reads the API version first, admits its exact schema, and then reads the
@@ -190,6 +227,22 @@ pub fn probe_wave3(
     let mut version = [0; 2];
     read_exact(transport, version_probe(interface), &mut version)?;
     let api = decode_version_response(version);
+    let config = read_config(transport, interface, api)?;
+
+    Ok(Wave3Session {
+        identity: DeviceIdentity::wave3(),
+        api,
+        control_interface: interface,
+        config,
+        write_state: Wave3WriteState::Ready,
+    })
+}
+
+fn read_config(
+    transport: &mut impl ReadOnlyTransport,
+    interface: u8,
+    api: ApiVersion,
+) -> Result<Wave3Config, SessionError> {
     let schema = match config_schema(api) {
         Ok(schema) => schema,
         Err(SchemaError::UnsupportedApi { .. }) => {
@@ -197,7 +250,6 @@ pub fn probe_wave3(
         }
         Err(error) => return Err(SessionError::Schema(SessionSchemaError::Protocol(error))),
     };
-
     let setup = message_transfer(interface, Direction::In, schema)
         .map_err(|error| SessionError::Schema(SessionSchemaError::Setup(error)))?;
     let mut payload = [0; 16];
@@ -209,14 +261,7 @@ pub fn probe_wave3(
             .get(field.field())
             .map_err(|error| SessionError::Schema(SessionSchemaError::Configuration(error)))?;
     }
-
-    Ok(Wave3Session {
-        identity: DeviceIdentity::wave3(),
-        api,
-        control_interface: interface,
-        config,
-        write_state: Wave3WriteState::Ready,
-    })
+    Ok(config)
 }
 
 fn read_exact(
@@ -381,5 +426,68 @@ mod tests {
             probe_wave3(&mut transport, 8),
             Err(SessionError::Schema(SessionSchemaError::Configuration(CodecError::Value { .. })))
         ));
+    }
+
+    #[test]
+    fn retained_session_refreshes_the_complete_configuration_without_a_write_transport() {
+        let mut transport = FakeTransport::admitted(ApiVersion::new(5, 4));
+        let mut session = probe_wave3(&mut transport, 7).expect("admit Wave:3");
+        let original = *session.config().as_bytes();
+        transport
+            .reads
+            .push_back(Ok(ReadResult { response: original.to_vec(), completed: original.len() }));
+
+        assert_eq!(
+            session.refresh_config(&mut transport),
+            Ok(Wave3RefreshOutcome::Unchanged { config: *session.config() })
+        );
+        let mut changed = original;
+        changed[4] = 1;
+        transport
+            .reads
+            .push_back(Ok(ReadResult { response: changed.to_vec(), completed: changed.len() }));
+
+        assert!(matches!(
+            session.refresh_config(&mut transport),
+            Ok(Wave3RefreshOutcome::Changed { config }) if config.as_bytes() == &changed
+        ));
+        assert_eq!(session.config().as_bytes(), &changed);
+        assert_eq!(transport.requests.len(), 4);
+        assert_eq!(transport.requests[2].0, transport.requests[3].0);
+        assert_eq!(transport.requests[2].1, 16);
+    }
+
+    #[test]
+    fn malformed_or_disconnected_refresh_keeps_the_baseline_and_locks_writes() {
+        for result in [
+            Ok(ReadResult {
+                response: {
+                    let mut malformed = vec![0; 16];
+                    malformed[12] = 4;
+                    malformed
+                },
+                completed: 16,
+            }),
+            Err(TransportError::Disconnected),
+        ] {
+            let mut transport = FakeTransport::admitted(ApiVersion::new(5, 4));
+            let mut session = probe_wave3(&mut transport, 7).expect("admit Wave:3");
+            let baseline = *session.config();
+            transport.reads.push_back(result);
+
+            assert!(session.refresh_config(&mut transport).is_err());
+            assert_eq!(session.config(), &baseline);
+            assert_eq!(session.write_state(), Wave3WriteState::NeedsReprobe);
+
+            transport.reads.push_back(Ok(ReadResult {
+                response: baseline.as_bytes().to_vec(),
+                completed: baseline.as_bytes().len(),
+            }));
+            assert!(matches!(
+                session.refresh_config(&mut transport),
+                Ok(Wave3RefreshOutcome::Unchanged { .. })
+            ));
+            assert_eq!(session.write_state(), Wave3WriteState::NeedsReprobe);
+        }
     }
 }

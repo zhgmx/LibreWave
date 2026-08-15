@@ -1,6 +1,12 @@
-use librewave_core::{FixedPointValue, VolumeSelection, Wave3ConfigSnapshot, Wave3Control};
-use librewave_device::{TransactionError, TransactionOutcome, TransportError, Wave3WriteState};
-use librewave_platform_linux::{Wave3UsbConnection, wave3_config_snapshot};
+use librewave_core::{
+    AdmissionError, FixedPointValue, VolumeSelection, Wave3ConfigSnapshot, Wave3Control,
+};
+use librewave_device::{
+    TransactionError, TransactionOutcome, TransportError, Wave3RefreshOutcome, Wave3WriteState,
+};
+use librewave_platform_linux::{
+    UsbProbeError, Wave3UsbConnection, admission_error, wave3_config_snapshot,
+};
 use librewave_protocol::{
     ApiVersion, VolumeSelect, Wave3ControlChange, Wave3GainDb, Wave3HeadphoneDb,
     Wave3MonitorPercent,
@@ -9,7 +15,15 @@ use librewave_protocol::{
 pub(crate) trait ManagedWave3Connection {
     fn api(&self) -> ApiVersion;
     fn observed(&self) -> Result<Wave3ConfigSnapshot, String>;
+    fn refresh(&mut self) -> ConnectionRefreshOutcome;
     fn apply(&mut self, control: Wave3Control) -> ConnectionOutcome;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ConnectionRefreshOutcome {
+    Changed(Wave3ConfigSnapshot),
+    Unchanged(Wave3ConfigSnapshot),
+    Failed(AdmissionError),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -29,6 +43,16 @@ impl ManagedWave3Connection for Wave3UsbConnection {
 
     fn observed(&self) -> Result<Wave3ConfigSnapshot, String> {
         wave3_config_snapshot(self.config()).map_err(|error| error.to_string())
+    }
+
+    fn refresh(&mut self) -> ConnectionRefreshOutcome {
+        match self.refresh_config() {
+            Ok(Wave3RefreshOutcome::Changed { config }) => refresh_snapshot(config, true),
+            Ok(Wave3RefreshOutcome::Unchanged { config }) => refresh_snapshot(config, false),
+            Err(error) => {
+                ConnectionRefreshOutcome::Failed(admission_error(UsbProbeError::Session(error)))
+            }
+        }
     }
 
     fn apply(&mut self, control: Wave3Control) -> ConnectionOutcome {
@@ -86,6 +110,17 @@ impl ManagedWave3Connection for Wave3UsbConnection {
                 }
             }
         }
+    }
+}
+
+fn refresh_snapshot(
+    config: librewave_protocol::Wave3Config,
+    changed: bool,
+) -> ConnectionRefreshOutcome {
+    match wave3_config_snapshot(&config) {
+        Ok(config) if changed => ConnectionRefreshOutcome::Changed(config),
+        Ok(config) => ConnectionRefreshOutcome::Unchanged(config),
+        Err(_) => ConnectionRefreshOutcome::Failed(AdmissionError::MalformedResponse),
     }
 }
 

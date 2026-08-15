@@ -23,6 +23,10 @@ impl ManagedWave3Connection for FakeConnection {
         Ok(self.config.clone())
     }
 
+    fn refresh(&mut self) -> ConnectionRefreshOutcome {
+        ConnectionRefreshOutcome::Unchanged(self.config.clone())
+    }
+
     fn apply(&mut self, _control: Wave3Control) -> ConnectionOutcome {
         let outcome = self
             .outcomes
@@ -97,6 +101,7 @@ impl DesiredStateStore for FakeStore {
 
 struct SharedConnection {
     config: Wave3ConfigSnapshot,
+    refreshes: Rc<RefCell<VecDeque<ConnectionRefreshOutcome>>>,
     outcomes: Rc<RefCell<VecDeque<ConnectionOutcome>>>,
     calls: Rc<RefCell<Vec<Wave3Control>>>,
 }
@@ -108,6 +113,20 @@ impl ManagedWave3Connection for SharedConnection {
 
     fn observed(&self) -> Result<Wave3ConfigSnapshot, String> {
         Ok(self.config.clone())
+    }
+
+    fn refresh(&mut self) -> ConnectionRefreshOutcome {
+        let outcome = self
+            .refreshes
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or_else(|| ConnectionRefreshOutcome::Unchanged(self.config.clone()));
+        match &outcome {
+            ConnectionRefreshOutcome::Changed(config)
+            | ConnectionRefreshOutcome::Unchanged(config) => self.config = config.clone(),
+            ConnectionRefreshOutcome::Failed(_) => {}
+        }
+        outcome
     }
 
     fn apply(&mut self, control: Wave3Control) -> ConnectionOutcome {
@@ -127,8 +146,11 @@ impl ManagedWave3Connection for SharedConnection {
 struct Harness {
     daemon: Daemon,
     calls: Rc<RefCell<Vec<Wave3Control>>>,
+    connections: Rc<RefCell<usize>>,
+    refreshes: Rc<RefCell<VecDeque<ConnectionRefreshOutcome>>>,
     store_state: Rc<RefCell<DesiredState>>,
     saves: Rc<RefCell<usize>>,
+    _fixture: DiscoveryFixture,
 }
 
 fn harness(
@@ -144,6 +166,7 @@ fn harness(
         .into_iter()
         .next()
         .expect("fixture candidate");
+    let topology = candidate.topology.clone();
     let snapshot = Snapshot {
         generation: 0,
         devices: vec![DeviceSnapshot {
@@ -159,6 +182,8 @@ fn harness(
         },
     };
     let calls = Rc::new(RefCell::new(Vec::new()));
+    let connections = Rc::new(RefCell::new(0));
+    let refreshes = Rc::new(RefCell::new(VecDeque::new()));
     let queued = Rc::new(RefCell::new(VecDeque::from(outcomes)));
     let store_state = Rc::new(RefCell::new(desired.clone()));
     let saves = Rc::new(RefCell::new(0));
@@ -168,21 +193,26 @@ fn harness(
         saves: Rc::clone(&saves),
     };
     let connection_calls = Rc::clone(&calls);
-    let daemon = Daemon::with_connector(
+    let connection_count = Rc::clone(&connections);
+    let connection_refreshes = Rc::clone(&refreshes);
+    let mut daemon = Daemon::with_connector(
         snapshot,
         BTreeMap::from([(DeviceId(1), candidate)]),
         desired,
         Box::new(store),
         move |_| {
+            *connection_count.borrow_mut() += 1;
             Ok(Box::new(SharedConnection {
                 config: observed.clone(),
+                refreshes: Rc::clone(&connection_refreshes),
                 outcomes: Rc::clone(&queued),
                 calls: Rc::clone(&connection_calls),
             }))
         },
     );
-    drop(fixture);
-    Harness { daemon, calls, store_state, saves }
+    daemon.paths = fixture.paths.clone();
+    daemon.allocator.ids_by_topology.insert(topology, DeviceId(1));
+    Harness { daemon, calls, connections, refreshes, store_state, saves, _fixture: fixture }
 }
 
 fn inspect(daemon: &mut Daemon) -> DeviceSnapshot {
@@ -434,6 +464,238 @@ fn invalid_range_step_and_stale_generation_stop_before_persistence_and_usb() {
     assert!(matches!(error.kind, IpcErrorKind::StaleDeviceGeneration { .. }));
     assert!(stale.calls.borrow().is_empty());
     assert_eq!(*stale.saves.borrow(), 0);
+}
+
+#[test]
+fn retained_inspection_keeps_unchanged_generations_and_accepts_device_state_without_writes() {
+    let mut desired = DesiredState::default();
+    desired
+        .stage("1-8.3".to_owned(), Wave3Control::Clipguard(true))
+        .expect("stage managed control");
+    desired.promote("1-8.3").expect("promote managed control");
+    let mut original = wave3_config();
+    original.clipguard_enable = true;
+    let mut harness = harness(desired, original.clone(), vec![], vec![]);
+    let admitted = inspect(&mut harness.daemon);
+    assert_eq!(admitted.admission.generation(), Some(DeviceGeneration(1)));
+    let state_generation = harness.daemon.snapshot().generation;
+
+    let unchanged = inspect(&mut harness.daemon);
+    assert_eq!(unchanged.admission.generation(), Some(DeviceGeneration(1)));
+    assert_eq!(harness.daemon.snapshot().generation, state_generation);
+
+    let mut physical = original;
+    physical.input_mute = true;
+    physical.clipguard_enable = false;
+    harness.refreshes.borrow_mut().push_back(ConnectionRefreshOutcome::Changed(physical.clone()));
+    let refreshed = inspect(&mut harness.daemon);
+    assert_eq!(refreshed.admission.generation(), Some(DeviceGeneration(2)));
+    assert_eq!(refreshed.admission.config(), Some(&physical));
+    assert!(harness.calls.borrow().is_empty());
+    assert_eq!(*harness.saves.borrow(), 0);
+    assert_eq!(
+        harness.store_state.borrow().get("1-8.3").expect("managed topology").managed.clipguard,
+        Some(true)
+    );
+}
+
+#[test]
+fn refresh_command_polls_retained_connections_but_status_and_list_do_not() {
+    let original = wave3_config();
+    let mut harness = harness(DesiredState::default(), original.clone(), vec![], vec![]);
+    inspect(&mut harness.daemon);
+    let mut physical = original.clone();
+    physical.input_mute = true;
+    harness.refreshes.borrow_mut().push_back(ConnectionRefreshOutcome::Changed(physical.clone()));
+
+    let status = harness
+        .daemon
+        .handle(Command::GetStatus, librewave_core::Origin::Client)
+        .expect("get status");
+    let Response::Status { snapshot } = status else { panic!("unexpected status response") };
+    assert_eq!(snapshot.devices[0].admission.config(), Some(&original));
+    let listed = harness
+        .daemon
+        .handle(Command::ListDevices, librewave_core::Origin::Client)
+        .expect("list devices");
+    let Response::Devices { devices } = listed else { panic!("unexpected devices response") };
+    assert_eq!(devices[0].admission.config(), Some(&original));
+    assert_eq!(harness.refreshes.borrow().len(), 1);
+
+    let refreshed = harness
+        .daemon
+        .handle(Command::Refresh, librewave_core::Origin::Client)
+        .expect("refresh retained connections");
+    let Response::Refreshed { snapshot } = refreshed else { panic!("unexpected refresh response") };
+    assert_eq!(snapshot.devices[0].admission.generation(), Some(DeviceGeneration(2)));
+    assert_eq!(snapshot.devices[0].admission.config(), Some(&physical));
+    assert!(harness.refreshes.borrow().is_empty());
+    assert!(harness.calls.borrow().is_empty());
+    assert_eq!(*harness.saves.borrow(), 0);
+
+    let state_generation = snapshot.generation;
+    let unchanged = harness
+        .daemon
+        .handle(Command::Refresh, librewave_core::Origin::Client)
+        .expect("unchanged retained refresh");
+    let Response::Refreshed { snapshot } = unchanged else {
+        panic!("unexpected unchanged refresh response")
+    };
+    assert_eq!(snapshot.generation, state_generation);
+    assert_eq!(snapshot.devices[0].admission.generation(), Some(DeviceGeneration(2)));
+}
+
+#[test]
+fn retained_refresh_preserves_pending_lock_and_rejects_a_stale_client() {
+    let mut pending = DesiredState::default();
+    pending
+        .stage("1-8.3".to_owned(), Wave3Control::Clipguard(true))
+        .expect("stage pending control");
+    let mut pending_harness = harness(pending, wave3_config(), vec![], vec![]);
+    let admitted = inspect(&mut pending_harness.daemon);
+    assert!(matches!(
+        admitted.admission,
+        DeviceAdmissionSnapshot::Admitted {
+            generation: DeviceGeneration(1),
+            write_access: DeviceWriteAccess::Locked {
+                reason: DeviceWriteLockReason::PersistenceAmbiguous
+            },
+            ..
+        }
+    ));
+
+    let mut physical = wave3_config();
+    physical.input_mute = true;
+    pending_harness
+        .refreshes
+        .borrow_mut()
+        .push_back(ConnectionRefreshOutcome::Changed(physical.clone()));
+    let refreshed = pending_harness
+        .daemon
+        .handle(Command::Refresh, librewave_core::Origin::Client)
+        .expect("refresh pending retained connection");
+    let Response::Refreshed { snapshot } = refreshed else {
+        panic!("unexpected pending refresh response")
+    };
+    let refreshed = snapshot.devices[0].clone();
+    assert!(matches!(
+        refreshed.admission,
+        DeviceAdmissionSnapshot::Admitted {
+            generation: DeviceGeneration(2),
+            write_access: DeviceWriteAccess::Locked {
+                reason: DeviceWriteLockReason::PersistenceAmbiguous
+            },
+            ref config,
+            ..
+        } if config.as_ref() == Some(&physical)
+    ));
+    assert!(pending_harness.calls.borrow().is_empty());
+    assert_eq!(*pending_harness.saves.borrow(), 0);
+    assert_eq!(*pending_harness.connections.borrow(), 1);
+
+    let error = pending_harness
+        .daemon
+        .handle(
+            Command::SetWave3Control {
+                id: DeviceId(1),
+                expected_generation: DeviceGeneration(1),
+                control: Wave3Control::MicrophoneMute(false),
+            },
+            librewave_core::Origin::Client,
+        )
+        .expect_err("pending lock precedes stale generation");
+    assert!(matches!(
+        error.kind,
+        IpcErrorKind::DeviceWriteLocked { reason: DeviceWriteLockReason::PersistenceAmbiguous }
+    ));
+
+    let mut ready = harness(DesiredState::default(), wave3_config(), vec![], vec![]);
+    inspect(&mut ready.daemon);
+    let mut changed = wave3_config();
+    changed.input_mute = true;
+    ready.refreshes.borrow_mut().push_back(ConnectionRefreshOutcome::Changed(changed));
+    inspect(&mut ready.daemon);
+    let error = ready
+        .daemon
+        .handle(
+            Command::SetWave3Control {
+                id: DeviceId(1),
+                expected_generation: DeviceGeneration(1),
+                control: Wave3Control::MicrophoneMute(false),
+            },
+            librewave_core::Origin::Client,
+        )
+        .expect_err("stale client generation");
+    assert!(matches!(
+        error.kind,
+        IpcErrorKind::StaleDeviceGeneration {
+            expected: DeviceGeneration(1),
+            actual: DeviceGeneration(2)
+        }
+    ));
+    assert!(ready.calls.borrow().is_empty());
+    assert_eq!(*ready.saves.borrow(), 0);
+}
+
+#[test]
+fn recovery_locks_reopen_and_readmit_instead_of_using_configuration_refresh() {
+    for (restoration_unverified, reason) in [
+        (false, DeviceWriteLockReason::RestoreFailed),
+        (true, DeviceWriteLockReason::RestorationUnverified),
+    ] {
+        let mut desired = DesiredState::default();
+        desired
+            .stage("1-8.3".to_owned(), Wave3Control::Clipguard(true))
+            .expect("stage desired control");
+        desired.promote("1-8.3").expect("promote desired control");
+        let failure = ConnectionOutcome::Failed {
+            observed: if restoration_unverified { None } else { Some(wave3_config()) },
+            restoration_unverified,
+            message: "injected restore failure".to_owned(),
+        };
+        let mut harness = harness(desired, wave3_config(), vec![failure.clone(), failure], vec![]);
+
+        let first = inspect(&mut harness.daemon);
+        assert!(matches!(
+            first.admission,
+            DeviceAdmissionSnapshot::Admitted {
+                write_access: DeviceWriteAccess::Locked { reason: actual },
+                ..
+            } if actual == reason
+        ));
+        assert_eq!(*harness.connections.borrow(), 1);
+
+        let second = inspect(&mut harness.daemon);
+        assert!(matches!(
+            second.admission,
+            DeviceAdmissionSnapshot::Admitted {
+                write_access: DeviceWriteAccess::Locked { reason: actual },
+                ..
+            } if actual == reason
+        ));
+        assert_eq!(*harness.connections.borrow(), 2);
+        assert_eq!(harness.calls.borrow().len(), 2);
+        assert!(harness.refreshes.borrow().is_empty());
+    }
+}
+
+#[test]
+fn retained_refresh_drops_failed_connections_and_reports_safe_admission_state() {
+    for (error, connection) in [
+        (AdmissionError::MalformedResponse, DeviceConnection::Connected),
+        (AdmissionError::Disconnected, DeviceConnection::Disconnected),
+    ] {
+        let mut harness = harness(DesiredState::default(), wave3_config(), vec![], vec![]);
+        inspect(&mut harness.daemon);
+        harness.refreshes.borrow_mut().push_back(ConnectionRefreshOutcome::Failed(error.clone()));
+
+        let refreshed = inspect(&mut harness.daemon);
+        assert_eq!(refreshed.connection, connection);
+        assert_eq!(refreshed.admission, DeviceAdmissionSnapshot::Failed { error });
+        assert!(!harness.daemon.connections.contains_key(&DeviceId(1)));
+        assert!(harness.calls.borrow().is_empty());
+        assert_eq!(*harness.saves.borrow(), 0);
+    }
 }
 
 #[test]
@@ -835,7 +1097,7 @@ fn discovery_fixture() -> DiscoveryFixture {
 fn stable_ids_survive_card_order_swaps_and_topology_reconnects() {
     let (fixture, usb_bus, usb_a, usb_c, card7_link, card8_link) = two_device_fixture();
     let mut daemon = Daemon::with_inventory(LinuxInventory::new(), fixture.paths.clone());
-    daemon.refresh(librewave_core::Origin::Recovery);
+    daemon.refresh_inventory(librewave_core::Origin::Recovery);
     let id_a = daemon
         .candidates
         .iter()
@@ -867,7 +1129,7 @@ fn stable_ids_survive_card_order_swaps_and_topology_reconnects() {
         .expect("swap card 7 link");
     symlink(fixture.root.join("sys/devices/pci/usb1/1-8.2/1-8.2:1.0/sound/card8"), &card8_link)
         .expect("swap card 8 link");
-    daemon.refresh(librewave_core::Origin::Recovery);
+    daemon.refresh_inventory(librewave_core::Origin::Recovery);
 
     assert_eq!(daemon.candidates.get(&id_a).expect("topology A candidate").alsa_cards[0].number, 8);
     assert_eq!(daemon.candidates.get(&id_b).expect("topology B candidate").alsa_cards[0].number, 7);
@@ -888,12 +1150,12 @@ fn stable_ids_survive_card_order_swaps_and_topology_reconnects() {
     assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
 
     fs::remove_file(usb_bus.join("1-8.2")).expect("disconnect topology A");
-    daemon.refresh(librewave_core::Origin::Recovery);
+    daemon.refresh_inventory(librewave_core::Origin::Recovery);
     assert_eq!(daemon.snapshot().devices.len(), 1);
     assert!(!daemon.candidates.contains_key(&id_a));
 
     symlink(&usb_a, usb_bus.join("1-8.2")).expect("reconnect topology A");
-    daemon.refresh(librewave_core::Origin::Recovery);
+    daemon.refresh_inventory(librewave_core::Origin::Recovery);
     assert_eq!(
         daemon
             .candidates
@@ -905,7 +1167,7 @@ fn stable_ids_survive_card_order_swaps_and_topology_reconnects() {
 
     let new_topology = usb_bus.join("1-8.4");
     symlink(&usb_c, &new_topology).expect("observe new topology");
-    daemon.refresh(librewave_core::Origin::Recovery);
+    daemon.refresh_inventory(librewave_core::Origin::Recovery);
     let id_c = daemon
         .candidates
         .iter()

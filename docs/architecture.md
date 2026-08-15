@@ -61,7 +61,11 @@ The UI and CLI receive immutable snapshots followed by ordered events. They do n
 
 Wave:3 hardware commands name one reviewed control and include the device generation shown by the daemon. The daemon rejects a stale generation. The transaction path also reads the complete device configuration before every write. A physical change after the snapshot therefore causes a stale-baseline failure instead of a merge.
 
-The daemon keeps one admitted Linux USB connection for each managed Wave:3. Inspection returns the retained baseline. It does not poll later physical changes in this slice. Physical-event polling remains required work.
+The daemon keeps one admitted Linux USB connection for each managed Wave:3. `librewavectl devices inspect <id>` reads the complete configuration again on that connection. `librewavectl refresh` sends the `Refresh` IPC command. The command first updates the host inventory. It then reads each retained connection that is ready or locked by ambiguous persistence, in logical device ID order. `GetStatus` and `ListDevices` update the host inventory but do not read a retained hardware configuration.
+
+An unchanged configuration read does not advance the snapshot generation or device generation. A changed read replaces the portable observed configuration, advances the device generation, and records `Device` as the origin. The read does not send a hardware write or change sparse desired state. A malformed read drops the retained connection and reports a failed admission. A disconnect also drops the connection and reports the device as disconnected.
+
+A persistence-ambiguous connection stays retained and write-locked while configuration reads continue. A connection locked by failed or unverified restoration needs a new admission probe. Inspection drops that connection and uses the normal reopen, admission, and reconciliation path.
 
 Desired hardware state contains only controls that a client explicitly changed through LibreWave. It is stored under the profile directory in one strict pre-release schema. A command is recorded as pending before USB access. The daemon promotes it to managed state only after verified apply or an unchanged result. A pending command after a crash locks restoration for that topology.
 
@@ -69,7 +73,7 @@ Desired hardware state contains only controls that a client explicitly changed t
 
 On first adoption, LibreWave reads the current device state as its observed baseline. It does not store every observed hardware field as desired state, and it does not reset the microphone to project defaults.
 
-An explicit client command places that hardware control under LibreWave management. Managed controls are authoritative during reconnect. Unmanaged controls keep the value reported by the device. Physical knob, mute, and touch events will become user input after event polling is implemented.
+An explicit client command places that hardware control under LibreWave management. Managed controls are authoritative during reconnect. Unmanaged controls keep the value reported by the device. An explicit inspection or refresh treats a changed configuration as device input. Continuous physical-event polling remains required work.
 
 An explicit unmanage operation releases the audio graph and restores setup files that LibreWave replaced. Setup does not change Gain Lock, so unmanage does not restore a saved Gain Lock value.
 

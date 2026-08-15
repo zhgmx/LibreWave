@@ -413,4 +413,29 @@ mod tests {
         error_json["result"]["Err"]["kind"]["DeviceNotFound"]["unexpected"] = json!(true);
         assert!(decode_response(&serde_json::to_vec(&error_json).expect("encode error")).is_err());
     }
+
+    #[test]
+    fn device_refresh_contract_exposes_only_the_daemon_logical_id() {
+        let request = RequestEnvelope {
+            version: PROTOCOL_VERSION,
+            request_id: 11,
+            command: Command::InspectDevice { id: DeviceId(7) },
+        };
+        assert_eq!(
+            serde_json::to_value(request).expect("serialize inspection"),
+            json!({
+                "version": PROTOCOL_VERSION,
+                "request_id": 11,
+                "command": {"InspectDevice": {"id": 7}}
+            })
+        );
+        for forbidden in ["setup", "payload", "message", "field", "offset"] {
+            let mut payload = serde_json::to_value(request).expect("serialize inspection");
+            payload["command"]["InspectDevice"][forbidden] = json!(1);
+            assert!(
+                decode_request(&serde_json::to_vec(&payload).expect("encode invalid request"))
+                    .is_err()
+            );
+        }
+    }
 }

@@ -107,6 +107,10 @@ The default system playback target is a LibreWave software input channel, as Wav
 
 Every synchronized path tags the change origin as device, LibreWave client, or operating system. Applying an observed change must not create a second outgoing change to the origin. This is the Linux equivalent of the feedback guards recovered on Windows.
 
+An explicit LibreWave inspection or refresh reads the complete Wave:3 configuration on the daemon's retained connection. If a physical setting changed, the observed device state wins for that read. LibreWave updates its portable snapshot and does not write the managed value back to the device. Sparse desired state stays unchanged.
+
+The recovered feedback guards prove that a device setting report must not cause a write back to its origin. They do not establish whether Wave Link updates, clears, or retains saved intent for every physical control. LibreWave therefore keeps the observed state without changing saved intent. Reconnect still applies the existing managed-control contract. Physical tests on Windows and macOS must resolve this persistence rule before LibreWave claims exact parity.
+
 No product documentation may claim exact Wave Link parity while required cells remain `unknown` or `inferred`.
 
 ## Read-only Linux hardware-control observation

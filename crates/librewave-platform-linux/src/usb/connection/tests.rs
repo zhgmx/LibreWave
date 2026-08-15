@@ -478,6 +478,60 @@ fn admission_and_restored_transaction_use_the_same_handle() {
 }
 
 #[test]
+fn retained_refresh_reads_the_complete_configuration_on_the_same_handle_without_writes() {
+    let original = baseline();
+    let changed = changed_gain(original);
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut plan = HandlePlan::admitted(51, ApiVersion::new(5, 4), original);
+    plan.reads.push_back(Ok(ReadResult { payload: changed.to_vec(), completed: 16 }));
+    let selected = device("selected", 1, &[8, 3], plan, &events);
+    let mut connection = open_with_backend(&candidate(), backend(vec![selected], &events))
+        .expect("admit connection");
+
+    assert!(matches!(
+        connection.refresh_config(),
+        Ok(Wave3RefreshOutcome::Changed { config }) if config.as_bytes() == &changed
+    ));
+    assert_eq!(connection.session.config().as_bytes(), &changed);
+    let recorded = events.borrow();
+    let transfers: Vec<_> = recorded
+        .iter()
+        .filter(|event| matches!(event, Event::Read { .. } | Event::Write { .. }))
+        .collect();
+    assert_eq!(transfers.len(), 3);
+    assert!(transfers.iter().all(|event| matches!(
+        event,
+        Event::Read { handle: 51, timeout, .. } if *timeout == CONTROL_TRANSFER_TIMEOUT
+    )));
+    drop(recorded);
+    connection.close().expect("close connection");
+}
+
+#[test]
+fn retained_refresh_fails_closed_for_malformed_or_disconnected_reads() {
+    let mut malformed = baseline();
+    malformed[12] = 4;
+    for (id, result) in [
+        (52, Ok(ReadResult { payload: malformed.to_vec(), completed: 16 })),
+        (53, Err(TransportError::Disconnected)),
+    ] {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let original = baseline();
+        let mut plan = HandlePlan::admitted(id, ApiVersion::new(5, 4), original);
+        plan.reads.push_back(result);
+        let selected = device("selected", 1, &[8, 3], plan, &events);
+        let mut connection = open_with_backend(&candidate(), backend(vec![selected], &events))
+            .expect("admit connection");
+
+        assert!(connection.refresh_config().is_err());
+        assert_eq!(connection.session.config().as_bytes(), &original);
+        assert_eq!(connection.session.write_state(), Wave3WriteState::NeedsReprobe);
+        assert!(!events.borrow().iter().any(|event| matches!(event, Event::Write { .. })));
+        connection.close().expect("close connection");
+    }
+}
+
+#[test]
 fn platform_transport_preserves_short_counts_and_classified_errors() {
     let original = baseline();
     for primary in [Ok(15), Err(TransportError::TimedOut)] {

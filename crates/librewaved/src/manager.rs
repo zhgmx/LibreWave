@@ -1,4 +1,4 @@
-use crate::control::{ConnectionOutcome, ManagedWave3Connection};
+use crate::control::{ConnectionOutcome, ConnectionRefreshOutcome, ManagedWave3Connection};
 use crate::persistence::{
     DesiredState, DesiredStateStore, DesiredWave3Controls, FileDesiredStateStore,
 };
@@ -161,15 +161,16 @@ impl Daemon {
     ) -> Result<Response, IpcError> {
         match command {
             Command::Refresh => {
-                ignore_reconciliation_event(self.refresh(origin));
+                ignore_reconciliation_event(self.refresh_inventory(origin));
+                self.refresh_retained_connections()?;
                 Ok(Response::Refreshed { snapshot: self.snapshot().clone() })
             }
             Command::GetStatus => {
-                ignore_reconciliation_event(self.refresh(origin));
+                ignore_reconciliation_event(self.refresh_inventory(origin));
                 Ok(Response::Status { snapshot: self.snapshot().clone() })
             }
             Command::ListDevices => {
-                ignore_reconciliation_event(self.refresh(origin));
+                ignore_reconciliation_event(self.refresh_inventory(origin));
                 Ok(Response::Devices { devices: self.snapshot().devices.clone() })
             }
             Command::InspectDevice { id } => {
@@ -186,8 +187,10 @@ impl Daemon {
 
     fn inspect(&mut self, id: DeviceId, origin: librewave_core::Origin) -> Result<(), IpcError> {
         self.device(id)?;
-        if self.connections.get(&id).is_some_and(|owned| owned.locked.is_none()) {
-            return Ok(());
+        if self.connections.get(&id).is_some_and(|owned| {
+            matches!(owned.locked, None | Some(DeviceWriteLockReason::PersistenceAmbiguous))
+        }) {
+            return self.refresh_connection(id);
         }
         self.connections.remove(&id);
         let candidate =
@@ -244,6 +247,90 @@ impl Daemon {
             origin,
         )?;
         self.connections.insert(id, OwnedConnection { topology, connection, locked });
+        Ok(())
+    }
+
+    fn refresh_connection(&mut self, id: DeviceId) -> Result<(), IpcError> {
+        let (api, topology, locked, outcome) = {
+            let owned = self
+                .connections
+                .get_mut(&id)
+                .ok_or_else(|| write_locked(DeviceWriteLockReason::NoOwnedConnection))?;
+            (
+                owned.connection.api(),
+                owned.topology.clone(),
+                owned.locked,
+                owned.connection.refresh(),
+            )
+        };
+        match outcome {
+            ConnectionRefreshOutcome::Changed(config) => {
+                let generation = self.next_device_generation(&topology);
+                let write_access = locked.map_or(DeviceWriteAccess::Ready, |reason| {
+                    DeviceWriteAccess::Locked { reason }
+                });
+                self.update_admission(
+                    id,
+                    DeviceConnection::Connected,
+                    DeviceAdmissionSnapshot::Admitted {
+                        api,
+                        generation,
+                        write_access,
+                        config: Some(config),
+                    },
+                    librewave_core::Origin::Device,
+                )
+            }
+            ConnectionRefreshOutcome::Unchanged(config) => {
+                let generation = self
+                    .device(id)?
+                    .admission
+                    .generation()
+                    .ok_or_else(|| write_locked(DeviceWriteLockReason::NoOwnedConnection))?;
+                let write_access = locked.map_or(DeviceWriteAccess::Ready, |reason| {
+                    DeviceWriteAccess::Locked { reason }
+                });
+                self.update_admission(
+                    id,
+                    DeviceConnection::Connected,
+                    DeviceAdmissionSnapshot::Admitted {
+                        api,
+                        generation,
+                        write_access,
+                        config: Some(config),
+                    },
+                    librewave_core::Origin::Device,
+                )
+            }
+            ConnectionRefreshOutcome::Failed(error) => {
+                self.connections.remove(&id);
+                let connection = if error == AdmissionError::Disconnected {
+                    DeviceConnection::Disconnected
+                } else {
+                    DeviceConnection::Connected
+                };
+                self.update_admission(
+                    id,
+                    connection,
+                    DeviceAdmissionSnapshot::Failed { error },
+                    librewave_core::Origin::Device,
+                )
+            }
+        }
+    }
+
+    fn refresh_retained_connections(&mut self) -> Result<(), IpcError> {
+        let ids: Vec<_> = self
+            .connections
+            .iter()
+            .filter_map(|(id, owned)| {
+                matches!(owned.locked, None | Some(DeviceWriteLockReason::PersistenceAmbiguous))
+                    .then_some(*id)
+            })
+            .collect();
+        for id in ids {
+            self.refresh_connection(id)?;
+        }
         Ok(())
     }
 
@@ -602,7 +689,7 @@ impl Daemon {
         DeviceGeneration(*generation)
     }
 
-    fn refresh(&mut self, origin: librewave_core::Origin) -> Option<Event> {
+    fn refresh_inventory(&mut self, origin: librewave_core::Origin) -> Option<Event> {
         let (mut snapshot, candidates) =
             self.snapshot_from_inventory(self.inventory.inspect(&self.paths));
         for device in &mut snapshot.devices {

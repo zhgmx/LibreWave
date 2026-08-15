@@ -447,13 +447,13 @@ impl Snapshot {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub enum Command {
-    /// Refresh the read-only host inventory.
+    /// Refresh the host inventory and retained hardware configurations.
     Refresh,
-    /// Return the current immutable snapshot.
+    /// Refresh the host inventory and return the snapshot without polling retained hardware.
     GetStatus,
-    /// Return the devices in the current immutable snapshot.
+    /// Refresh the host inventory and return its devices without polling retained hardware.
     ListDevices,
-    /// Return retained admission state, or open and admit a connection when needed.
+    /// Refresh one retained configuration, or open and admit a connection when needed.
     InspectDevice { id: DeviceId },
     /// Change one reviewed Wave:3 hardware control through the daemon-owned connection.
     SetWave3Control { id: DeviceId, expected_generation: DeviceGeneration, control: Wave3Control },
