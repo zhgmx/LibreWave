@@ -1,5 +1,5 @@
 [workspace]
-members = []
+members = ["crates/librewave-protocol"]
 resolver = "3"
 
 [workspace.package]

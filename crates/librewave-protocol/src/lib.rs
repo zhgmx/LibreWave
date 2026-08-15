@@ -1,0 +1,290 @@
+#![doc = "Portable Wave protocol identities, schemas, codecs, and safe payload mutation."]
+
+mod codec;
+mod identity;
+mod schema;
+mod setup;
+mod wave3;
+
+pub use codec::{CodecError, PatchResult, SemanticValue, ValueError};
+pub use identity::{
+    ApiVersion, DeviceModel, Direction, MessageIdentity, MessageKind, SchemaIdentity,
+};
+pub use schema::{Access, FieldSpec, MessageSchema, SchemaError, admit, config_schema};
+pub use setup::{
+    SetupError, SetupPacket, decode_version_response, message_transfer, version_probe,
+};
+pub use wave3::{VolumeSelect, Wave3Config, Wave3ConfigField, config_fields};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_field(field: Wave3ConfigField) -> FieldSpec {
+        match config_fields().iter().find(|spec| spec.field() == field) {
+            Some(spec) => *spec,
+            None => panic!("missing configuration field"),
+        }
+    }
+
+    fn config() -> Wave3Config {
+        let schema = admitted_config(ApiVersion::new(5, 4));
+        match Wave3Config::from_schema(schema, &[0; 16]) {
+            Ok(config) => config,
+            Err(error) => panic!("valid configuration rejected: {error}"),
+        }
+    }
+
+    fn admitted_config(api: ApiVersion) -> &'static MessageSchema {
+        match config_schema(api) {
+            Ok(schema) => schema,
+            Err(error) => panic!("config schema rejected: {error}"),
+        }
+    }
+
+    #[test]
+    fn admits_only_exact_wave3_api5_message_shapes() {
+        let identity = SchemaIdentity::new(
+            DeviceModel::Wave3,
+            ApiVersion::new(5, 4),
+            MessageIdentity::new(MessageKind::Config, 0),
+            16,
+        );
+        assert_eq!(admit(identity).map(|schema| schema.identity()), Ok(identity));
+        assert!(matches!(
+            config_schema(ApiVersion::new(5, 2)),
+            Err(SchemaError::UnsupportedApi { .. })
+        ));
+        assert!(matches!(
+            admit(SchemaIdentity::new(
+                DeviceModel::Wave3,
+                ApiVersion::new(5, 4),
+                MessageIdentity::new(MessageKind::Config, 0),
+                14,
+            )),
+            Err(SchemaError::PayloadSizeMismatch { expected: 16, actual: 14 })
+        ));
+        assert!(matches!(
+            admit(SchemaIdentity::new(
+                DeviceModel::Wave3,
+                ApiVersion::new(5, 4),
+                MessageIdentity::new(MessageKind::Config, 1),
+                16,
+            )),
+            Err(SchemaError::MessageIdMismatch { expected: 0, actual: 1 })
+        ));
+        assert!(matches!(
+            admit(SchemaIdentity::new(
+                DeviceModel::Wave3,
+                ApiVersion::new(5, 4),
+                MessageIdentity::new(MessageKind::Unknown, 99),
+                16,
+            )),
+            Err(SchemaError::UnsupportedMessage { .. })
+        ));
+        assert!(matches!(
+            admit(SchemaIdentity::new(
+                DeviceModel::Unknown,
+                ApiVersion::new(5, 4),
+                MessageIdentity::new(MessageKind::Config, 0),
+                16,
+            )),
+            Err(SchemaError::UnsupportedModel { .. })
+        ));
+    }
+
+    #[test]
+    fn only_admitted_api5_config_schemas_can_construct_mutable_configs() {
+        assert!(matches!(
+            config_schema(ApiVersion::new(5, 2)),
+            Err(SchemaError::UnsupportedApi { .. })
+        ));
+        assert_eq!(
+            Wave3Config::from_schema(admitted_config(ApiVersion::new(5, 4)), &[0; 16])
+                .map(|config| config.get(Wave3ConfigField::GainLock)),
+            Ok(Ok(SemanticValue::Boolean(false)))
+        );
+        let mut api_5_3 =
+            match Wave3Config::from_schema(admitted_config(ApiVersion::new(5, 3)), &[0; 16]) {
+                Ok(config) => config,
+                Err(error) => panic!("API 5.3 config rejected: {error}"),
+            };
+        assert_eq!(
+            api_5_3.set(Wave3ConfigField::GainLock, SemanticValue::Boolean(true)),
+            Ok(PatchResult::Changed)
+        );
+        assert!(matches!(
+            Wave3Config::from_schema(
+                match admit(SchemaIdentity::new(
+                    DeviceModel::Wave3,
+                    ApiVersion::new(5, 4),
+                    MessageIdentity::new(MessageKind::Status, 1),
+                    8,
+                )) {
+                    Ok(schema) => schema,
+                    Err(error) => panic!("status schema rejected: {error}"),
+                },
+                &[0; 16],
+            ),
+            Err(CodecError::SchemaMismatch)
+        ));
+    }
+
+    #[test]
+    fn config_layout_contains_all_eleven_fields_and_reserved_gap() {
+        assert_eq!(config_fields().len(), 11);
+        let offsets: Vec<_> = config_fields().iter().map(|field| field.offset()).collect();
+        assert_eq!(offsets, [0, 4, 5, 6, 7, 9, 10, 12, 13, 14, 15]);
+        assert_eq!(config_field(Wave3ConfigField::AllLedsOff).offset(), 13);
+        assert_eq!(config_field(Wave3ConfigField::LedsFlip).offset(), 14);
+        assert_eq!(config_field(Wave3ConfigField::GainLock).offset(), 15);
+    }
+
+    #[test]
+    fn fixed_point_boundaries_and_steps_are_checked() {
+        let mut config = config();
+        assert_eq!(
+            config.set(
+                Wave3ConfigField::InputGain,
+                SemanticValue::FixedPoint { raw: 0, fractional_bits: 8 }
+            ),
+            Ok(PatchResult::Unchanged)
+        );
+        assert_eq!(
+            config.set(
+                Wave3ConfigField::InputGain,
+                SemanticValue::FixedPoint { raw: 10_240, fractional_bits: 8 }
+            ),
+            Ok(PatchResult::Changed)
+        );
+        assert!(matches!(
+            config.set(
+                Wave3ConfigField::InputGain,
+                SemanticValue::FixedPoint { raw: 10_241, fractional_bits: 8 }
+            ),
+            Err(CodecError::Value { reason: ValueError::OutsideRange { .. }, .. })
+        ));
+        assert!(matches!(
+            config.set(
+                Wave3ConfigField::InputGain,
+                SemanticValue::FixedPoint { raw: 1, fractional_bits: 8 }
+            ),
+            Err(CodecError::Value { reason: ValueError::WrongStep { .. }, .. })
+        ));
+        assert!(matches!(
+            config.set(
+                Wave3ConfigField::InputGain,
+                SemanticValue::FixedPoint { raw: 0, fractional_bits: 7 }
+            ),
+            Err(CodecError::Value { reason: ValueError::FractionalBits { .. }, .. })
+        ));
+    }
+
+    #[test]
+    fn booleans_and_enum_values_reject_invalid_wire_values() {
+        let mut payload = [0; 16];
+        payload[4] = 2;
+        assert!(matches!(
+            crate::codec::decode_field(
+                admitted_config(ApiVersion::new(5, 4)),
+                config_field(Wave3ConfigField::InputMute),
+                &payload,
+            ),
+            Err(CodecError::Value { reason: ValueError::InvalidBoolean(2), .. })
+        ));
+        payload[4] = 0;
+        payload[12] = 4;
+        assert!(matches!(
+            crate::codec::decode_field(
+                admitted_config(ApiVersion::new(5, 4)),
+                config_field(Wave3ConfigField::VolumeSelect),
+                &payload,
+            ),
+            Err(CodecError::Value { reason: ValueError::UnknownEnum(4), .. })
+        ));
+        assert_eq!(VolumeSelect::Mic as u8, 1);
+        assert_eq!(VolumeSelect::Headphone as u8, 2);
+        assert_eq!(VolumeSelect::Mix as u8, 3);
+    }
+
+    #[test]
+    fn short_and_long_payloads_are_rejected() {
+        assert!(matches!(
+            Wave3Config::from_schema(admitted_config(ApiVersion::new(5, 4)), &[0; 15],),
+            Err(CodecError::PayloadLength { expected: 16, actual: 15 })
+        ));
+        assert!(matches!(
+            Wave3Config::from_schema(admitted_config(ApiVersion::new(5, 4)), &[0; 17],),
+            Err(CodecError::PayloadLength { expected: 16, actual: 17 })
+        ));
+    }
+
+    #[test]
+    fn mutation_preserves_reserved_bytes_and_gain_lock() {
+        let original: Vec<u8> = (0..16).collect();
+        let mut config =
+            match Wave3Config::from_schema(admitted_config(ApiVersion::new(5, 4)), &original) {
+                Ok(config) => config,
+                Err(error) => panic!("valid configuration rejected: {error}"),
+            };
+        assert_eq!(
+            config.set(Wave3ConfigField::GainLock, SemanticValue::Boolean(true)),
+            Ok(PatchResult::Changed)
+        );
+        let mut expected = original;
+        expected[15] = 1;
+        assert_eq!(config.as_bytes(), expected.as_slice());
+        assert_eq!(config.as_bytes()[2..4], [2, 3]);
+        assert_eq!(
+            config.set(Wave3ConfigField::GainLock, SemanticValue::Boolean(true)),
+            Ok(PatchResult::Unchanged)
+        );
+        assert_eq!(config.get(Wave3ConfigField::GainLock), Ok(SemanticValue::Boolean(true)));
+    }
+
+    #[test]
+    fn read_only_messages_cannot_be_written() {
+        let status = match admit(SchemaIdentity::new(
+            DeviceModel::Wave3,
+            ApiVersion::new(5, 4),
+            MessageIdentity::new(MessageKind::Status, 1),
+            8,
+        )) {
+            Ok(schema) => schema,
+            Err(error) => panic!("status schema rejected: {error}"),
+        };
+        assert_eq!(status.access(), Access::READ_ONLY);
+        assert_eq!(
+            message_transfer(3, Direction::Out, status),
+            Err(SetupError::MessageNotWritable)
+        );
+        let mut payload = [0; 8];
+        assert_eq!(
+            crate::codec::patch_field(
+                status,
+                config_field(Wave3ConfigField::GainLock),
+                &mut payload,
+                SemanticValue::Boolean(true)
+            ),
+            Err(CodecError::FieldNotWritable { field: Wave3ConfigField::GainLock })
+        );
+    }
+
+    #[test]
+    fn setup_packets_match_wave3_legacy_uac1_identity() {
+        assert_eq!(version_probe(3).to_bytes(), [0xa1, 0x85, 0x0a, 0x00, 0x03, 0x33, 0x02, 0x00]);
+        let schema = match config_schema(ApiVersion::new(5, 4)) {
+            Ok(schema) => schema,
+            Err(error) => panic!("config schema rejected: {error}"),
+        };
+        assert_eq!(
+            message_transfer(3, Direction::In, schema).map(SetupPacket::to_bytes),
+            Ok([0xa1, 0x85, 0x00, 0x00, 0x03, 0x33, 0x10, 0x00])
+        );
+        assert_eq!(
+            message_transfer(3, Direction::Out, schema).map(SetupPacket::to_bytes),
+            Ok([0x21, 0x05, 0x00, 0x00, 0x03, 0x33, 0x10, 0x00])
+        );
+        assert_eq!(decode_version_response([5, 4]), ApiVersion::new(5, 4));
+    }
+}
