@@ -1,18 +1,17 @@
 [package]
-name = "librewave-platform-linux"
+name = "librewavectl"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "LibreWave command-line client"
 
 [dependencies]
-libc.workspace = true
 librewave-core = { path = "../librewave-core" }
-librewave-device = { path = "../librewave-device" }
 librewave-ipc = { path = "../librewave-ipc" }
-rusb = "0.9.4"
+librewave-platform-linux = { path = "../librewave-platform-linux" }
 
 [lints]
 workspace = true

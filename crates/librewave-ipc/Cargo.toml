@@ -1,14 +1,17 @@
 [package]
-name = "librewave-protocol"
+name = "librewave-ipc"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Versioned local IPC for LibreWave clients and daemon"
 
 [dependencies]
+librewave-core = { path = "../librewave-core" }
 serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

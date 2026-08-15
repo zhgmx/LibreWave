@@ -1,7 +1,8 @@
 use core::fmt;
+use serde::{Deserialize, Serialize};
 
 /// A device API version reported by the device's version request.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct ApiVersion {
     pub major: u8,
     pub minor: u8,
@@ -21,7 +22,7 @@ impl fmt::Display for ApiVersion {
 }
 
 /// A device family admitted by this crate.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum DeviceModel {
     Wave3,
     Unknown,

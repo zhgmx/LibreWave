@@ -16,6 +16,8 @@ mod usb;
 
 pub use usb::{DescriptorError, TopologyError, UsbProbeError, probe_wave3_usb};
 
+pub mod ipc;
+
 /// The Wave:3's reviewed normal-mode USB identity.
 pub const WAVE3_USB: UsbIdentity = DeviceIdentity::wave3().usb();
 

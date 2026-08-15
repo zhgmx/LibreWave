@@ -2950,6 +2950,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "librewave-core"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "librewave-protocol",
+ "serde",
+]
+
+[[package]]
 name = "librewave-device"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -2957,16 +2965,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "librewave-ipc"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "librewave-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "librewave-platform-linux"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "libc",
+ "librewave-core",
  "librewave-device",
+ "librewave-ipc",
  "rusb",
 ]
 
 [[package]]
 name = "librewave-protocol"
 version = "0.1.0-alpha.1"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "librewave-ui"
@@ -2974,6 +2997,24 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "gpui",
  "gpui_platform",
+]
+
+[[package]]
+name = "librewavectl"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "librewave-core",
+ "librewave-ipc",
+ "librewave-platform-linux",
+]
+
+[[package]]
+name = "librewaved"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "librewave-core",
+ "librewave-ipc",
+ "librewave-platform-linux",
 ]
 
 [[package]]
