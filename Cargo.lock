@@ -3,5 +3,19 @@
 version = 4
 
 [[package]]
+name = "librewave-device"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "librewave-protocol",
+]
+
+[[package]]
+name = "librewave-platform-linux"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "librewave-device",
+]
+
+[[package]]
 name = "librewave-protocol"
 version = "0.1.0-alpha.1"

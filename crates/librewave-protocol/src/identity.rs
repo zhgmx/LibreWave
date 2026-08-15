@@ -21,7 +21,7 @@ impl fmt::Display for ApiVersion {
 }
 
 /// A device family admitted by this crate.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum DeviceModel {
     Wave3,
     Unknown,
