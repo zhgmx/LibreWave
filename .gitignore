@@ -1,0 +1,15 @@
+/target/
+/.cache/
+/.direnv/
+/.env
+/.env.*
+!.env.example
+
+*.log
+*.profraw
+*.swp
+*~
+
+.DS_Store
+.idea/
+.vscode/
