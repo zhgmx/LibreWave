@@ -16,7 +16,10 @@ mod discovery;
 mod services;
 mod usb;
 
-pub use usb::{DescriptorError, TopologyError, UsbProbeError, probe_wave3_usb};
+pub use usb::{
+    DescriptorError, TopologyError, UsbProbeError, admission_snapshot, inspect_wave3_usb,
+    probe_wave3_usb,
+};
 
 pub mod ipc;
 

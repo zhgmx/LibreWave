@@ -1,11 +1,11 @@
 #![doc = "Portable versioned messages and codecs for `LibreWave` IPC."]
 
-use librewave_core::{Command, DeviceSnapshot, Snapshot};
+use librewave_core::{Command, DeviceId, DeviceSnapshot, Snapshot};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// The current local request/response protocol version.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 /// The maximum encoded JSON payload accepted by the local protocol.
 pub const MAX_FRAME_SIZE: usize = 1024 * 1024;
 
@@ -23,6 +23,7 @@ pub struct RequestEnvelope {
 
 /// The successful payload returned by the daemon.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub enum Response {
     /// The complete current daemon snapshot.
     Status { snapshot: Snapshot },
@@ -30,6 +31,8 @@ pub enum Response {
     Devices { devices: Vec<DeviceSnapshot> },
     /// The refresh completed and a new snapshot is available.
     Refreshed { snapshot: Snapshot },
+    /// One device snapshot after its read-only admission probe.
+    DeviceInspection { device: DeviceSnapshot },
 }
 
 /// A framed response sent by the daemon.
@@ -60,6 +63,7 @@ impl ResponseEnvelope {
 
 /// Stable categories for daemon-side IPC failures.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub enum IpcErrorKind {
     /// The peer requested a protocol version this daemon does not implement.
     VersionMismatch { expected: u16, actual: u16 },
@@ -69,6 +73,8 @@ pub enum IpcErrorKind {
     InvalidRequest,
     /// The daemon could not complete the requested read-only operation.
     Internal,
+    /// The requested logical device is not in the current inventory.
+    DeviceNotFound { id: DeviceId },
 }
 
 /// An explicit error returned over the local interface.
@@ -99,6 +105,15 @@ impl IpcError {
         Self {
             kind: IpcErrorKind::PermissionDenied,
             message: "the connecting user is not permitted to use this daemon".to_owned(),
+        }
+    }
+
+    /// Creates a missing logical-device failure.
+    #[must_use]
+    pub fn device_not_found(id: DeviceId) -> Self {
+        Self {
+            kind: IpcErrorKind::DeviceNotFound { id },
+            message: format!("device {id} is not in the current inventory"),
         }
     }
 }
@@ -201,6 +216,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use librewave_core::{DeviceAdmissionSnapshot, DeviceConnection, DeviceId, DeviceModel};
+    use serde_json::json;
+
+    fn device() -> DeviceSnapshot {
+        DeviceSnapshot {
+            id: DeviceId(1),
+            model: DeviceModel::Wave3,
+            connection: DeviceConnection::Connected,
+            audio_cards: Vec::new(),
+            admission: DeviceAdmissionSnapshot::not_inspected(),
+        }
+    }
 
     #[test]
     fn round_trip_preserves_versioned_envelope_without_origin_on_command() {
@@ -258,5 +285,32 @@ mod tests {
             panic!("version-invalid request reached the command handler")
         });
         assert_eq!(response.result, Err(IpcError::version_mismatch(PROTOCOL_VERSION + 1)));
+    }
+
+    #[test]
+    fn nested_command_response_and_error_shapes_reject_unknown_fields() {
+        let request = RequestEnvelope {
+            version: PROTOCOL_VERSION,
+            request_id: 1,
+            command: Command::InspectDevice { id: DeviceId(1) },
+        };
+        let mut request_json = serde_json::to_value(request).expect("serialize request");
+        request_json["command"]["InspectDevice"]["unexpected"] = json!(true);
+        assert!(
+            decode_request(&serde_json::to_vec(&request_json).expect("encode request")).is_err()
+        );
+
+        let response =
+            ResponseEnvelope::success(1, Response::DeviceInspection { device: device() });
+        let mut response_json = serde_json::to_value(response).expect("serialize response");
+        response_json["result"]["Ok"]["DeviceInspection"]["unexpected"] = json!(true);
+        assert!(
+            decode_response(&serde_json::to_vec(&response_json).expect("encode response")).is_err()
+        );
+
+        let error = ResponseEnvelope::failure(1, IpcError::device_not_found(DeviceId(1)));
+        let mut error_json = serde_json::to_value(error).expect("serialize error");
+        error_json["result"]["Err"]["kind"]["DeviceNotFound"]["unexpected"] = json!(true);
+        assert!(decode_response(&serde_json::to_vec(&error_json).expect("encode error")).is_err());
     }
 }

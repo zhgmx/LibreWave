@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 /// A device API version reported by the device's version request.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApiVersion {
     pub major: u8,
     pub minor: u8,

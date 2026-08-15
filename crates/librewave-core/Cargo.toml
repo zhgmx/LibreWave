@@ -12,5 +12,8 @@ description = "Portable LibreWave state, commands, and events"
 librewave-protocol = { path = "../librewave-protocol" }
 serde.workspace = true
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [lints]
 workspace = true

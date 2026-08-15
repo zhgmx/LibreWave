@@ -1,6 +1,8 @@
 #![doc = "The complete headless `LibreWave` command-line client."]
 
-use librewave_core::{DeviceSnapshot, ServiceState, Snapshot};
+use librewave_core::{
+    DeviceAdmissionSnapshot, DeviceId, DeviceSnapshot, ServiceState, Snapshot, Wave3ConfigSnapshot,
+};
 use librewave_ipc::Response;
 use librewave_platform_linux::ipc::{Client, ClientError};
 use std::io::{self, Write};
@@ -26,22 +28,34 @@ where
     let _program = arguments.next();
     let command = arguments.next().unwrap_or_default();
     let subcommand = arguments.next();
+    let argument = arguments.next();
     if arguments.next().is_some() {
         writeln!(errors, "error: unexpected command arguments")?;
         return Ok(2);
     }
-    match (command.as_str(), subcommand.as_deref()) {
-        ("" | "help" | "--help" | "-h", None) => {
+    match (command.as_str(), subcommand.as_deref(), argument.as_deref()) {
+        ("" | "help" | "--help" | "-h", None, None) => {
             write_help(output)?;
             Ok(0)
         }
-        ("status", None) => request_status(socket_path, output, errors),
-        ("devices", Some("list")) => request_devices(socket_path, output, errors),
-        ("devices", None) => {
+        ("status", None, None) => request_status(socket_path, output, errors),
+        ("devices", Some("list"), None) => request_devices(socket_path, output, errors),
+        ("devices", Some("inspect"), Some(id)) => {
+            request_device_inspection(socket_path, id, output, errors)
+        }
+        ("devices", None, None) => {
             writeln!(errors, "error: expected `librewavectl devices list`")?;
             Ok(2)
         }
-        (unknown, _) => {
+        ("devices", Some("inspect"), None) => {
+            writeln!(errors, "error: expected `librewavectl devices inspect <id>`")?;
+            Ok(2)
+        }
+        ("devices", Some("list"), Some(_)) => {
+            writeln!(errors, "error: unexpected command arguments")?;
+            Ok(2)
+        }
+        (unknown, _, _) => {
             writeln!(errors, "error: unknown command `{unknown}`")?;
             Ok(2)
         }
@@ -101,6 +115,35 @@ where
     }
 }
 
+fn request_device_inspection<O, E>(
+    socket_path: &Path,
+    id: &str,
+    output: &mut O,
+    errors: &mut E,
+) -> io::Result<i32>
+where
+    O: Write,
+    E: Write,
+{
+    let id = if let Ok(id) = id.parse::<u32>() {
+        DeviceId(id)
+    } else {
+        writeln!(errors, "error: device ID must be a number")?;
+        return Ok(2);
+    };
+    match request(socket_path, librewave_core::Command::InspectDevice { id }) {
+        Ok(Response::DeviceInspection { device }) => {
+            write_device_inspection(output, &device)?;
+            Ok(inspection_exit_code(&device))
+        }
+        Ok(_) => {
+            writeln!(errors, "error: daemon returned an unexpected device response")?;
+            Ok(1)
+        }
+        Err(error) => write_client_error(error, errors),
+    }
+}
+
 fn request(socket_path: &Path, command: librewave_core::Command) -> Result<Response, ClientError> {
     Client::new(socket_path).request(command)
 }
@@ -145,6 +188,81 @@ fn write_devices<W: Write>(output: &mut W, devices: &[DeviceSnapshot]) -> io::Re
     Ok(())
 }
 
+fn write_device_inspection<W: Write>(output: &mut W, device: &DeviceSnapshot) -> io::Result<()> {
+    writeln!(output, "Device {}", device.id)?;
+    writeln!(output, "Model: {}", device.model)?;
+    writeln!(output, "Connection: {}", device.connection)?;
+    writeln!(output, "ALSA cards: {}", format_audio_cards(device))?;
+    write_admission(output, &device.admission)
+}
+
+fn format_audio_cards(device: &DeviceSnapshot) -> String {
+    if device.audio_cards.is_empty() {
+        return "none".to_owned();
+    }
+    device
+        .audio_cards
+        .iter()
+        .map(|card| match &card.name {
+            Some(name) => format!("card {} ({name})", card.number),
+            None => format!("card {}", card.number),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn write_admission<W: Write>(
+    output: &mut W,
+    admission: &DeviceAdmissionSnapshot,
+) -> io::Result<()> {
+    writeln!(output, "Control access: {}", admission.control_access())?;
+    match admission.admitted_api() {
+        Some(api) => writeln!(output, "Admitted API: {api}")?,
+        None => writeln!(output, "Admitted API: none")?,
+    }
+    if let Some(error) = admission.error() {
+        writeln!(output, "Admission: {error}")?;
+    } else if matches!(admission, librewave_core::DeviceAdmissionSnapshot::NotInspected) {
+        writeln!(output, "Admission: not inspected")?;
+    }
+    if let Some(config) = admission.config() {
+        write_config(output, config)?;
+    }
+    Ok(())
+}
+
+fn inspection_exit_code(device: &DeviceSnapshot) -> i32 {
+    match &device.admission {
+        librewave_core::DeviceAdmissionSnapshot::Admitted { .. } => 0,
+        librewave_core::DeviceAdmissionSnapshot::NotInspected
+        | librewave_core::DeviceAdmissionSnapshot::Failed { .. } => 1,
+    }
+}
+
+fn write_config<W: Write>(output: &mut W, config: &Wave3ConfigSnapshot) -> io::Result<()> {
+    writeln!(output, "Configuration:")?;
+    writeln!(output, "  Input gain: {}", fixed_point(config.input_gain))?;
+    writeln!(output, "  Input mute: {}", on_off(config.input_mute))?;
+    writeln!(output, "  Clipguard: {}", on_off(config.clipguard_enable))?;
+    writeln!(output, "  Low cut: {}", on_off(config.lowcut_enable))?;
+    writeln!(output, "  Headphone volume: {}", fixed_point(config.headphone_volume))?;
+    writeln!(output, "  Headphone mute: {}", on_off(config.headphone_mute))?;
+    writeln!(output, "  Direct monitor: {}", fixed_point(config.direct_monitor))?;
+    writeln!(output, "  Volume select: {}", config.volume_select)?;
+    writeln!(output, "  All LEDs off: {}", on_off(config.all_leds_off))?;
+    writeln!(output, "  LEDs flip: {}", on_off(config.leds_flip))?;
+    writeln!(output, "  Gain lock: {}", on_off(config.gain_lock))
+}
+
+fn fixed_point(value: librewave_core::FixedPointValue) -> String {
+    let scale = 2_f64.powi(i32::from(value.fractional_bits));
+    format!("{:.2}", f64::from(value.raw) / scale)
+}
+
+fn on_off(value: bool) -> &'static str {
+    if value { "on" } else { "off" }
+}
+
 fn write_client_error<W: Write>(error: ClientError, output: &mut W) -> io::Result<i32> {
     match error {
         ClientError::PermissionDenied => {
@@ -169,7 +287,8 @@ fn write_help<W: Write>(output: &mut W) -> io::Result<()> {
     writeln!(output)?;
     writeln!(output, "Commands:")?;
     writeln!(output, "  status          Show daemon, device, and audio status")?;
-    writeln!(output, "  devices list    List supported devices")
+    writeln!(output, "  devices list    List supported devices")?;
+    writeln!(output, "  devices inspect <id>  Inspect one device")
 }
 
 fn configured_socket_path() -> PathBuf {
@@ -192,6 +311,7 @@ mod tests {
                 model: DeviceModel::Wave3,
                 connection: DeviceConnection::Connected,
                 audio_cards: vec![],
+                admission: DeviceAdmissionSnapshot::not_inspected(),
             }],
             audio: AudioSnapshot {
                 pipewire: ServiceState::Available,
@@ -206,7 +326,7 @@ mod tests {
         write_status(&mut output, &snapshot()).expect("render status");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "Daemon: connected\nProtocol: 1\nState generation: 4\nDevices: 1\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
+            "Daemon: connected\nProtocol: 2\nState generation: 4\nDevices: 1\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
         );
     }
 
@@ -233,6 +353,74 @@ mod tests {
         .expect("render connection error");
         assert_eq!(exit, 1);
         assert!(String::from_utf8(output).expect("UTF-8").contains("cannot connect to librewaved"));
+    }
+
+    #[test]
+    fn inspection_output_renders_safe_config_and_explicit_failure_without_identity_data() {
+        let device = DeviceSnapshot {
+            id: DeviceId(1),
+            model: DeviceModel::Wave3,
+            connection: DeviceConnection::Connected,
+            audio_cards: vec![],
+            admission: DeviceAdmissionSnapshot::Admitted {
+                api: librewave_core::ApiVersion::new(5, 4),
+                config: librewave_core::Wave3ConfigSnapshot {
+                    input_gain: librewave_core::FixedPointValue { raw: 10_240, fractional_bits: 8 },
+                    input_mute: false,
+                    clipguard_enable: true,
+                    lowcut_enable: false,
+                    headphone_volume: librewave_core::FixedPointValue {
+                        raw: -15_360,
+                        fractional_bits: 8,
+                    },
+                    headphone_mute: false,
+                    direct_monitor: librewave_core::FixedPointValue {
+                        raw: 12_800,
+                        fractional_bits: 8,
+                    },
+                    volume_select: librewave_core::VolumeSelection::Headphone,
+                    all_leds_off: false,
+                    leds_flip: true,
+                    gain_lock: true,
+                },
+            },
+        };
+        let mut output = Vec::new();
+        write_device_inspection(&mut output, &device).expect("render inspection");
+        let output = String::from_utf8(output).expect("UTF-8");
+        assert_eq!(inspection_exit_code(&device), 0);
+        assert!(output.contains("Control access: read-only"));
+        assert!(output.contains("Admitted API: 5.4"));
+        assert!(output.contains("Input gain: 40.00"));
+        assert!(output.contains("Volume select: headphone"));
+        assert!(!output.contains("serial"));
+        assert!(!output.contains("topology"));
+
+        let failed = DeviceSnapshot {
+            admission: DeviceAdmissionSnapshot::Failed {
+                error: librewave_core::AdmissionError::Disconnected,
+            },
+            connection: DeviceConnection::Disconnected,
+            ..device.clone()
+        };
+        let mut failed_output = Vec::new();
+        write_device_inspection(&mut failed_output, &failed).expect("render failed inspection");
+        assert_eq!(inspection_exit_code(&failed), 1);
+        assert!(
+            String::from_utf8(failed_output)
+                .expect("UTF-8")
+                .contains("Admission: device disconnected")
+        );
+
+        let not_inspected =
+            DeviceSnapshot { admission: DeviceAdmissionSnapshot::NotInspected, ..device };
+        let mut pending_output = Vec::new();
+        write_device_inspection(&mut pending_output, &not_inspected)
+            .expect("render pending inspection");
+        assert_eq!(inspection_exit_code(&not_inspected), 1);
+        assert!(
+            String::from_utf8(pending_output).expect("UTF-8").contains("Admission: not inspected")
+        );
     }
 
     #[test]

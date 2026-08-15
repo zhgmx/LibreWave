@@ -1,8 +1,12 @@
 //! Linux endpoint-zero transport for the read-only Wave:3 session probe.
 
+use librewave_core::{
+    AdmissionError, DeviceAdmissionSnapshot, FixedPointValue, VolumeSelection, Wave3ConfigSnapshot,
+};
 use librewave_device::{
     ReadOnlyTransport, SessionError, SetupPacket, TransportError, Wave3Session, probe_wave3,
 };
+use librewave_protocol::{SemanticValue, Wave3ConfigField};
 use rusb::{Context, Device, DeviceHandle, UsbContext};
 use std::fmt;
 use std::time::Duration;
@@ -155,6 +159,104 @@ pub fn probe_wave3_usb(
 
     let mut transport = RusbReadOnlyTransport { handle };
     probe_wave3(&mut transport, interface).map_err(UsbProbeError::Session)
+}
+
+/// Runs the read-only probe for one current inventory candidate and converts
+/// the result into the portable admission snapshot.
+#[must_use]
+pub fn inspect_wave3_usb(candidate: &super::UsbDeviceCandidate) -> DeviceAdmissionSnapshot {
+    admission_snapshot(probe_wave3_usb(candidate))
+}
+
+/// Converts a probe result without exposing Linux topology or USB serial data.
+#[must_use]
+pub fn admission_snapshot(result: Result<Wave3Session, UsbProbeError>) -> DeviceAdmissionSnapshot {
+    match result {
+        Ok(session) => match config_snapshot(session.config()) {
+            Ok(config) => DeviceAdmissionSnapshot::Admitted { api: session.api(), config },
+            Err(()) => DeviceAdmissionSnapshot::Failed { error: AdmissionError::MalformedResponse },
+        },
+        Err(error) => DeviceAdmissionSnapshot::Failed { error: admission_error(error) },
+    }
+}
+
+fn admission_error(error: UsbProbeError) -> AdmissionError {
+    match error {
+        UsbProbeError::NotFound
+        | UsbProbeError::Session(SessionError::Transport(
+            TransportError::NotFound | TransportError::Disconnected,
+        )) => AdmissionError::Disconnected,
+        UsbProbeError::Topology(_) | UsbProbeError::Descriptor(_) => {
+            AdmissionError::DescriptorMismatch
+        }
+        UsbProbeError::Session(SessionError::Transport(TransportError::PermissionDenied)) => {
+            AdmissionError::PermissionDenied
+        }
+        UsbProbeError::Session(SessionError::Transport(TransportError::Busy)) => {
+            AdmissionError::InterfaceBusy
+        }
+        UsbProbeError::Session(SessionError::Transport(TransportError::TimedOut)) => {
+            AdmissionError::TimedOut
+        }
+        UsbProbeError::Session(SessionError::Transport(TransportError::Io)) => {
+            AdmissionError::Transport
+        }
+        UsbProbeError::Session(SessionError::UnsupportedApi { api }) => {
+            AdmissionError::UnsupportedApi { api }
+        }
+        UsbProbeError::Session(
+            SessionError::ShortTransfer { .. }
+            | SessionError::LongTransfer { .. }
+            | SessionError::Schema(_),
+        ) => AdmissionError::MalformedResponse,
+    }
+}
+
+fn config_snapshot(config: &librewave_protocol::Wave3Config) -> Result<Wave3ConfigSnapshot, ()> {
+    Ok(Wave3ConfigSnapshot {
+        input_gain: fixed(config, Wave3ConfigField::InputGain)?,
+        input_mute: boolean(config, Wave3ConfigField::InputMute)?,
+        clipguard_enable: boolean(config, Wave3ConfigField::ClipguardEnable)?,
+        lowcut_enable: boolean(config, Wave3ConfigField::LowcutEnable)?,
+        headphone_volume: fixed(config, Wave3ConfigField::HeadphoneVolume)?,
+        headphone_mute: boolean(config, Wave3ConfigField::HeadphoneMute)?,
+        direct_monitor: fixed(config, Wave3ConfigField::DirectMonitor)?,
+        volume_select: volume_selection(config)?,
+        all_leds_off: boolean(config, Wave3ConfigField::AllLedsOff)?,
+        leds_flip: boolean(config, Wave3ConfigField::LedsFlip)?,
+        gain_lock: boolean(config, Wave3ConfigField::GainLock)?,
+    })
+}
+
+fn boolean(config: &librewave_protocol::Wave3Config, field: Wave3ConfigField) -> Result<bool, ()> {
+    match config.get(field).map_err(|_| ())? {
+        SemanticValue::Boolean(value) => Ok(value),
+        _ => Err(()),
+    }
+}
+
+fn fixed(
+    config: &librewave_protocol::Wave3Config,
+    field: Wave3ConfigField,
+) -> Result<FixedPointValue, ()> {
+    match config.get(field).map_err(|_| ())? {
+        SemanticValue::FixedPoint { raw, fractional_bits } => {
+            Ok(FixedPointValue { raw, fractional_bits })
+        }
+        _ => Err(()),
+    }
+}
+
+fn volume_selection(config: &librewave_protocol::Wave3Config) -> Result<VolumeSelection, ()> {
+    match config.get(Wave3ConfigField::VolumeSelect).map_err(|_| ())? {
+        SemanticValue::Enum(value) => match value {
+            1 => Ok(VolumeSelection::Microphone),
+            2 => Ok(VolumeSelection::Headphone),
+            3 => Ok(VolumeSelection::Mix),
+            _ => Err(()),
+        },
+        _ => Err(()),
+    }
 }
 
 struct RusbReadOnlyTransport {
@@ -310,6 +412,26 @@ fn map_rusb_error(error: rusb::Error) -> TransportError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use librewave_core::{AdmissionError, ControlAccessState, VolumeSelection};
+    use librewave_protocol::ApiVersion;
+    use std::collections::VecDeque;
+
+    struct FakeTransport {
+        reads: VecDeque<Vec<u8>>,
+    }
+
+    impl ReadOnlyTransport for FakeTransport {
+        fn read_control(
+            &mut self,
+            _setup: SetupPacket,
+            response: &mut [u8],
+            _timeout: Duration,
+        ) -> Result<usize, TransportError> {
+            let data = self.reads.pop_front().expect("fake request");
+            response.copy_from_slice(&data);
+            Ok(data.len())
+        }
+    }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct FakeLocatedDevice {
@@ -440,5 +562,56 @@ mod tests {
         assert_eq!(map_rusb_error(rusb::Error::NoDevice), TransportError::Disconnected);
         assert_eq!(map_rusb_error(rusb::Error::Timeout), TransportError::TimedOut);
         assert_eq!(map_rusb_error(rusb::Error::Pipe), TransportError::Io);
+    }
+
+    #[test]
+    fn fake_transport_produces_a_serial_free_admitted_snapshot() {
+        let mut payload = vec![0; 16];
+        payload[12] = 1;
+        let mut transport = FakeTransport { reads: VecDeque::from([vec![5, 4], payload]) };
+        let session = probe_wave3(&mut transport, 3).expect("fake Wave:3 session");
+        let admission = admission_snapshot(Ok(session));
+        assert_eq!(admission.control_access(), ControlAccessState::ReadOnly);
+        assert_eq!(admission.admitted_api(), Some(ApiVersion::new(5, 4)));
+        assert_eq!(
+            admission.config().expect("decoded config").volume_select,
+            VolumeSelection::Microphone
+        );
+    }
+
+    #[test]
+    fn probe_failures_remain_explicit_in_the_portable_snapshot() {
+        let cases = [
+            (
+                UsbProbeError::Session(SessionError::Transport(TransportError::PermissionDenied)),
+                ControlAccessState::PermissionDenied,
+                AdmissionError::PermissionDenied,
+            ),
+            (
+                UsbProbeError::Session(SessionError::UnsupportedApi { api: ApiVersion::new(5, 2) }),
+                ControlAccessState::ReadOnly,
+                AdmissionError::UnsupportedApi { api: ApiVersion::new(5, 2) },
+            ),
+            (
+                UsbProbeError::Session(SessionError::ShortTransfer { expected: 16, actual: 15 }),
+                ControlAccessState::ReadOnly,
+                AdmissionError::MalformedResponse,
+            ),
+            (
+                UsbProbeError::Descriptor(DescriptorError::Malformed),
+                ControlAccessState::Unavailable,
+                AdmissionError::DescriptorMismatch,
+            ),
+            (
+                UsbProbeError::Session(SessionError::Transport(TransportError::Disconnected)),
+                ControlAccessState::Unavailable,
+                AdmissionError::Disconnected,
+            ),
+        ];
+        for (error, access, expected) in cases {
+            let admission = admission_snapshot(Err(error));
+            assert_eq!(admission.control_access(), access);
+            assert_eq!(admission.error(), Some(&expected));
+        }
     }
 }

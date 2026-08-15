@@ -2955,6 +2955,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "librewave-protocol",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2981,6 +2982,7 @@ dependencies = [
  "librewave-core",
  "librewave-device",
  "librewave-ipc",
+ "librewave-protocol",
  "rusb",
 ]
 
