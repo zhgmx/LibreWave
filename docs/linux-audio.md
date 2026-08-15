@@ -1,6 +1,6 @@
 # Linux audio integration
 
-Status: the direct host owns ALSA resources and inspects PipeWire through the safe Rust wrappers. Product endpoint processing and live validation are not implemented.
+Status: the direct host owns ALSA resources and inspects PipeWire through safe Rust wrappers. A bounded transport seam processes capture blocks with `librewave-engine` in tests. The production adapter cannot create frame-carrying PipeWire endpoint streams, so the lifecycle cannot report the graph as ready.
 
 ## Reference system
 
@@ -68,13 +68,22 @@ The host owns its PipeWire core connection, capture worker, and playback PCM. On
 
 ## Product endpoints
 
-The desktop may see only deliberate product endpoints. The current `librewave-core` contract defines microphone, monitor mix, and stream mix as public sources. Future sink flows must enter that core contract before the Linux adapter publishes them.
+The desktop may see only these deliberate product endpoints:
+
+| Endpoint ID | Display name | PipeWire node name | Flow | PipeWire direction | Media class |
+| --- | --- | --- | --- | --- | --- |
+| `System` | System | `librewave.system` | Public sink | Input | `Audio/Sink` |
+| `Microphone` | Microphone | `librewave.microphone` | Public source | Output | `Audio/Source` |
+| `MonitorMix` | Monitor mix | `librewave.monitor-mix` | Public source | Output | `Audio/Source` |
+| `StreamMix` | Stream mix | `librewave.stream-mix` | Public source | Output | `Audio/Source` |
+
+All four plans set `node.virtual=true`. Applications render to the System sink. Its frames supply the engine's System logical source. Physical Wave:3 capture supplies the Microphone logical source. The engine produces only Microphone, Monitor Mix, and Stream Mix output buffers. The System sink does not increase the engine output count. Monitor Mix is also the intended signal for physical headphone playback.
 
 The physical Wave capture and playback PCMs are not desktop endpoints. LibreWave must not publish a keepalive sink, null sink, raw helper source, duplicate physical Wave node, or another implementation object as an ordinary device. KDE, `wpctl status`, and PulseAudio-compatible listings form the visibility acceptance test. Low-level diagnostic tools may still show internal objects needed to inspect the graph.
 
 The host connects to the user's existing PipeWire instance and completes a registry round trip. It checks the admitted candidate's exact ALSA card number. A Device global must have the Wave:3 vendor and product values, and its `api.alsa.card` value must identify that card. A Node global matches through the card component of `api.alsa.path`. Node globals do not need vendor or product properties. Startup fails while any matching Device or Node global remains visible.
 
-Endpoint plans come only from `librewave-core`. The current plans are three PipeWire output streams with `media.class=Audio/Source`, `node.virtual=true`, and stable `librewave.*` names. The production adapter is not connected to `librewave-engine`. It therefore returns `engine unavailable` before it creates an endpoint. Playback remains prepared, not active, at this boundary. The adapter does not publish silence or report the graph as ready.
+Endpoint plans come only from `librewave-core`. The production adapter cannot create their frame-carrying streams. It returns `EndpointStreamTransportUnavailable` before it creates an endpoint and records the matching `GraphNotReady` reason. Playback remains prepared, not active, at this boundary. The adapter does not publish silence or report the graph as ready. Independent ALSA and PipeWire clocks also need a synchronization policy before the endpoint streams can carry live audio.
 
 ## Portable mixer contract
 
@@ -83,6 +92,22 @@ Endpoint plans come only from `librewave-core`. The current plans are three Pipe
 Each source has separate monitor and stream routes. A route has an enabled value and a fader from -60.0 dB through +12.0 dB in 0.5 dB steps. The microphone endpoint receives the configured microphone source at unity. Monitor and stream route values do not change that endpoint. Hardware microphone gain, hardware microphone mute, and headphone level stay outside the engine.
 
 The engine reports separate left and right peak and RMS values for each source and endpoint. It applies one complete pending control snapshot at the boundary before a nonzero block. Processing uses fixed-capacity state and does not allocate, free memory, lock, block, log, perform I/O, or call platform code.
+
+## Bounded transport seam
+
+The tested transport seam uses physical capture as its only processing clock. One call accepts between one frame and the configured maximum number of complete stereo frames. A zero-length read means that capture made no progress. A partial stereo frame or an oversized block fails the transport attempt. The production ALSA worker is not connected to this seam in this milestone.
+
+The System ingress is a bounded single-producer, single-consumer FIFO. It can join blocks with different frame counts, but it does not correct rate drift between independent clocks. The producer publishes its first frames before it marks the stream active. An idle or unconnected System sink supplies intentional silence, so microphone monitoring and headphone output do not depend on application playback. Once a System producer is active, insufficient frames are an underrun and fail the attempt. An overflow also fails the attempt. The availability count in an underrun report is the snapshot that rejected that block.
+
+The seam converts S32LE capture samples to `f32` by dividing each signed integer by 2147483648. It converts finite `f32` output samples with deterministic rounding. Values at or below -1 map to `i32::MIN`, and values at or above 1 map to `i32::MAX`. All byte assembly uses explicit little-endian operations.
+
+Construction allocates the engine buffers, System FIFO, control handoff, meter handoff, and playback encoding buffer. Block processing uses no allocation, lock, blocking operation, log, or platform call other than the optional playback writer at its owned worker boundary. The playback writer must complete one block or return a classified short-write, xrun-recovery, disconnect, or general failure.
+
+The first accepted capture block is preflight work. It proves capture, conversion, engine processing, and meter delivery while readiness is false, but it does not count as playback or public endpoint delivery. Later test-runtime blocks can reach a fake playback writer. This activity is not graph readiness. A System fault observed before delivery suppresses the meter and playback for that block. If the producer publishes a fault after the final check, a playback write already in progress may finish. The next block observes the sticky failure.
+
+Mixer changes use the engine's existing bounded control stager and consume the exact controls in the current `MixerProfile`. One complete update applies at a block boundary. Meter delivery uses a bounded, nonblocking handoff. No meter is available before the first processed block, and the handoff does not invent a zero observation.
+
+The seam owns the engine, System consumer, meter publisher, and block buffers. The returned handles own the sole System producer, control producer, and meter consumer. A future production worker must own capture, engine, and playback together if it uses this capture-clock design. That worker must stop and join before those resources are released. The current host keeps its existing capture worker and playback object separate because the seam is not connected to live hardware.
 
 ## Mixer control plane
 
@@ -123,7 +148,7 @@ Setup does not install or reload the WirePlumber fragment. It does not enable th
 
 ## Work still required
 
-The endpoint engine, daemon composition, and live hardware plan remain required. Completion requires all of these results:
+The production endpoint streams, daemon composition, independent-clock policy, and live hardware plan remain required. Completion requires all of these results:
 
 - `librewaved` owns the physical capture and playback PCMs directly.
 - Capture consumption produces confirmed frames before playback opens.

@@ -285,9 +285,10 @@ fn stereo_peak_and_rms_meters_use_known_frames() {
     assert_eq!(source.left().rms(), 1.0);
     assert_eq!(source.right().peak(), 0.5);
     assert_eq!(source.right().rms(), 0.5);
-    assert_eq!(meters.endpoint(EndpointId::Microphone), source);
-    assert_eq!(meters.endpoint(EndpointId::MonitorMix), source);
-    assert_eq!(meters.endpoint(EndpointId::StreamMix), StereoMeter::ZERO);
+    assert_eq!(meters.endpoint(EndpointId::Microphone), Some(source));
+    assert_eq!(meters.endpoint(EndpointId::MonitorMix), Some(source));
+    assert_eq!(meters.endpoint(EndpointId::StreamMix), Some(StereoMeter::ZERO));
+    assert_eq!(meters.endpoint(EndpointId::System), None);
     assert_eq!(meters.source(SourceId::new(999)), None);
 }
 
@@ -337,8 +338,8 @@ fn zero_frames_return_zero_meters_and_preserve_a_pending_update() {
         run_two(&mut engine, 0, &[], &[], [MICROPHONE, APPLICATION], order);
     let zero = report(zero_result);
     assert!(!zero.control_update_applied());
-    assert_eq!(zero.meters().endpoint(EndpointId::Microphone), StereoMeter::ZERO);
-    assert_eq!(zero.meters().endpoint(EndpointId::MonitorMix), StereoMeter::ZERO);
+    assert_eq!(zero.meters().endpoint(EndpointId::Microphone), Some(StereoMeter::ZERO));
+    assert_eq!(zero.meters().endpoint(EndpointId::MonitorMix), Some(StereoMeter::ZERO));
     assert!(zero_outputs.iter().all(Vec::is_empty));
     assert_eq!(stager.try_stage(&initial), Err(StageError::Full));
 
@@ -523,6 +524,28 @@ fn output_buffer_validation_is_exact() {
 }
 
 #[test]
+fn system_sink_is_rejected_as_an_output_before_mutation() {
+    let (mut engine, _stager) = engine_with(&default_controls(), 1);
+    let samples = [0.0; 2];
+    let inputs = [InputBuffer::new(MICROPHONE, &samples), InputBuffer::new(APPLICATION, &samples)];
+    let mut system = [7.0; 2];
+    let mut monitor = [7.0; 2];
+    let mut stream = [7.0; 2];
+    let mut outputs = [
+        OutputBuffer::new(EndpointId::System, &mut system),
+        OutputBuffer::new(EndpointId::MonitorMix, &mut monitor),
+        OutputBuffer::new(EndpointId::StreamMix, &mut stream),
+    ];
+    assert_eq!(
+        engine.process(1, &inputs, &mut outputs),
+        Err(ProcessError::EndpointIsNotMixerOutput(EndpointId::System))
+    );
+    assert_eq!(system, [7.0; 2]);
+    assert_eq!(monitor, [7.0; 2]);
+    assert_eq!(stream, [7.0; 2]);
+}
+
+#[test]
 fn handoff_is_bounded_and_applies_complete_snapshots_at_block_boundaries() {
     let initial = [
         controls(MICROPHONE, false, 0.0, false, 0.0),
@@ -626,7 +649,12 @@ fn repeated_processing_is_deterministic_and_has_no_allocator_operations() {
                 OutputBuffer::new(EndpointId::MonitorMix, &mut monitor_output),
             ];
             let current = report(engine.process(8, &inputs, &mut outputs));
-            checksum += current.meters().endpoint(EndpointId::MonitorMix).left().rms();
+            checksum += current
+                .meters()
+                .endpoint(EndpointId::MonitorMix)
+                .expect("monitor output meter")
+                .left()
+                .rms();
         }
         checksum
     });
@@ -635,4 +663,20 @@ fn repeated_processing_is_deterministic_and_has_no_allocator_operations() {
     assert_eq!(microphone_output, expected_microphone);
     assert_eq!(monitor_output, expected_monitor);
     assert_eq!(stream_output, expected_stream);
+}
+
+#[test]
+fn meter_handoff_is_empty_until_a_real_block_and_never_overwrites() {
+    let (mut publisher, mut reader) = MeterPublisher::channel();
+    assert_eq!(reader.try_take(), None);
+
+    let (mut engine, _stager) = engine_with(&default_controls(), 1);
+    let order = [EndpointId::Microphone, EndpointId::MonitorMix, EndpointId::StreamMix];
+    let (result, _) =
+        run_two(&mut engine, 1, &[0.25, -0.5], &[0.0, 0.0], [MICROPHONE, APPLICATION], order);
+    let meters = report(result).meters();
+    assert!(publisher.try_publish(meters));
+    assert!(!publisher.try_publish(meters));
+    assert_eq!(reader.try_take(), Some(meters));
+    assert_eq!(reader.try_take(), None);
 }

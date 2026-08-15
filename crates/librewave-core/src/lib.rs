@@ -17,6 +17,8 @@ pub use librewave_protocol::DeviceModel;
 /// A deliberate user-facing audio endpoint.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum EndpointId {
+    /// The software endpoint that receives system and application audio.
+    System,
     /// The managed microphone endpoint.
     Microphone,
     /// The software monitor-mix endpoint.
@@ -30,6 +32,7 @@ impl EndpointId {
     #[must_use]
     pub const fn display_name(self) -> &'static str {
         match self {
+            Self::System => "System",
             Self::Microphone => "Microphone",
             Self::MonitorMix => "Monitor mix",
             Self::StreamMix => "Stream mix",
@@ -40,6 +43,7 @@ impl EndpointId {
     #[must_use]
     pub const fn flow(self) -> EndpointFlow {
         match self {
+            Self::System => EndpointFlow::PublicSink,
             Self::Microphone | Self::MonitorMix | Self::StreamMix => EndpointFlow::PublicSource,
         }
     }
@@ -48,15 +52,21 @@ impl EndpointId {
 /// The direction and flow contract for a user-facing endpoint.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum EndpointFlow {
+    /// A public sink that receives frames rendered by desktop applications.
+    PublicSink,
     /// A public source published to desktop applications.
     PublicSource,
 }
 
 /// The current deliberate endpoint set exposed to the desktop.
-///
-/// Future endpoint flows, such as application-input sinks, must be added as
-/// explicit contract entries instead of inferred from endpoint names.
 pub const DELIBERATE_ENDPOINTS: &[EndpointId] =
+    &[EndpointId::System, EndpointId::Microphone, EndpointId::MonitorMix, EndpointId::StreamMix];
+
+/// The engine outputs that produce audio for public sources and playback.
+///
+/// Public sinks are engine inputs and must not increase the output-buffer
+/// count.
+pub const MIXER_OUTPUT_ENDPOINTS: &[EndpointId] =
     &[EndpointId::Microphone, EndpointId::MonitorMix, EndpointId::StreamMix];
 
 /// The source of a command or observation.
@@ -612,9 +622,22 @@ mod tests {
     fn deliberate_endpoint_set_is_stable() {
         assert_eq!(
             DELIBERATE_ENDPOINTS,
+            &[
+                EndpointId::System,
+                EndpointId::Microphone,
+                EndpointId::MonitorMix,
+                EndpointId::StreamMix,
+            ]
+        );
+        assert_eq!(
+            MIXER_OUTPUT_ENDPOINTS,
             &[EndpointId::Microphone, EndpointId::MonitorMix, EndpointId::StreamMix]
         );
+        assert_eq!(EndpointId::System.display_name(), "System");
+        assert_eq!(EndpointId::Microphone.display_name(), "Microphone");
         assert_eq!(EndpointId::MonitorMix.display_name(), "Monitor mix");
+        assert_eq!(EndpointId::StreamMix.display_name(), "Stream mix");
+        assert_eq!(EndpointId::System.flow(), EndpointFlow::PublicSink);
         assert_eq!(EndpointId::Microphone.flow(), EndpointFlow::PublicSource);
         assert_eq!(EndpointId::MonitorMix.flow(), EndpointFlow::PublicSource);
         assert_eq!(EndpointId::StreamMix.flow(), EndpointFlow::PublicSource);

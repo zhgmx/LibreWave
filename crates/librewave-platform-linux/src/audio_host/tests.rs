@@ -93,12 +93,43 @@ fn alsa_card_id_uses_only_the_kernel_identifier_grammar() {
 #[test]
 fn endpoint_allowlist_direction_names_and_properties_are_exact() {
     let plans = endpoint_plans(DELIBERATE_ENDPOINTS).expect("deliberate plans are valid");
-    assert_eq!(plans.len(), 3);
-    assert_eq!(plans[0].direction, PipeWireEndpointDirection::Output);
-    assert_eq!(plans[0].node_name, "librewave.microphone");
-    assert_eq!(plans[1].node_name, "librewave.monitor-mix");
-    assert_eq!(plans[2].node_name, "librewave.stream-mix");
-    assert!(plans.iter().all(|plan| { plan.media_class == "Audio/Source" && plan.node_virtual }));
+    assert_eq!(
+        plans,
+        vec![
+            EndpointPlan {
+                endpoint: EndpointId::System,
+                direction: PipeWireEndpointDirection::Input,
+                node_name: "librewave.system",
+                node_description: "LibreWave System",
+                media_class: "Audio/Sink",
+                node_virtual: true,
+            },
+            EndpointPlan {
+                endpoint: EndpointId::Microphone,
+                direction: PipeWireEndpointDirection::Output,
+                node_name: "librewave.microphone",
+                node_description: "LibreWave Microphone",
+                media_class: "Audio/Source",
+                node_virtual: true,
+            },
+            EndpointPlan {
+                endpoint: EndpointId::MonitorMix,
+                direction: PipeWireEndpointDirection::Output,
+                node_name: "librewave.monitor-mix",
+                node_description: "LibreWave Monitor Mix",
+                media_class: "Audio/Source",
+                node_virtual: true,
+            },
+            EndpointPlan {
+                endpoint: EndpointId::StreamMix,
+                direction: PipeWireEndpointDirection::Output,
+                node_name: "librewave.stream-mix",
+                node_description: "LibreWave Stream Mix",
+                media_class: "Audio/Source",
+                node_virtual: true,
+            },
+        ]
+    );
     assert_eq!(
         endpoint_plans(&[EndpointId::Microphone, EndpointId::Microphone]),
         Err(LinuxAudioError::DuplicateEndpoint(EndpointId::Microphone))
@@ -285,7 +316,7 @@ impl AlsaFacade for FakeAlsa {
 struct FakePipeWire {
     calls: Arc<Mutex<Vec<&'static str>>>,
     connected: bool,
-    engine_available: bool,
+    endpoint_streams_available: bool,
     fail_disconnect: bool,
 }
 
@@ -305,7 +336,11 @@ impl PipeWireFacade for FakePipeWire {
             DELIBERATE_ENDPOINTS
         );
         self.calls.lock().expect("calls lock").push("publish");
-        if self.engine_available { Ok(()) } else { Err(LinuxAudioError::EndpointEngineUnavailable) }
+        if self.endpoint_streams_available {
+            Ok(())
+        } else {
+            Err(LinuxAudioError::EndpointStreamTransportUnavailable)
+        }
     }
 
     fn disconnect(&mut self) -> Result<(), LinuxAudioError> {
@@ -328,15 +363,15 @@ struct Harness {
 
 fn harness(
     capture_scripts: impl IntoIterator<Item = Vec<CaptureRead>>,
-    engine_available: bool,
+    endpoint_streams_available: bool,
     timeout: Duration,
 ) -> Harness {
-    harness_with_playback_failure(capture_scripts, engine_available, timeout, false)
+    harness_with_playback_failure(capture_scripts, endpoint_streams_available, timeout, false)
 }
 
 fn harness_with_playback_failure(
     capture_scripts: impl IntoIterator<Item = Vec<CaptureRead>>,
-    engine_available: bool,
+    endpoint_streams_available: bool,
     timeout: Duration,
     fail_playback: bool,
 ) -> Harness {
@@ -352,7 +387,7 @@ fn harness_with_playback_failure(
     let pipewire = FakePipeWire {
         calls: Arc::clone(&pipewire_calls),
         connected: false,
-        engine_available,
+        endpoint_streams_available,
         fail_disconnect: false,
     };
     Harness {
@@ -433,14 +468,14 @@ fn engine_boundary_cleans_partial_startup_and_never_claims_endpoints() {
         error,
         LifecycleError::Host {
             state: DegradedState::EndpointPublicationFailed,
-            source: LinuxAudioError::EndpointEngineUnavailable,
+            source: LinuxAudioError::EndpointStreamTransportUnavailable,
         }
     ));
     assert_eq!(harness.close_count.load(Ordering::Relaxed), 1);
     assert_eq!(
         harness.host.resource_state(),
         AudioResourceState {
-            not_ready: Some(GraphNotReady::EngineUnavailable),
+            not_ready: Some(GraphNotReady::EndpointStreamTransportUnavailable),
             ..AudioResourceState::default()
         }
     );

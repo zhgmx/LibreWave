@@ -4,8 +4,9 @@
 //! exclusive vendor-control connection. The connection admits reads and typed,
 //! reversible writes through one handle. It does not claim audio interfaces,
 //! detach kernel drivers, change ALSA controls, or modify `WirePlumber`, udev,
-//! or systemd state. The audio host opens only a revalidated physical PCM. It
-//! does not publish product endpoints until a portable engine can supply them.
+//! or systemd state. The audio host opens only a revalidated physical PCM. Its
+//! production adapter does not publish product endpoints until it can create
+//! frame-carrying `PipeWire` streams.
 
 use std::io;
 use std::path::PathBuf;

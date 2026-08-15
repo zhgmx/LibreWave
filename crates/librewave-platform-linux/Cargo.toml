@@ -12,6 +12,7 @@ alsa = "=0.12.1"
 libc.workspace = true
 librewave-core = { path = "../librewave-core" }
 librewave-device = { path = "../librewave-device" }
+librewave-engine = { path = "../librewave-engine" }
 librewave-ipc = { path = "../librewave-ipc" }
 librewave-protocol = { path = "../librewave-protocol" }
 pipewire = "=0.9.2"

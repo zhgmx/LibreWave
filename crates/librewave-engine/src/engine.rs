@@ -1,6 +1,6 @@
-use crate::ENDPOINT_COUNT;
+use crate::OUTPUT_COUNT;
 use crate::config::{CHANNELS, MAX_SOURCES, MixerConfig};
-use crate::meter::{BlockMeters, StereoAccumulator, endpoint_index, finish_block};
+use crate::meter::{BlockMeters, StereoAccumulator, finish_block, mixer_output_index};
 use crate::transfer::{
     ControlConsumer, ControlMappingError, ControlSnapshot, ControlStager, compile_snapshot,
 };
@@ -137,8 +137,14 @@ impl MixerEngine {
             false
         };
         let mut source_meters = [StereoAccumulator::default(); MAX_SOURCES];
-        let mut endpoint_meters = [StereoAccumulator::default(); ENDPOINT_COUNT];
+        let mut endpoint_meters = [StereoAccumulator::default(); OUTPUT_COUNT];
         let microphone_index = self.config.microphone_index();
+        let microphone_output = validated_output_index(&output_indices, EndpointId::Microphone);
+        let monitor_output = validated_output_index(&output_indices, EndpointId::MonitorMix);
+        let stream_output = validated_output_index(&output_indices, EndpointId::StreamMix);
+        let microphone_meter = configured_output_index(EndpointId::Microphone);
+        let monitor_meter = configured_output_index(EndpointId::MonitorMix);
+        let stream_meter = configured_output_index(EndpointId::StreamMix);
 
         for sample_index in 0..sample_count {
             let channel = sample_index % CHANNELS;
@@ -158,18 +164,12 @@ impl MixerEngine {
             let microphone = microphone.clamp(-1.0, 1.0);
             let monitor = clip_mix(monitor);
             let stream = clip_mix(stream);
-            write_endpoint(
-                outputs,
-                &output_indices,
-                EndpointId::Microphone,
-                sample_index,
-                microphone,
-            );
-            write_endpoint(outputs, &output_indices, EndpointId::MonitorMix, sample_index, monitor);
-            write_endpoint(outputs, &output_indices, EndpointId::StreamMix, sample_index, stream);
-            endpoint_meters[endpoint_index(EndpointId::Microphone)].observe(channel, microphone);
-            endpoint_meters[endpoint_index(EndpointId::MonitorMix)].observe(channel, monitor);
-            endpoint_meters[endpoint_index(EndpointId::StreamMix)].observe(channel, stream);
+            outputs[microphone_output].samples[sample_index] = microphone;
+            outputs[monitor_output].samples[sample_index] = monitor;
+            outputs[stream_output].samples[sample_index] = stream;
+            endpoint_meters[microphone_meter].observe(channel, microphone);
+            endpoint_meters[monitor_meter].observe(channel, monitor);
+            endpoint_meters[stream_meter].observe(channel, stream);
         }
 
         Ok(ProcessReport {
@@ -185,14 +185,12 @@ fn clip_mix(sample: f64) -> f32 {
     sample.clamp(-1.0, 1.0) as f32
 }
 
-fn write_endpoint(
-    outputs: &mut [OutputBuffer<'_>],
-    output_indices: &[usize; ENDPOINT_COUNT],
-    endpoint: EndpointId,
-    sample_index: usize,
-    sample: f32,
-) {
-    outputs[output_indices[endpoint_index(endpoint)]].samples[sample_index] = sample;
+fn validated_output_index(output_indices: &[usize; OUTPUT_COUNT], endpoint: EndpointId) -> usize {
+    output_indices[configured_output_index(endpoint)]
+}
+
+fn configured_output_index(endpoint: EndpointId) -> usize {
+    mixer_output_index(endpoint).expect("engine output is present in MIXER_OUTPUT_ENDPOINTS")
 }
 
 /// The fixed-capacity result of one accepted block.
@@ -223,6 +221,7 @@ pub enum ProcessError {
     OutputCount { expected: usize, actual: usize },
     UnknownInput(SourceId),
     DuplicateInput(SourceId),
+    EndpointIsNotMixerOutput(EndpointId),
     DuplicateOutput(EndpointId),
     InputLength { source: SourceId, expected: usize, actual: usize },
     OutputLength { endpoint: EndpointId, expected: usize, actual: usize },
@@ -246,6 +245,9 @@ impl fmt::Display for ProcessError {
             }
             Self::UnknownInput(source) => write!(formatter, "source {source} is not configured"),
             Self::DuplicateInput(source) => write!(formatter, "duplicate source {source} input"),
+            Self::EndpointIsNotMixerOutput(endpoint) => {
+                write!(formatter, "{} is not a mixer output", endpoint.display_name())
+            }
             Self::DuplicateOutput(endpoint) => {
                 write!(formatter, "duplicate {} output", endpoint.display_name())
             }
@@ -308,15 +310,17 @@ fn validate_inputs(
 fn validate_outputs(
     outputs: &[OutputBuffer<'_>],
     sample_count: usize,
-) -> Result<[usize; ENDPOINT_COUNT], ProcessError> {
-    if outputs.len() != ENDPOINT_COUNT {
-        return Err(ProcessError::OutputCount { expected: ENDPOINT_COUNT, actual: outputs.len() });
+) -> Result<[usize; OUTPUT_COUNT], ProcessError> {
+    if outputs.len() != OUTPUT_COUNT {
+        return Err(ProcessError::OutputCount { expected: OUTPUT_COUNT, actual: outputs.len() });
     }
 
-    let mut indices = [0; ENDPOINT_COUNT];
-    let mut present = [false; ENDPOINT_COUNT];
+    let mut indices = [0; OUTPUT_COUNT];
+    let mut present = [false; OUTPUT_COUNT];
     for (buffer_index, output) in outputs.iter().enumerate() {
-        let endpoint_index = endpoint_index(output.endpoint);
+        let Some(endpoint_index) = mixer_output_index(output.endpoint) else {
+            return Err(ProcessError::EndpointIsNotMixerOutput(output.endpoint));
+        };
         if present[endpoint_index] {
             return Err(ProcessError::DuplicateOutput(output.endpoint));
         }

@@ -1,7 +1,6 @@
-use crate::ENDPOINT_COUNT;
+use crate::OUTPUT_COUNT;
 use crate::config::{CHANNELS, MAX_SOURCES, MixerConfig};
-use librewave_core::EndpointId;
-use librewave_core::SourceId;
+use librewave_core::{EndpointId, MIXER_OUTPUT_ENDPOINTS, SourceId};
 
 /// Peak and RMS linear amplitude for one channel in one block.
 ///
@@ -80,7 +79,7 @@ impl SourceMeter {
 pub struct BlockMeters {
     sources: [SourceMeter; MAX_SOURCES],
     source_count: usize,
-    endpoints: [StereoMeter; ENDPOINT_COUNT],
+    endpoints: [StereoMeter; OUTPUT_COUNT],
 }
 
 impl BlockMeters {
@@ -88,7 +87,7 @@ impl BlockMeters {
         let mut meters = Self {
             sources: [SourceMeter::EMPTY; MAX_SOURCES],
             source_count: config.sources().len(),
-            endpoints: [StereoMeter::ZERO; ENDPOINT_COUNT],
+            endpoints: [StereoMeter::ZERO; OUTPUT_COUNT],
         };
         for (index, source) in config.sources().iter().copied().enumerate() {
             meters.sources[index].source = source;
@@ -107,8 +106,9 @@ impl BlockMeters {
     }
 
     #[must_use]
-    pub const fn endpoint(&self, endpoint: EndpointId) -> StereoMeter {
-        self.endpoints[endpoint_index(endpoint)]
+    pub fn endpoint(&self, endpoint: EndpointId) -> Option<StereoMeter> {
+        let index = mixer_output_index(endpoint)?;
+        Some(self.endpoints[index])
     }
 }
 
@@ -154,7 +154,7 @@ impl ChannelAccumulator {
 pub(crate) fn finish_block(
     config: &MixerConfig,
     sources: &[StereoAccumulator; MAX_SOURCES],
-    endpoints: &[StereoAccumulator; ENDPOINT_COUNT],
+    endpoints: &[StereoAccumulator; OUTPUT_COUNT],
 ) -> BlockMeters {
     let mut meters = BlockMeters::zero(config);
     for (index, source) in config.sources().iter().copied().enumerate() {
@@ -164,10 +164,6 @@ pub(crate) fn finish_block(
     meters
 }
 
-pub(crate) const fn endpoint_index(endpoint: EndpointId) -> usize {
-    match endpoint {
-        EndpointId::Microphone => 0,
-        EndpointId::MonitorMix => 1,
-        EndpointId::StreamMix => 2,
-    }
+pub(crate) fn mixer_output_index(endpoint: EndpointId) -> Option<usize> {
+    MIXER_OUTPUT_ENDPOINTS.iter().position(|candidate| *candidate == endpoint)
 }

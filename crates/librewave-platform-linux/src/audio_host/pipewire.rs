@@ -99,7 +99,7 @@ impl PipeWireFacade for RealPipeWireFacade {
         if plans.is_empty() {
             return Ok(());
         }
-        Err(LinuxAudioError::EndpointEngineUnavailable)
+        Err(LinuxAudioError::EndpointStreamTransportUnavailable)
     }
 
     fn disconnect(&mut self) -> Result<(), LinuxAudioError> {

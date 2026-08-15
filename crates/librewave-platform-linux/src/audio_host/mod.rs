@@ -2,9 +2,9 @@
 //!
 //! The host opens only a revalidated PCM on the card correlated to the admitted
 //! USB candidate. It consumes capture on a bounded worker before opening
-//! playback. Endpoint publication has an explicit engine boundary: the current
-//! portable crates do not provide negotiated endpoint frames, so the production
-//! `PipeWire` adapter refuses to create a silent endpoint.
+//! playback. A bounded capture-clock seam can process frames with the portable
+//! engine in tests. The production `PipeWire` adapter cannot create endpoint
+//! streams yet, so it refuses publication and never substitutes silence.
 
 use self::alsa::{RealAlsaFacade, SelectedPcmCard};
 use self::pipewire::RealPipeWireFacade;
@@ -20,7 +20,14 @@ use std::time::{Duration, Instant};
 
 mod alsa;
 mod pipewire;
+mod transport;
 mod worker;
+
+pub use transport::{
+    CaptureClockTransport, ProcessedCapture, ProcessedDelivery, SystemIngress, SystemIngressError,
+    TransportBuildError, TransportControl, TransportControlError, TransportCounters,
+    TransportError, TransportHandles, TransportPlayback, TransportPlaybackError,
+};
 
 #[cfg(test)]
 mod tests;
@@ -29,9 +36,8 @@ const CAPTURE_OBSERVATION_POLL: Duration = Duration::from_millis(1);
 
 /// The exact physical PCM format requested by the daemon-owned engine.
 ///
-/// The current daemon does not construct this value because its portable
-/// engine contract does not exist yet. A caller must supply the complete
-/// format instead of relying on a platform default.
+/// The current daemon does not construct this value. A caller must supply the
+/// complete format instead of relying on a platform default.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PhysicalPcmConfig {
     /// Interleaved sample representation.
@@ -90,6 +96,8 @@ impl PhysicalPcmConfig {
 /// `PipeWire`'s direction for one deliberate endpoint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PipeWireEndpointDirection {
+    /// The node receives frames rendered by applications.
+    Input,
     /// The node produces frames for applications to capture.
     Output,
 }
@@ -127,9 +135,11 @@ pub fn endpoint_plans(endpoints: &[EndpointId]) -> Result<Vec<EndpointPlan>, Lin
             return Err(LinuxAudioError::DuplicateEndpoint(*endpoint));
         }
         let direction = match endpoint.flow() {
+            EndpointFlow::PublicSink => PipeWireEndpointDirection::Input,
             EndpointFlow::PublicSource => PipeWireEndpointDirection::Output,
         };
         let (node_name, node_description) = match endpoint {
+            EndpointId::System => ("librewave.system", "LibreWave System"),
             EndpointId::Microphone => ("librewave.microphone", "LibreWave Microphone"),
             EndpointId::MonitorMix => ("librewave.monitor-mix", "LibreWave Monitor Mix"),
             EndpointId::StreamMix => ("librewave.stream-mix", "LibreWave Stream Mix"),
@@ -139,7 +149,10 @@ pub fn endpoint_plans(endpoints: &[EndpointId]) -> Result<Vec<EndpointPlan>, Lin
             direction,
             node_name,
             node_description,
-            media_class: "Audio/Source",
+            media_class: match endpoint.flow() {
+                EndpointFlow::PublicSink => "Audio/Sink",
+                EndpointFlow::PublicSource => "Audio/Source",
+            },
             node_virtual: true,
         });
     }
@@ -162,8 +175,10 @@ pub enum ResourceActivity {
 /// Why a graph cannot be reported as ready.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphNotReady {
-    /// No portable engine supplies negotiated endpoint frames.
-    EngineUnavailable,
+    /// The production adapter cannot create frame-carrying endpoint streams.
+    EndpointStreamTransportUnavailable,
+    /// Independent ALSA and `PipeWire` clocks do not have a synchronization policy.
+    IndependentClockSynchronizationUnresolved,
 }
 
 /// Inspectable production resource state for reconciliation and diagnostics.
@@ -245,8 +260,8 @@ pub enum LinuxAudioError {
     EndpointNotAllowed(EndpointId),
     /// An endpoint appeared more than once in one publication request.
     DuplicateEndpoint(EndpointId),
-    /// The portable engine cannot supply negotiated frames for these endpoints.
-    EndpointEngineUnavailable,
+    /// The production adapter cannot create frame-carrying endpoint streams.
+    EndpointStreamTransportUnavailable,
     /// One or more owned resources could not be closed.
     TeardownFailed,
 }
@@ -302,8 +317,8 @@ impl fmt::Display for LinuxAudioError {
             Self::DuplicateEndpoint(endpoint) => {
                 write!(formatter, "endpoint {endpoint:?} appears more than once")
             }
-            Self::EndpointEngineUnavailable => {
-                formatter.write_str("the endpoint engine cannot supply negotiated frames")
+            Self::EndpointStreamTransportUnavailable => {
+                formatter.write_str("the endpoint stream transport is unavailable")
             }
             Self::TeardownFailed => formatter.write_str("one or more audio resources stayed open"),
         }
@@ -531,9 +546,9 @@ impl AudioHost for LinuxAudioHost {
                 self.playback_active = true;
                 Ok(())
             }
-            Err(LinuxAudioError::EndpointEngineUnavailable) => {
-                self.not_ready = Some(GraphNotReady::EngineUnavailable);
-                Err(LinuxAudioError::EndpointEngineUnavailable)
+            Err(LinuxAudioError::EndpointStreamTransportUnavailable) => {
+                self.not_ready = Some(GraphNotReady::EndpointStreamTransportUnavailable);
+                Err(LinuxAudioError::EndpointStreamTransportUnavailable)
             }
             Err(error) => Err(error),
         }
@@ -544,7 +559,7 @@ impl AudioHost for LinuxAudioHost {
         _candidate: &UsbDeviceCandidate,
     ) -> Result<(), Self::Error> {
         if self.published_endpoints.as_slice() != DELIBERATE_ENDPOINTS {
-            return Err(LinuxAudioError::EndpointEngineUnavailable);
+            return Err(LinuxAudioError::EndpointStreamTransportUnavailable);
         }
         Ok(())
     }
