@@ -1,124 +1,39 @@
 # Undertone
 
-**Linux-native audio mixer for Elgato Wave:3** - providing Wave Link-style functionality using PipeWire.
+Linux-native audio mixer for the Elgato Wave:3, built on PipeWire.
 
-Undertone gives you independent control over multiple audio channels with separate stream and monitor mixes, perfect for streamers and content creators on Linux.
+Undertone gives you independent control over five audio channels, each with its own stream and monitor mix. It is aimed at streamers and content creators on Linux. The Wave:3 is optional; Undertone also works as a general audio mixer.
 
 > [!IMPORTANT]
-> This project is primarily intended for AI experimentation and research. While functional, the codebase may emphasize exploration and iteration over refinement, and some components may be experimental or evolve rapidly. It is provided as-is and is not optimized for production use.
+> This branch is archived. Undertone was an AI-authored experiment, written entirely by Claude Opus 4.5. Development continues in the LibreWave rewrite on the [main](https://github.com/zhgmx/LibreWave/tree/main) branch.
 
 ## Features
 
-- **5 Audio Channels** - System, Voice, Music, Browser, Game
-- **Dual Mix Architecture** - Separate Stream and Monitor mixes with independent volume/mute per channel
-- **Automatic App Routing** - Apps route to channels based on configurable rules (Discord → Voice, Spotify → Music, etc.)
-- **Master Volume Control** - Per-mix master volume and mute
-- **Output Device Selection** - Route monitor mix to any audio output (headphones, speakers, HDMI)
-- **Profiles** - Save and load mixer configurations
-- **Mic Control** - Gain and mute control for Wave:3 microphone
-- **Native UI** - Qt6/QML with KDE Kirigami theming
+- Five channels: System, Voice, Music, Browser, Game
+- Separate stream and monitor mixes per channel, each with its own volume and mute
+- Master volume and mute for each mix
+- Automatic app routing by rule. Discord goes to Voice, Spotify goes to Music, and so on
+- Profiles: save and load mixer settings, with the default profile restored at startup
+- Monitor output selection: route the monitor mix to any output device
+- Mic gain and mute for the Wave:3, over ALSA
+- Qt6/QML interface with Kirigami styling
 
-## Screenshots
+## Audio routing
 
-_Coming soon_
+Undertone creates virtual sinks in PipeWire. Applications connect to their channel sink. Each channel feeds two volume filters, one per mix.
 
-## Requirements
-
-- Linux with PipeWire (Fedora 43+, Ubuntu 24.04+, Arch, etc.)
-- Elgato Wave:3 microphone (optional - works as general audio mixer too)
-- Rust 1.85+ (Edition 2024)
-- Qt6 with Kirigami
-
-## Installation
-
-### Quick Install (Recommended)
-
-```bash
-curl -sSL https://raw.githubusercontent.com/polariscli/Undertone/main/scripts/install.sh | bash
+```mermaid
+flowchart LR
+    A["App (Spotify)"] --> B["ut-ch-music<br>channel sink"]
+    B --> C["ut-ch-music-stream-vol"]
+    B --> D["ut-ch-music-monitor-vol"]
+    C --> E["ut-stream-mix"]
+    D --> F["ut-monitor-mix"]
+    E --> G["Recording app (OBS)"]
+    F --> H["Output device"]
 ```
 
-This will:
-
-- Check and report missing dependencies
-- Clone the repository
-- Build from source
-- Install binaries, systemd service, udev rules, and WirePlumber config
-
-### Dependencies
-
-The installer will check for these automatically, but you can install them manually:
-
-```bash
-# Fedora
-sudo dnf install pipewire-devel qt6-qtbase-devel qt6-qtdeclarative-devel \
-    clang kf6-kirigami-devel kf6-qqc2-desktop-style
-
-# Arch Linux
-sudo pacman -S pipewire qt6-base qt6-declarative clang kirigami
-
-# Ubuntu/Debian
-sudo apt install libpipewire-0.3-dev qt6-base-dev qt6-declarative-dev \
-    clang libkf6kirigami-dev
-```
-
-You also need Rust 1.85+ (for Edition 2024):
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-### Manual Build
-
-```bash
-git clone https://github.com/polariscli/Undertone.git
-cd Undertone
-cargo build --release
-```
-
-### Run (Development)
-
-```bash
-# Start the daemon (required)
-cargo run -p undertone-daemon --release
-
-# In another terminal, start the UI
-cargo run -p undertone-ui --release
-```
-
-### Install Script Commands
-
-```bash
-# Full installation
-./scripts/install.sh install
-
-# Uninstall completely
-./scripts/install.sh uninstall
-
-# Update to latest version
-./scripts/install.sh update
-
-# Check dependencies only
-./scripts/install.sh check
-
-# Service management
-./scripts/install.sh start|stop|enable|disable|status|logs
-
-# Install individual components
-./scripts/install.sh udev|wireplumber|service|build
-```
-
-## How It Works
-
-Undertone creates virtual audio sinks in PipeWire that applications connect to. Each channel feeds into volume filter nodes that control the audio level independently for Stream and Monitor mixes.
-
-```
-App (Spotify)
-  -> ut-ch-music (channel sink)
-       -> ut-ch-music-stream-vol -> ut-stream-mix -> OBS
-       -> ut-ch-music-monitor-vol -> ut-monitor-mix -> Headphones
-```
-
-### Default App Routing
+### Default app routing
 
 | Pattern   | Channel |
 | --------- | ------- |
@@ -128,42 +43,54 @@ App (Spotify)
 | spotify   | Music   |
 | rhythmbox | Music   |
 | firefox   | Browser |
+| chromium  | Browser |
 | chrome    | Browser |
 | steam     | Game    |
 | _default_ | System  |
 
 ## Usage
 
-### Mixer Tab
+### Mixer tab
 
-- Adjust volume sliders to control audio levels
-- Click mute button to silence a channel
-- Toggle between Stream and Monitor mix views
-- Use master volume for overall mix control
+- Drag the sliders to set channel volume.
+- Press the mute button to silence a channel.
+- Switch between the stream and monitor mix.
+- Use the master controls for the whole mix.
 
-### Apps Tab
+### Apps tab
 
-- View currently playing audio applications
-- Click channel dropdown to reassign apps
-- Routes are automatically saved
+- See which applications are playing audio.
+- Pick a channel from the dropdown to reassign an app.
+- The route saves automatically.
 
-### Device Tab
+### Device tab
 
-- View Wave:3 connection status
-- Adjust microphone gain
-- Toggle mic mute
+- See the Wave:3 connection status and serial number.
+- Adjust microphone gain and mute.
+- Choose the output device for the monitor mix.
 
 ### Profiles
 
-- Click profile name in header to switch profiles
-- Use menu to save current settings or delete profiles
+- Pick a profile from the header menu.
+- Use the header menu to save the current settings.
+
+## Build and run
+
+You need Rust 1.92+ and Qt6. No installation method is provided for this archived branch.
+
+```bash
+cargo run -p undertone-daemon
+# in another terminal
+cargo run -p undertone-ui
+```
 
 ## Configuration
 
-Data is stored in `~/.local/share/undertone/`:
+Data lives in `~/.local/share/undertone/`:
 
-- `undertone.db` - SQLite database with channels, routes, profiles
-- Logs via systemd journal when running as service
+- `undertone.db` - SQLite database with channels, routes, and profiles
+
+The daemon listens on `$XDG_RUNTIME_DIR/undertone/daemon.sock`.
 
 WirePlumber configuration for Wave:3 naming:
 
@@ -174,62 +101,65 @@ WirePlumber configuration for Wave:3 naming:
 ### No audio from channels
 
 ```bash
-# Check if daemon is running
+# Is the daemon running?
 pgrep undertone-daemon
 
-# Verify PipeWire nodes exist
+# Do the PipeWire nodes exist?
 pw-cli list-objects Node | grep ut-
 
-# Check audio links
+# Are the links in place?
 pw-link -l | grep ut-
 ```
 
-### App routing to wrong channel
+### App routing to the wrong channel
 
 ```bash
-# Check database routes
+# Check the stored routes
 sqlite3 ~/.local/share/undertone/undertone.db "SELECT * FROM app_routes;"
 
-# Restart daemon to re-apply routes
+# Restart the daemon to re-apply routes
 pkill undertone-daemon && cargo run -p undertone-daemon
 ```
 
-### UI not connecting
+### UI cannot connect
 
 ```bash
-# Check socket exists
+# Does the socket exist?
 ls -la $XDG_RUNTIME_DIR/undertone/daemon.sock
 
-# Test IPC
+# Test the IPC
 echo '{"id":1,"method":{"type":"GetState"}}' | \
     socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/undertone/daemon.sock
 ```
 
+## Status
+
+What works and what does not:
+
+- Volume, mute, app routing, profiles, and output device selection work end to end.
+- Mic control uses ALSA. Native HID control of the Wave:3 is not implemented.
+- There are no VU meters.
+- Graph reconciliation is not implemented. If PipeWire restarts, restart the daemon.
+
 ## Architecture
 
-**undertone-daemon** (background service)
+**undertone-daemon** runs as a background service. It handles the Unix socket, signals, and the event loop (Tokio).
 
-- IPC Server (Unix socket) | Signal Handler | Event Loop (Tokio)
-- **undertone-core**: Channels, Mixer, App Routing, Profiles, State
-- **undertone-pipewire**: PipeWire graph management
-- **undertone-db**: SQLite persistence
-- **undertone-hid**: Wave:3 hardware (ALSA fallback)
+- **undertone-core** - channels, mixer, app routing, profiles, state
+- **undertone-pipewire** - PipeWire graph management
+- **undertone-db** - SQLite persistence
+- **undertone-ipc** - JSON protocol over the Unix socket
+- **undertone-hid** - Wave:3 detection and ALSA mic control
 
-_Unix Socket IPC_
-
-**undertone-ui** (Qt6/QML + Kirigami + cxx-qt)
-
-## Contributing
-
-Contributions welcome! Please see [PROGRESS.md](PROGRESS.md) for current status and planned features.
+**undertone-ui** is a Qt6/QML interface built with cxx-qt and Kirigami.
 
 ## License
 
-GPL-3.0 - See [LICENSE](LICENSE) for details.
+MIT - see [LICENSE](LICENSE).
 
 ## Acknowledgments
 
 - [pipewire-rs](https://gitlab.freedesktop.org/pipewire/pipewire-rs) - Rust bindings for PipeWire
-- [cxx-qt](https://github.com/KDAB/cxx-qt) - Safe Rust/Qt interop
+- [cxx-qt](https://github.com/KDAB/cxx-qt) - Rust/Qt interop
 - [KDE Kirigami](https://develop.kde.org/frameworks/kirigami/) - UI framework
-- Elgato for the excellent Wave:3 hardware
+- Elgato for the Wave:3 hardware
