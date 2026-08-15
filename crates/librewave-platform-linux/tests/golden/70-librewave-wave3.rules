@@ -1,0 +1,1 @@
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="0070", TAG+="uaccess"
