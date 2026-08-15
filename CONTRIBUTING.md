@@ -29,9 +29,17 @@ Some crates do not exist yet. Run these commands once the relevant workspace mem
 
 Hardware tests are opt-in. A hardware test must document the device model, accepted API versions, fields it can change, original-value capture, and restoration behavior.
 
+Use the documented development install command before a live integration test. It must report the current build identity and confirm that no stale LibreWave service or policy path remains.
+
+## Pre-release changes
+
+LibreWave has no public compatibility contract yet. Update the current configuration, IPC, and command formats directly. Do not add a migration, deprecated alias, fallback parser, or parallel implementation only to preserve earlier development builds.
+
+If a format changes, update the tests and development reset path in the same change.
+
 ## Commits
 
-Use a short Conventional Commit style subject. Do not add a commit body.
+Use a clear Conventional Commit style subject when practical.
 
 Examples:
 

@@ -8,13 +8,7 @@ The CLI is a complete product interface. The GPUI application is an optional cli
 
 ## Read before changing code
 
-Read the root `README.md` and the relevant files in `docs/` before editing a crate. Check sibling repositories for research evidence when they are present locally:
-
-- `wave-link-reverse` contains the recovered protocol catalog and architecture research.
-- `elgato-wave3-linux` contains the current local WirePlumber workaround.
-- `openwave` contains a separate implementation that can be compared with the recovered protocol.
-
-Do not make builds or tests depend on those sibling repositories. Import reviewed, redistributable material into LibreWave and record its provenance.
+Read the root `README.md` and the relevant files in `docs/` before editing a crate. Production builds and tests must depend only on material checked into this repository.
 
 ## Architecture rules
 
@@ -27,6 +21,7 @@ Do not make builds or tests depend on those sibling repositories. Import reviewe
 - Do not create macOS or Windows crates before those platforms have approved implementations.
 - Add a crate only when it owns a clear contract and real behavior.
 - Keep one representation of device state and one normal write path.
+- Before the first public release, replace obsolete interfaces directly. Do not add compatibility shims, deprecated aliases, dual schemas, or migration branches for local test state.
 
 ## Hardware safety
 
@@ -86,6 +81,18 @@ cargo test --workspace --all-features
 
 Hardware tests and tests that need a live PipeWire session must use separate, explicit commands. Do not include them in the default test suite.
 
+## Setup and development installs
+
+- `librewavectl setup`, `uninstall`, and `doctor` own the installation lifecycle.
+- The setup operation must be transactional and record every owned path in an installation manifest.
+- Back up a replaced user file before changing it. Restore that exact file during uninstall when it is still safe to do so.
+- Never remove a file that is not listed in the manifest and marked as LibreWave-owned.
+- A development install must build from the current checkout and identify the installed build by commit and content state.
+- After install or uninstall, verify executable links, systemd units, running processes, udev rules, WirePlumber rules, and PipeWire nodes.
+- Treat a stale path, process, unit, rule, or node as a failed operation. Report the exact cleanup command or perform the safe cleanup automatically.
+- Keep `xtask` development commands as thin wrappers around the current `librewavectl` lifecycle. Do not implement another installer.
+- Do not preserve pre-release installation layouts. Remove or reset them through the owned-file manifest.
+
 ## Documentation
 
 Write public documentation in plain, controlled English influenced by ASD-STE100.
@@ -107,7 +114,7 @@ Use a root instruction file for repository-wide rules. Add a nested `AGENTS.md` 
 - Preserve unrelated user changes.
 - Inspect the diff before staging.
 - Keep commits focused.
-- Use loose Conventional Commit subjects with no commit body.
+- Use loose Conventional Commit subjects.
 - Do not rewrite published history.
 - Do not add a remote or push without explicit approval.
 
@@ -121,5 +128,7 @@ Flag a change when it can:
 - publish an internal audio node to the desktop;
 - allocate or block in the real-time path;
 - lose user state during restart or reconnect;
+- leave a stale installed binary, service, policy file, process, or audio node;
+- add a pre-release compatibility path instead of updating the only supported format;
 - include a device serial, vendor binary, or proprietary asset;
 - weaken a test to accept behavior that contradicts the documented contract.

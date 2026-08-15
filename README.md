@@ -4,20 +4,6 @@ LibreWave is a Linux application for Elgato Wave audio hardware. It aims to prov
 
 The project is written in Rust. It starts with the Wave:3 on Linux and keeps the shared device and mixer code separate from Linux audio integration. Other operating systems may be supported later, but the repository will not contain placeholder platform crates.
 
-## Status
-
-LibreWave is at the repository bootstrap stage. It does not control hardware or route audio yet. Do not install it as a replacement for an existing audio setup until the project documents a tested migration path.
-
-The first supported configuration will be:
-
-- Elgato Wave:3
-- Fedora 44
-- PipeWire 1.6 or later
-- WirePlumber 0.5 or later
-- KDE Plasma on Wayland or X11
-
-Other Linux distributions and Wave devices will be added only after their behavior is tested.
-
 ## Product shape
 
 LibreWave has three user-facing programs:
@@ -37,17 +23,21 @@ The daemon is the only normal writer to Wave hardware. The CLI and UI do not acc
 - Match established Wave Link behavior when Windows and macOS handle operating-system volume changes differently from physical controls.
 - Provide exact protocol-version checks and refuse unsafe writes to unknown layouts.
 
+## Documentation
+
+- [Architecture](docs/architecture.md)
+- [Hardware safety](docs/hardware-safety.md)
+- [Linux audio integration](docs/linux-audio.md)
+- [Setup, development installs, and removal](docs/setup.md)
+- [Wave Link behavior parity](docs/behavior-parity.md)
+- [Protocol evidence](docs/protocol-evidence.md)
+- [Roadmap](docs/roadmap.md)
+
 ## Safety
 
 LibreWave does not provide firmware updates, DFU commands, bootloader commands, or device reset tools. Hardware writes must use a reviewed allowlist and readback verification. Unknown firmware remains in read-only diagnostic mode.
 
 Do not use a development build to try undocumented writes on another person's hardware. See `AGENTS.md` before changing device or audio code.
-
-## Building
-
-The repository pins Rust 1.97.0. Crates and build commands will be added in the next implementation milestones.
-
-The GPUI application will be optional. Headless daemon and CLI builds will not depend on graphical libraries.
 
 ## Distribution
 
