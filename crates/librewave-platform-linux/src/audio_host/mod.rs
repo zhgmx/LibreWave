@@ -20,6 +20,10 @@ use std::time::{Duration, Instant};
 
 mod alsa;
 mod pipewire;
+#[cfg_attr(not(test), allow(dead_code))]
+mod pipewire_filter_ffi;
+#[cfg_attr(not(test), allow(dead_code))]
+mod pipewire_graph;
 mod transport;
 mod worker;
 

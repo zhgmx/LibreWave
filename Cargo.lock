@@ -3069,6 +3069,7 @@ name = "librewave-platform-linux"
 version = "0.1.0-alpha.1"
 dependencies = [
  "alsa",
+ "cc",
  "libc",
  "librewave-core",
  "librewave-device",
@@ -3076,6 +3077,7 @@ dependencies = [
  "librewave-ipc",
  "librewave-protocol",
  "pipewire",
+ "pkg-config",
  "rusb",
 ]
 

@@ -1,6 +1,6 @@
 # Linux audio integration
 
-Status: the direct host owns ALSA resources and inspects PipeWire through safe Rust wrappers. A bounded transport seam processes capture blocks with `librewave-engine` in tests. The production adapter cannot create frame-carrying PipeWire endpoint streams, so the lifecycle cannot report the graph as ready.
+Status: the direct host owns ALSA resources and inspects PipeWire through safe Rust wrappers. Two offline seams now cover separate scheduling boundaries. The capture-clock transport tests bounded engine processing. The PipeWire graph seam tests one graph callback and the four deliberate endpoints. Neither seam is connected to the production host, so the lifecycle cannot report the graph as ready.
 
 ## Reference system
 
@@ -12,7 +12,7 @@ Some Wave microphones produce silent capture when playback starts before capture
 
 LibreWave uses one physical audio owner. `librewaved` will open the Wave:3 ALSA capture PCM directly, consume capture frames, confirm that capture is active, and then open the playback PCM. WirePlumber must not create or reserve the admitted physical card. PipeWire will carry only the product endpoints that `librewave-core` defines.
 
-`librewave-platform-linux` contains the policy artifacts, ordered lifecycle, and direct host. The host uses `alsa` 0.12.1 and `pipewire` 0.9.2. It is not connected to daemon startup, setup, or the running graph.
+`librewave-platform-linux` contains the policy artifacts, ordered lifecycle, and direct host. The host uses `alsa` 0.12.1 and `pipewire` 0.9.2. The PipeWire Rust crate does not wrap `pw_filter`. A small C shim includes the installed PipeWire headers and owns only the ABI-sensitive filter event, hook, and process-position layouts. Rust owns graph policy, lifecycle, validation, and processing. None of this code is connected to daemon startup, setup, or the running graph.
 
 The host correlates an admitted USB candidate to one ALSA card. It requires one stable ALSA card identifier and one PCM device for each direction. It repeats the sysfs and procfs correlation immediately before each open. The open uses the revalidated card identifier, device number, and subdevice zero. A changed card number, identifier, topology, or PCM set stops startup.
 
@@ -83,7 +83,29 @@ The physical Wave capture and playback PCMs are not desktop endpoints. LibreWave
 
 The host connects to the user's existing PipeWire instance and completes a registry round trip. It checks the admitted candidate's exact ALSA card number. A Device global must have the Wave:3 vendor and product values, and its `api.alsa.card` value must identify that card. A Node global matches through the card component of `api.alsa.path`. Node globals do not need vendor or product properties. Startup fails while any matching Device or Node global remains visible.
 
-Endpoint plans come only from `librewave-core`. The production adapter cannot create their frame-carrying streams. It returns `EndpointStreamTransportUnavailable` before it creates an endpoint and records the matching `GraphNotReady` reason. Playback remains prepared, not active, at this boundary. The adapter does not publish silence or report the graph as ready. Independent ALSA and PipeWire clocks also need a synchronization policy before the endpoint streams can carry live audio.
+Endpoint plans come only from `librewave-core`. The production adapter still returns `EndpointStreamTransportUnavailable` before it creates an endpoint and records the matching `GraphNotReady` reason. Playback remains prepared, not active, at this boundary. The adapter does not publish silence or report the graph as ready. The offline graph seam is not a production publication path. Independent ALSA and PipeWire clocks still need ASRC boundaries before the endpoints can carry live hardware audio.
+
+## Offline PipeWire graph seam
+
+The crate contains a private five-node graph seam. It exists to verify PipeWire scheduling and ownership. The seam has no call path from the production host.
+
+The System `Audio/Sink` node is the PipeWire driver. Its permanent monitor links keep the graph active when no application renders to System. Microphone, Monitor Mix, and Stream Mix are `Audio/Source` nodes. A fifth node owns the mixer callback and eight planar F32 ports. That node has no `Audio/Sink` or `Audio/Source` media class. The client creates all five nodes and all eight permanent links while the filter is inactive, validates the observed graph, and activates the filter once. It does not create a hidden driver, timer, server configuration, lingering object, or helper endpoint.
+
+One callback receives the graph driver ID, rate, position, quantum, two System input buffers, and six output buffers. The callback accepts 48 kHz and one fixed quantum for an attempt. A missing buffer, PipeWire error or disconnect, pause, driver change, rate change, quantum change, position discontinuity, overlapping or invalid buffer range, processor error, or panic fails that attempt. A fixed-capacity atomic record carries fault details to the control thread. The callback does not tear down the graph.
+
+System link state uses a generation published from registry events. A producer attach has one priming quantum. A detach has one valid drain quantum, then System becomes semantic silence. The test removes producer links before it deactivates the producer. This order preserves the adapter tail and prevents stale samples from entering a later idle cycle.
+
+The explicit integration test starts its own PipeWire daemon. It uses temporary runtime and configuration directories and a private remote name. It does not use WirePlumber, ALSA, USB, user services, or persistent configuration. The test repeats the full lifecycle at fixed quanta of 64, 128, 256, and 512 frames. It verifies the four endpoint classes, the hidden filter, all eight F32 ports, one System driver ID, continuous graph position, deterministic mixer vectors, idle processing, producer and consumer churn, one priming quantum, one drain quantum, and zero residual LibreWave objects. System input has exactly one quantum of adapter latency. Filter output reaches all three source adapters in the same graph cycle.
+
+A separate test changes the live quantum from 128 to 64 frames. PipeWire pauses the filter before it delivers a block with the new quantum. The seam records that pause as an attempt fault and tears down the graph. It does not claim seamless live quantum changes.
+
+Run the integration gate only on a host with the PipeWire development files, `pipewire`, `pw-cli`, and `pw-metadata`:
+
+```text
+LIBREWAVE_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux audio_host::pipewire_graph::tests::integration::private_pipewire_graph -- --ignored --exact --test-threads=1
+```
+
+The default test suite does not start a daemon and does not silently skip this gate. CI does not run the gate yet because the current runner contract does not install the PipeWire daemon tools. Add it when CI supplies a fixed PipeWire runtime image and runs the command as a separate serial job.
 
 ## Portable mixer contract
 
@@ -93,9 +115,9 @@ Each source has separate monitor and stream routes. A route has an enabled value
 
 The engine reports separate left and right peak and RMS values for each source and endpoint. It applies one complete pending control snapshot at the boundary before a nonzero block. Processing uses fixed-capacity state and does not allocate, free memory, lock, block, log, perform I/O, or call platform code.
 
-## Bounded transport seam
+## Offline capture-clock transport seam
 
-The tested transport seam uses physical capture as its only processing clock. One call accepts between one frame and the configured maximum number of complete stereo frames. A zero-length read means that capture made no progress. A partial stereo frame or an oversized block fails the transport attempt. The production ALSA worker is not connected to this seam in this milestone.
+This earlier test seam uses physical capture as its only processing clock. It is separate from the PipeWire graph seam and remains offline. One call accepts between one frame and the configured maximum number of complete stereo frames. A zero-length read means that capture made no progress. A partial stereo frame or an oversized block fails the transport attempt. The production ALSA worker is not connected to this seam in this milestone.
 
 The System ingress is a bounded single-producer, single-consumer FIFO. It can join blocks with different frame counts, but it does not correct rate drift between independent clocks. The producer publishes its first frames before it marks the stream active. An idle or unconnected System sink supplies intentional silence, so microphone monitoring and headphone output do not depend on application playback. Once a System producer is active, insufficient frames are an underrun and fail the attempt. An overflow also fails the attempt. The availability count in an underrun report is the snapshot that rejected that block.
 
@@ -148,7 +170,7 @@ Setup does not install or reload the WirePlumber fragment. It does not enable th
 
 ## Work still required
 
-The production endpoint streams, daemon composition, independent-clock policy, and live hardware plan remain required. Completion requires all of these results:
+Production composition, ASRC, and the live hardware plan remain required. Completion requires all of these results:
 
 - `librewaved` owns the physical capture and playback PCMs directly.
 - Capture consumption produces confirmed frames before playback opens.
