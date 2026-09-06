@@ -10,6 +10,7 @@ description = "Portable realtime mixer engine for LibreWave"
 
 [dependencies]
 librewave-core = { path = "../librewave-core" }
+rubato = { version = "=4.0.0", default-features = false }
 
 [lints]
 workspace = true

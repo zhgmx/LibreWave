@@ -680,3 +680,241 @@ fn meter_handoff_is_empty_until_a_real_block_and_never_overwrites() {
     assert_eq!(reader.try_take(), Some(meters));
     assert_eq!(reader.try_take(), None);
 }
+
+fn rate_match_bounds() -> RateMatchRatioBounds {
+    match RateMatchRatioBounds::try_new(2.0, 0.99, 1.01) {
+        Ok(bounds) => bounds,
+        Err(error) => panic!("test rate bounds are invalid: {error}"),
+    }
+}
+
+fn rate_match_config(channels: usize) -> RateMatcherConfig {
+    match RateMatcherConfig::try_new(1_024, channels, rate_match_bounds()) {
+        Ok(config) => config,
+        Err(error) => panic!("test rate matcher config is invalid: {error}"),
+    }
+}
+
+fn rate_match_controller_config() -> RateMatchControllerConfig {
+    match RateMatchControllerConfig::try_new(100, 0.005, 0.001, 1.0, 0.01, rate_match_bounds()) {
+        Ok(config) => config,
+        Err(error) => panic!("test rate controller config is invalid: {error}"),
+    }
+}
+
+#[test]
+fn rate_match_bounds_and_resource_shape_are_checked_before_construction() {
+    assert!(RateMatchRatioBounds::try_new(0.99, 0.5, 2.0).is_err());
+    assert!(RateMatchRatioBounds::try_new(2.01, 0.5, 2.0).is_err());
+    assert!(RateMatchRatioBounds::try_new(2.0, 0.49, 2.0).is_err());
+    assert!(RateMatchRatioBounds::try_new(2.0, 0.5, 2.01).is_err());
+    assert!(RateMatchRatioBounds::try_new(2.0, 1.1, 1.0).is_err());
+    assert!(RateMatchRatioBounds::try_new(1.1, 0.5, 2.0).is_err());
+
+    assert!(RateMatcherConfig::try_new(0, 1, rate_match_bounds()).is_err());
+    assert!(RateMatcherConfig::try_new(1_025, 1, rate_match_bounds()).is_err());
+    assert!(RateMatcherConfig::try_new(1_024, 0, rate_match_bounds()).is_err());
+    assert!(RateMatcherConfig::try_new(1_024, 3, rate_match_bounds()).is_err());
+    assert!(RateMatcherConfig::try_new(1_024, usize::MAX, rate_match_bounds()).is_err());
+    assert_eq!(rate_match_config(1).channels(), 1);
+    assert_eq!(rate_match_config(2).channels(), 2);
+}
+
+#[test]
+fn rate_match_controller_preview_commit_and_reset_are_transactional() {
+    let mut controller = RateMatchController::new(rate_match_controller_config());
+    let initial = (controller.integral(), controller.ratio());
+    {
+        let preview = controller.preview(200).expect("preview arithmetic should succeed");
+        assert!(preview.relative_ratio() < 1.0);
+        assert_eq!((controller.integral(), controller.ratio()), initial);
+    }
+    assert_eq!((controller.integral(), controller.ratio()), initial);
+
+    let ratio = {
+        let step = controller.preview(0).expect("preview arithmetic should succeed");
+        let ratio = step.relative_ratio();
+        step.commit();
+        ratio
+    };
+    assert!(ratio > 1.0);
+    assert_eq!(controller.ratio(), ratio);
+
+    controller.reset();
+    controller.preview(0).expect("preview arithmetic should succeed").commit();
+    assert_eq!(controller.integral(), 1.0);
+    controller.preview(0).expect("preview arithmetic should succeed").commit();
+    assert_eq!(controller.integral(), 1.0, "integral must clamp at its configured limit");
+
+    controller.reset();
+    controller.preview(200).expect("preview arithmetic should succeed").commit();
+    assert_eq!(controller.integral(), -1.0);
+}
+
+#[test]
+fn extreme_finite_controller_arithmetic_is_rejected_without_mutation() {
+    let config = match RateMatchControllerConfig::try_new(
+        100,
+        f64::MAX,
+        f64::MAX,
+        f64::MAX,
+        f64::MAX,
+        rate_match_bounds(),
+    ) {
+        Ok(config) => config,
+        Err(error) => panic!("extreme test controller config is invalid: {error}"),
+    };
+    let mut controller = RateMatchController::new(config);
+    let initial = (controller.integral(), controller.ratio());
+    let error =
+        controller.preview(0).expect_err("finite extreme arithmetic must not create a token");
+    assert!(matches!(
+        error,
+        RateMatchControllerError::NonFinitePreview {
+            stage: RateMatchControllerArithmetic::DesiredSum
+        }
+    ));
+    assert_eq!((controller.integral(), controller.ratio()), initial);
+}
+
+#[test]
+fn rate_matcher_requires_real_warmup_and_failed_cycles_need_reset() {
+    let mut matcher = match RateMatcher::new(rate_match_config(1)) {
+        Ok(matcher) => matcher,
+        Err(error) => panic!("test matcher construction failed: {error}"),
+    };
+    let mut output = vec![7.0_f32; 64];
+    assert!(!matcher.is_ready());
+    assert!(matches!(matcher.prepare(64, 1.0, &mut output), Err(RateMatchError::NotWarmed)));
+    matcher.warm().expect("zero-input warmup should succeed");
+    assert!(matcher.is_ready());
+
+    let mut controller = RateMatchController::new(rate_match_controller_config());
+    let initial = (controller.integral(), controller.ratio());
+    let mut output = vec![7.0_f32; 64];
+    {
+        let step = controller.preview(100).expect("preview arithmetic should succeed");
+        let cycle =
+            matcher.prepare(64, step.relative_ratio(), &mut output).expect("cycle should prepare");
+        drop(cycle);
+    }
+    assert_eq!((controller.integral(), controller.ratio()), initial);
+    assert!(matcher.needs_reset());
+    assert!(!matcher.is_ready());
+    assert!(matches!(matcher.prepare(64, 1.0, &mut output), Err(RateMatchError::NeedsReset)));
+
+    matcher.reset();
+    matcher.warm().expect("reset matcher should warm again");
+    let mut output = vec![7.0_f32; 64];
+    let cycle = matcher.prepare(64, 1.0, &mut output).expect("cycle should prepare after warmup");
+    let short_input = vec![0.0_f32; cycle.input_frames() - 1];
+    let error = cycle.process(&short_input).expect_err("short input must be terminal");
+    assert!(error.is_terminal());
+    assert!(matcher.needs_reset());
+    assert!(output.iter().all(|sample| *sample == 7.0));
+}
+
+fn process_rate_matcher(channels: usize, quantum: usize) -> RateMatchReport {
+    let mut matcher = match RateMatcher::new(rate_match_config(channels)) {
+        Ok(matcher) => matcher,
+        Err(error) => panic!("test matcher construction failed: {error}"),
+    };
+    matcher.warm().expect("zero-input warmup should succeed");
+    let mut output = vec![0.0_f32; quantum * channels];
+    let cycle =
+        matcher.prepare(quantum, 0.99, &mut output).expect("configured quantum should prepare");
+    let input = vec![0.125_f32; cycle.input_frames() * channels];
+    let report = cycle.process(&input).expect("complete finite cycle should process");
+    assert_eq!(report.output_frames(), quantum);
+    assert_eq!(report.input_frames(), input.len() / channels);
+    assert!(report.relative_ratio().is_finite());
+    assert!(output.iter().all(|sample| sample.is_finite()));
+    report
+}
+
+#[test]
+fn rate_matcher_supports_mono_capture_and_stereo_playback_shapes() {
+    for quantum in [64, 65, 512, 1_024] {
+        let mono = process_rate_matcher(1, quantum);
+        let stereo = process_rate_matcher(2, quantum);
+        assert_eq!(mono.output_frames(), quantum);
+        assert_eq!(stereo.output_frames(), quantum);
+    }
+}
+
+#[test]
+fn rate_matcher_supports_the_full_configured_quantum_range() {
+    let mut matcher = match RateMatcher::new(rate_match_config(1)) {
+        Ok(matcher) => matcher,
+        Err(error) => panic!("test matcher construction failed: {error}"),
+    };
+    matcher.warm().expect("zero-input warmup should succeed");
+    let mut input = vec![0.125_f32; 4_096];
+    let mut output = vec![0.0_f32; 1_024];
+
+    for quantum in 1..=1_024 {
+        let ratio = if quantum % 2 == 0 { 0.99 } else { 1.01 };
+        let cycle = matcher
+            .prepare(quantum, ratio, &mut output[..quantum])
+            .expect("every configured quantum should prepare");
+        let input_frames = cycle.input_frames();
+        let report =
+            cycle.process(&input[..input_frames]).expect("every configured quantum should process");
+        assert_eq!(report.input_frames(), input_frames);
+        assert_eq!(report.output_frames(), quantum);
+        assert!(output[..quantum].iter().all(|sample| sample.is_finite()));
+        input[..input_frames].fill(0.125);
+    }
+}
+
+#[test]
+fn rate_matcher_accepts_dependency_ratio_endpoints_with_exact_counts() {
+    let bounds = match RateMatchRatioBounds::try_new(2.0, 0.5, 2.0) {
+        Ok(bounds) => bounds,
+        Err(error) => panic!("dependency endpoint bounds are invalid: {error}"),
+    };
+    for channels in [1, 2] {
+        let config = match RateMatcherConfig::try_new(1_024, channels, bounds) {
+            Ok(config) => config,
+            Err(error) => panic!("endpoint matcher config is invalid: {error}"),
+        };
+        let mut matcher = match RateMatcher::new(config) {
+            Ok(matcher) => matcher,
+            Err(error) => panic!("endpoint matcher construction failed: {error}"),
+        };
+        matcher.warm().expect("zero-input warmup should succeed");
+        let mut input = vec![0.125_f32; 4_096 * channels];
+        let mut output = vec![0.0_f32; 64 * channels];
+        for ratio in [bounds.minimum(), bounds.maximum()] {
+            let cycle = matcher
+                .prepare(64, ratio, &mut output)
+                .expect("dependency ratio endpoint should prepare");
+            let input_frames = cycle.input_frames();
+            let report = cycle
+                .process(&input[..input_frames * channels])
+                .expect("dependency ratio endpoint should process");
+            assert_eq!(report.input_frames(), input_frames);
+            assert_eq!(report.output_frames(), 64);
+            assert!(output.iter().all(|sample| sample.is_finite()));
+            input[..input_frames * channels].fill(0.125);
+        }
+    }
+}
+
+#[test]
+fn non_finite_rate_match_input_is_terminal_after_prepare() {
+    let mut matcher = match RateMatcher::new(rate_match_config(2)) {
+        Ok(matcher) => matcher,
+        Err(error) => panic!("test matcher construction failed: {error}"),
+    };
+    matcher.warm().expect("zero-input warmup should succeed");
+    let mut output = vec![3.0_f32; 64 * 2];
+    let cycle = matcher.prepare(64, 1.0, &mut output).expect("cycle should prepare");
+    let mut input = vec![0.125_f32; cycle.input_frames() * 2];
+    input[1] = f32::NAN;
+    let error = cycle.process(&input).expect_err("non-finite input must be rejected");
+    assert!(matches!(error, RateMatchError::NonFiniteInput { .. }));
+    assert!(error.is_terminal());
+    assert!(matcher.needs_reset());
+    assert!(output.iter().all(|sample| *sample == 3.0));
+}
