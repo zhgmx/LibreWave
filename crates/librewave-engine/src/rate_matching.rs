@@ -273,6 +273,10 @@ pub enum RateMatchControllerError {
     NonFinitePreview {
         stage: RateMatchControllerArithmetic,
     },
+    NonPositivePreview {
+        stage: RateMatchControllerArithmetic,
+        actual: f64,
+    },
     PreviewOutsideBounds {
         stage: RateMatchControllerArithmetic,
         actual: f64,
@@ -291,8 +295,10 @@ pub enum RateMatchControllerArithmetic {
     Integral,
     ProportionalTerm,
     IntegralTerm,
-    NominalPlusProportional,
-    DesiredSum,
+    PhaseBase,
+    PhaseTrim,
+    MeasuredFeedForward,
+    FeedForwardProduct,
     DesiredRatio,
     SlewDelta,
     SlewStep,
@@ -347,6 +353,9 @@ impl fmt::Display for RateMatchControllerError {
             Self::NonFinitePreview { stage } => {
                 write!(formatter, "controller preview arithmetic is non-finite at {stage:?}")
             }
+            Self::NonPositivePreview { stage, actual } => {
+                write!(formatter, "controller preview value {actual} at {stage:?} is not positive")
+            }
             Self::PreviewOutsideBounds { stage, actual, minimum, maximum } => write!(
                 formatter,
                 "controller preview value {actual} at {stage:?} is outside {minimum}..={maximum}"
@@ -371,7 +380,12 @@ impl RateMatchController {
         Self { config, integral: 0.0, previous_ratio: NOMINAL_RATIO }
     }
 
-    /// Previews a candidate without changing integral or ratio history.
+    /// Previews a candidate final ratio without changing controller history.
+    ///
+    /// `measured_feed_forward` is the measured output-clock rate divided by
+    /// the input-clock rate. The controller multiplies it by the FIFO phase
+    /// trim, then applies slew and bounds to that final ratio. Invalid values
+    /// are rejected; they are never clamped or replaced with nominal ratio.
     ///
     /// The returned step must be committed only after the corresponding audio
     /// cycle succeeds. It mutably borrows this controller, so another preview,
@@ -385,8 +399,15 @@ impl RateMatchController {
     pub fn preview(
         &mut self,
         fill_frames: usize,
+        measured_feed_forward: f64,
     ) -> Result<RateMatchControllerStep<'_>, RateMatchControllerError> {
         let target = self.config.target_fill_frames as f64;
+        let measured_feed_forward = bounded_preview(
+            measured_feed_forward,
+            self.config.ratio_bounds.minimum,
+            self.config.ratio_bounds.maximum,
+            RateMatchControllerArithmetic::MeasuredFeedForward,
+        )?;
         let history_integral = bounded_preview(
             self.integral,
             -self.config.integral_limit,
@@ -422,16 +443,24 @@ impl RateMatchController {
             self.config.integral_gain * integral,
             RateMatchControllerArithmetic::IntegralTerm,
         )?;
-        let nominal_plus_proportional = finite_preview(
+        let phase_base = finite_preview(
             NOMINAL_RATIO + proportional_term,
-            RateMatchControllerArithmetic::NominalPlusProportional,
+            RateMatchControllerArithmetic::PhaseBase,
         )?;
-        let desired_sum = finite_preview(
-            nominal_plus_proportional + integral_term,
-            RateMatchControllerArithmetic::DesiredSum,
+        let phase_trim =
+            finite_preview(phase_base + integral_term, RateMatchControllerArithmetic::PhaseTrim)?;
+        if phase_trim <= 0.0 {
+            return Err(RateMatchControllerError::NonPositivePreview {
+                stage: RateMatchControllerArithmetic::PhaseTrim,
+                actual: phase_trim,
+            });
+        }
+        let desired_product = finite_preview(
+            measured_feed_forward * phase_trim,
+            RateMatchControllerArithmetic::FeedForwardProduct,
         )?;
         let desired = bounded_preview(
-            desired_sum.clamp(self.config.ratio_bounds.minimum, self.config.ratio_bounds.maximum),
+            desired_product,
             self.config.ratio_bounds.minimum,
             self.config.ratio_bounds.maximum,
             RateMatchControllerArithmetic::DesiredRatio,
@@ -445,7 +474,7 @@ impl RateMatchController {
         let ratio_sum =
             finite_preview(history_ratio + slew_step, RateMatchControllerArithmetic::RatioSum)?;
         let ratio = bounded_preview(
-            ratio_sum.clamp(self.config.ratio_bounds.minimum, self.config.ratio_bounds.maximum),
+            ratio_sum,
             self.config.ratio_bounds.minimum,
             self.config.ratio_bounds.maximum,
             RateMatchControllerArithmetic::RelativeRatio,
@@ -467,6 +496,8 @@ impl RateMatchController {
 
     #[must_use]
     pub const fn ratio(&self) -> f64 {
+        // This is the final measured-feed-forward × phase-trim ratio after
+        // final-ratio slew and bounds, not the phase trim alone.
         self.previous_ratio
     }
 }
@@ -480,7 +511,7 @@ pub struct RateMatchControllerStep<'a> {
 
 impl RateMatchControllerStep<'_> {
     #[must_use]
-    pub const fn relative_ratio(&self) -> f64 {
+    pub const fn ratio(&self) -> f64 {
         self.ratio
     }
 

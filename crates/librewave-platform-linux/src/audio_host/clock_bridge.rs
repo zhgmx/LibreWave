@@ -9,16 +9,24 @@ use librewave_core::{
     SourceControls,
 };
 use librewave_engine::{
-    ControlStager, InputBuffer, MeterPublisher, MeterReader, MixerConfig, MixerEngine,
-    OutputBuffer, ProcessError, RateMatchController, RateMatchControllerConfig,
+    ClockAttemptEpoch, ClockObservation, ClockRateEstimator, ClockRateEstimatorConfig,
+    ClockRateEstimatorError, ControlStager, InputBuffer, MeterPublisher, MeterReader, MixerConfig,
+    MixerEngine, OutputBuffer, ProcessError, RateMatchController, RateMatchControllerConfig,
     RateMatchControllerError, RateMatchError, RateMatcher, RateMatcherConfig, StageError,
 };
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
+mod observation;
 mod spsc;
 
+pub use observation::{
+    CaptureClockObservation, GraphClockObservation, GraphClockObservationError,
+    PlaybackClockObservation,
+};
+
+use observation::{ObservationPublisher, ObservationReader};
 use spsc::{
     Consumer, FillObserver, Producer, RingBuildError, RingPeekError, RingPushError,
     RingSequenceError,
@@ -43,15 +51,17 @@ pub enum BridgeState {
     Allocated = 0,
     CapturePriming = 1,
     CaptureFilterDelay = 2,
-    PlaybackPriming = 3,
-    PlaybackFilterDelay = 4,
-    PlaybackStabilizing = 5,
-    PrimingCheck = 6,
-    Primed = 7,
-    Active = 8,
-    Faulted = 9,
-    Quiescing = 10,
-    Stopped = 11,
+    CaptureEstimatorPriming = 3,
+    PlaybackPriming = 4,
+    PlaybackFilterDelay = 5,
+    PlaybackEstimatorPriming = 6,
+    PlaybackStabilizing = 7,
+    PrimingCheck = 8,
+    Primed = 9,
+    Active = 10,
+    Faulted = 11,
+    Quiescing = 12,
+    Stopped = 13,
 }
 
 impl BridgeState {
@@ -60,14 +70,16 @@ impl BridgeState {
             0 => Self::Allocated,
             1 => Self::CapturePriming,
             2 => Self::CaptureFilterDelay,
-            3 => Self::PlaybackPriming,
-            4 => Self::PlaybackFilterDelay,
-            5 => Self::PlaybackStabilizing,
-            6 => Self::PrimingCheck,
-            7 => Self::Primed,
-            8 => Self::Active,
-            9 => Self::Faulted,
-            10 => Self::Quiescing,
+            3 => Self::CaptureEstimatorPriming,
+            4 => Self::PlaybackPriming,
+            5 => Self::PlaybackFilterDelay,
+            6 => Self::PlaybackEstimatorPriming,
+            7 => Self::PlaybackStabilizing,
+            8 => Self::PrimingCheck,
+            9 => Self::Primed,
+            10 => Self::Active,
+            11 => Self::Faulted,
+            12 => Self::Quiescing,
             _ => Self::Stopped,
         }
     }
@@ -80,6 +92,7 @@ pub struct DirectionBridgeConfig {
     startup_guard_frames: usize,
     matcher: RateMatcherConfig,
     controller: RateMatchControllerConfig,
+    estimator: ClockRateEstimatorConfig,
 }
 
 impl DirectionBridgeConfig {
@@ -87,19 +100,23 @@ impl DirectionBridgeConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error for zero capacity, mismatched ratio bounds, or a
-    /// startup range that does not fit in the FIFO.
+    /// Returns an error for zero capacity, matcher/controller/estimator ratio
+    /// bounds that differ, or a startup range that does not fit in the FIFO.
     pub fn try_new(
         fifo_capacity_frames: usize,
         startup_guard_frames: usize,
         matcher: RateMatcherConfig,
         controller: RateMatchControllerConfig,
+        estimator: ClockRateEstimatorConfig,
     ) -> Result<Self, BridgeBuildError> {
         if fifo_capacity_frames == 0 {
             return Err(BridgeBuildError::ZeroFifoCapacity);
         }
         if matcher.ratio_bounds() != controller.ratio_bounds() {
             return Err(BridgeBuildError::RatioBoundsDiffer);
+        }
+        if matcher.ratio_bounds() != estimator.ratio_bounds() {
+            return Err(BridgeBuildError::EstimatorRatioBoundsDiffer);
         }
         let target = controller.target_fill_frames();
         if target <= startup_guard_frames
@@ -113,7 +130,7 @@ impl DirectionBridgeConfig {
                 fifo_capacity_frames,
             });
         }
-        Ok(Self { fifo_capacity_frames, startup_guard_frames, matcher, controller })
+        Ok(Self { fifo_capacity_frames, startup_guard_frames, matcher, controller, estimator })
     }
 
     #[must_use]
@@ -130,6 +147,7 @@ impl DirectionBridgeConfig {
 /// Complete caller-selected policy for the offline bridge.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ClockBridgeConfig {
+    attempt_epoch: ClockAttemptEpoch,
     maximum_graph_quantum_frames: usize,
     capture: DirectionBridgeConfig,
     playback: DirectionBridgeConfig,
@@ -143,6 +161,7 @@ impl ClockBridgeConfig {
     /// Returns an error for a zero graph limit, wrong matcher channel count,
     /// or insufficient capture matcher output capacity.
     pub fn try_new(
+        attempt_epoch: ClockAttemptEpoch,
         maximum_graph_quantum_frames: usize,
         capture: DirectionBridgeConfig,
         playback: DirectionBridgeConfig,
@@ -171,7 +190,7 @@ impl ClockBridgeConfig {
                 actual: capture.matcher.max_output_frames(),
             });
         }
-        Ok(Self { maximum_graph_quantum_frames, capture, playback })
+        Ok(Self { attempt_epoch, maximum_graph_quantum_frames, capture, playback })
     }
 }
 
@@ -181,6 +200,7 @@ pub enum BridgeBuildError {
     ZeroFifoCapacity,
     ZeroMaximumGraphQuantum,
     RatioBoundsDiffer,
+    EstimatorRatioBoundsDiffer,
     InvalidStartupGuard {
         target_fill_frames: usize,
         startup_guard_frames: usize,
@@ -205,6 +225,11 @@ pub enum BridgeBuildError {
         domain: BridgeClockDomain,
         minimum_fill: usize,
         maximum_input_frames: usize,
+    },
+    FifoProducerHeadroom {
+        domain: BridgeClockDomain,
+        required_free_frames: usize,
+        available_free_frames: usize,
     },
     PhysicalGeometry,
     Profile(MixerProfileError),
@@ -240,7 +265,7 @@ impl fmt::Display for BridgeControlError {
 
 impl std::error::Error for BridgeControlError {}
 
-/// Stable fake-writer failure classes.
+/// Stable playback-submission failure classes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlaybackWriteError {
     XrunRecoveryFailed,
@@ -248,26 +273,24 @@ pub enum PlaybackWriteError {
     Failed,
 }
 
-/// Playback-domain progress reported after one fake worker write.
+/// Playback application progress reported after one worker submission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PlaybackWriteProgress {
-    pub start_frame: u64,
-    pub frames_written: usize,
+pub struct PlaybackSubmissionProgress {
+    pub frames_submitted: usize,
 }
 
 /// The delivery boundary used by the offline playback worker.
-pub trait PlaybackPeriodWriter: Send {
-    /// Delivers one complete packed playback period and reports its progress.
+pub trait PlaybackPeriodSubmitter: Send {
+    /// Submits one complete packed period to ALSA's application side.
     ///
     /// # Errors
     ///
     /// Returns a classified worker failure if the period was not delivered.
-    fn write_packed_s24_3le(
+    fn submit_packed_s24_3le(
         &mut self,
-        start_frame: u64,
         complete_frame_count: usize,
         bytes: &[u8],
-    ) -> Result<PlaybackWriteProgress, PlaybackWriteError>;
+    ) -> Result<PlaybackSubmissionProgress, PlaybackWriteError>;
 }
 
 /// Why an offline bridge boundary failed.
@@ -308,6 +331,19 @@ pub enum BridgeError {
         expected: u64,
         actual: u64,
     },
+    ObservationEpoch {
+        domain: BridgeClockDomain,
+        expected: ClockAttemptEpoch,
+        actual: ClockAttemptEpoch,
+    },
+    RepeatedClockObservation {
+        domain: BridgeClockDomain,
+    },
+    MonotonicTimeDiscontinuity {
+        domain: BridgeClockDomain,
+        previous: u64,
+        actual: u64,
+    },
     InvalidQuantum {
         actual: usize,
         maximum: usize,
@@ -315,6 +351,10 @@ pub enum BridgeError {
     InvalidPeriod {
         actual: usize,
         expected: usize,
+    },
+    FixedQuantumChanged {
+        expected: usize,
+        actual: usize,
     },
     Packed(PackedS24Error),
     MissingSystemBuffer,
@@ -349,15 +389,32 @@ pub enum BridgeError {
         domain: BridgeClockDomain,
         error: RateMatchControllerError,
     },
+    Estimator {
+        domain: BridgeClockDomain,
+        error: ClockRateEstimatorError,
+    },
+    ObservationUnavailable {
+        domain: BridgeClockDomain,
+    },
+    PlaybackApplicationPosition {
+        expected: u64,
+        actual: u64,
+    },
+    PlaybackHardwareAhead {
+        hardware: u64,
+        application: u64,
+    },
+    CaptureHardwareBehindApplication {
+        hardware: u64,
+        application: u64,
+    },
     Asrc {
         domain: BridgeClockDomain,
         error: RateMatchError,
     },
     Engine(ProcessError),
     Playback(PlaybackWriteError),
-    PlaybackProgress {
-        expected_start: u64,
-        actual_start: u64,
+    PlaybackSubmission {
         expected_frames: usize,
         actual_frames: usize,
     },
@@ -373,6 +430,7 @@ impl std::error::Error for BridgeError {}
 
 #[derive(Debug)]
 struct SharedAttempt {
+    attempt_epoch: ClockAttemptEpoch,
     state: AtomicU8,
     capture_delay_remaining: AtomicUsize,
     playback_delay_remaining: AtomicUsize,
@@ -446,6 +504,8 @@ impl Drop for ActivityGuard<'_> {
 #[derive(Debug)]
 pub struct ClockBridgeControl {
     stager: ControlStager,
+    capture_fill_observer: FillObserver<WAVE3_CAPTURE_CHANNELS>,
+    playback_fill_observer: FillObserver<WAVE3_PLAYBACK_CHANNELS>,
     shared: Arc<SharedAttempt>,
 }
 
@@ -473,7 +533,7 @@ impl ClockBridgeControl {
         }
     }
 
-    /// Enables fake offline delivery after all preflight work completes.
+    /// Enables offline delivery after all priming work completes.
     ///
     /// # Errors
     ///
@@ -490,6 +550,26 @@ impl ClockBridgeControl {
                 if capture != 0 || graph != 0 || playback != 0 {
                     let _ = self.shared.transition(BridgeState::PrimingCheck, BridgeState::Primed);
                     return Err(BridgeError::ActivationNotQuiescent { capture, graph, playback });
+                }
+                let capture_fill =
+                    self.capture_fill_observer.stable_fill_frames().map_err(|error| {
+                        mark_fault(
+                            &self.shared,
+                            map_sequence(error, BridgeClockDomain::WaveCapture),
+                        )
+                    })?;
+                let playback_fill =
+                    self.playback_fill_observer.stable_fill_frames().map_err(|error| {
+                        mark_fault(
+                            &self.shared,
+                            map_sequence(error, BridgeClockDomain::WavePlayback),
+                        )
+                    })?;
+                if !self.shared.within_startup_guards(capture_fill, playback_fill) {
+                    let _ = self
+                        .shared
+                        .transition(BridgeState::PrimingCheck, BridgeState::PlaybackStabilizing);
+                    return Err(BridgeError::State { actual: BridgeState::PlaybackStabilizing });
                 }
                 if self.shared.transition(BridgeState::PrimingCheck, BridgeState::Active) {
                     Ok(())
@@ -592,6 +672,20 @@ impl ClockBridgeParts {
                 actual: config.playback.fifo_capacity_frames,
             });
         }
+        require_producer_headroom(
+            BridgeClockDomain::WaveCapture,
+            config.capture.fifo_capacity_frames,
+            config.capture.controller.target_fill_frames(),
+            config.capture.startup_guard_frames,
+            capture_period,
+        )?;
+        require_producer_headroom(
+            BridgeClockDomain::WavePlayback,
+            config.playback.fifo_capacity_frames,
+            config.playback.controller.target_fill_frames(),
+            config.playback.startup_guard_frames,
+            config.maximum_graph_quantum_frames,
+        )?;
 
         let mut capture_matcher = RateMatcher::new(config.capture.matcher).map_err(|error| {
             BridgeBuildError::RateMatcher { domain: BridgeClockDomain::WaveCapture, error }
@@ -651,9 +745,13 @@ impl ClockBridgeParts {
         let (capture_producer, capture_consumer, capture_fill_observer) =
             spsc::channel::<WAVE3_CAPTURE_CHANNELS>(config.capture.fifo_capacity_frames)
                 .map_err(map_ring_build)?;
-        let (playback_producer, playback_consumer, _playback_fill_observer) =
+        let (playback_producer, playback_consumer, playback_fill_observer) =
             spsc::channel::<WAVE3_PLAYBACK_CHANNELS>(config.playback.fifo_capacity_frames)
                 .map_err(map_ring_build)?;
+        let (capture_observation_publisher, capture_observation_reader) =
+            observation::channel::<CaptureClockObservation>();
+        let (graph_observation_publisher, graph_observation_reader) =
+            observation::channel::<GraphClockObservation>();
         let source_ids =
             [profile.sources[0].controls.source(), profile.sources[1].controls.source()];
         let mixer_config = MixerConfig::try_new(
@@ -667,6 +765,7 @@ impl ClockBridgeParts {
             .map_err(|_| BridgeBuildError::ControlMapping)?;
         let (meter_publisher, meters) = MeterPublisher::channel();
         let shared = Arc::new(SharedAttempt {
+            attempt_epoch: config.attempt_epoch,
             state: AtomicU8::new(BridgeState::Allocated as u8),
             capture_delay_remaining: AtomicUsize::new(capture_delay),
             playback_delay_remaining: AtomicUsize::new(playback_delay),
@@ -696,12 +795,17 @@ impl ClockBridgeParts {
                 producer: capture_producer,
                 decode: allocate_zeroed(capture_period)?,
                 maximum_frames: capture_period,
-                expected_position: None,
+                application_position: 0,
+                last_observation: None,
+                observation_publisher: capture_observation_publisher,
                 shared: Arc::clone(&shared),
             },
             graph: GraphClockProcessor {
                 capture_consumer,
                 playback_producer,
+                capture_observation_reader,
+                graph_observation_publisher,
+                capture_estimator: ClockRateEstimator::new(config.capture.estimator),
                 capture_matcher,
                 capture_controller: RateMatchController::new(config.capture.controller),
                 engine,
@@ -714,22 +818,31 @@ impl ClockBridgeParts {
                 monitor_output: allocate_zeroed(maximum_graph_samples)?,
                 stream_output: allocate_zeroed(maximum_graph_samples)?,
                 maximum_quantum: config.maximum_graph_quantum_frames,
-                expected_position: None,
+                last_observation: None,
+                fixed_quantum: None,
                 shared: Arc::clone(&shared),
             },
             playback: PlaybackEgress {
                 consumer: playback_consumer,
-                capture_fill_observer,
+                capture_fill_observer: capture_fill_observer.clone(),
+                graph_observation_reader,
+                estimator: ClockRateEstimator::new(config.playback.estimator),
                 matcher: playback_matcher,
                 controller: RateMatchController::new(config.playback.controller),
                 input: allocate_zeroed(playback_input_samples)?,
                 output: allocate_zeroed(playback_output_samples)?,
                 encoded: allocate_zeroed(playback_bytes)?,
                 period_frames: playback_period,
-                expected_position: None,
+                submitted_position: 0,
+                last_hardware_observation: None,
                 shared: Arc::clone(&shared),
             },
-            control: ClockBridgeControl { stager, shared },
+            control: ClockBridgeControl {
+                stager,
+                capture_fill_observer: capture_fill_observer.clone(),
+                playback_fill_observer: playback_fill_observer.clone(),
+                shared,
+            },
             meters,
         })
     }
@@ -737,6 +850,31 @@ impl ClockBridgeParts {
 
 fn map_ring_build(_error: RingBuildError) -> BridgeBuildError {
     BridgeBuildError::Allocation
+}
+
+fn require_producer_headroom(
+    domain: BridgeClockDomain,
+    capacity_frames: usize,
+    target_fill_frames: usize,
+    startup_guard_frames: usize,
+    required_free_frames: usize,
+) -> Result<(), BridgeBuildError> {
+    let available_free_frames = capacity_frames
+        .checked_sub(target_fill_frames)
+        .and_then(|remaining| remaining.checked_sub(startup_guard_frames))
+        .ok_or(BridgeBuildError::InvalidStartupGuard {
+            target_fill_frames,
+            startup_guard_frames,
+            fifo_capacity_frames: capacity_frames,
+        })?;
+    if available_free_frames < required_free_frames {
+        return Err(BridgeBuildError::FifoProducerHeadroom {
+            domain,
+            required_free_frames,
+            available_free_frames,
+        });
+    }
+    Ok(())
 }
 
 fn allocate_zeroed<T: Clone + Default>(length: usize) -> Result<Vec<T>, BridgeBuildError> {
@@ -757,17 +895,28 @@ pub struct CaptureIngress {
     producer: Producer<WAVE3_CAPTURE_CHANNELS>,
     decode: Vec<f32>,
     maximum_frames: usize,
-    expected_position: Option<u64>,
+    application_position: u64,
+    last_observation: Option<ClockObservation>,
+    observation_publisher: ObservationPublisher<CaptureClockObservation>,
     shared: Arc<SharedAttempt>,
+}
+
+/// Whether a checked clock sample entered its no-overwrite handoff.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObservationPublication {
+    Published,
+    NotPublishedHandoffFull,
 }
 
 /// One accepted capture-domain publication.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CapturePublishReport {
-    pub start_frame: u64,
-    pub end_frame: u64,
+    pub application_start_frame: u64,
+    pub application_end_frame: u64,
+    pub hardware_frame_position: u64,
     pub frames: usize,
     pub fifo_fill_frames: usize,
+    pub observation_publication: ObservationPublication,
 }
 
 impl CaptureIngress {
@@ -780,7 +929,7 @@ impl CaptureIngress {
     /// FIFO capacity.
     pub fn publish(
         &mut self,
-        start_frame: u64,
+        observation: CaptureClockObservation,
         complete_frame_count: usize,
         packed_s24_3le: &[u8],
     ) -> Result<CapturePublishReport, BridgeError> {
@@ -799,11 +948,28 @@ impl CaptureIngress {
                 },
             );
         }
-        validate_position(BridgeClockDomain::WaveCapture, self.expected_position, start_frame)
+        let clock = observation.clock();
+        validate_observation_epoch(&self.shared, BridgeClockDomain::WaveCapture, clock)
             .map_err(|error| mark_fault(&self.shared, error))?;
-        let end_frame =
-            checked_end(BridgeClockDomain::WaveCapture, start_frame, complete_frame_count)
-                .map_err(|error| mark_fault(&self.shared, error))?;
+        validate_clock_progress(BridgeClockDomain::WaveCapture, self.last_observation, clock, true)
+            .map_err(|error| mark_fault(&self.shared, error))?;
+        let application_start_frame = self.application_position;
+        let application_end_frame = checked_end(
+            BridgeClockDomain::WaveCapture,
+            application_start_frame,
+            complete_frame_count,
+        )
+        .map_err(|error| mark_fault(&self.shared, error))?;
+        let hardware_frame_position = clock.frame_position().get();
+        if hardware_frame_position < application_end_frame {
+            return fault(
+                &self.shared,
+                BridgeError::CaptureHardwareBehindApplication {
+                    hardware: hardware_frame_position,
+                    application: application_end_frame,
+                },
+            );
+        }
         let encoded_frames = packed_frame_count(packed_s24_3le.len(), WAVE3_CAPTURE_CHANNELS)
             .map_err(|error| mark_fault(&self.shared, BridgeError::Packed(error)))?;
         if encoded_frames != complete_frame_count {
@@ -816,33 +982,28 @@ impl CaptureIngress {
                 },
             );
         }
-        let remaining = self.producer.free_frames().map_err(|error| {
-            mark_fault(&self.shared, map_sequence(error, BridgeClockDomain::WaveCapture))
-        })?;
-        if complete_frame_count > remaining {
-            return fault(
-                &self.shared,
-                BridgeError::Overflow {
-                    domain: BridgeClockDomain::WaveCapture,
-                    requested: complete_frame_count,
-                    remaining,
-                    capacity: self.producer.capacity_frames(),
-                },
-            );
-        }
         decode_s24_3le(
             packed_s24_3le,
             WAVE3_CAPTURE_CHANNELS,
             &mut self.decode[..complete_frame_count],
         )
         .map_err(|error| mark_fault(&self.shared, BridgeError::Packed(error)))?;
-        self.producer.try_push(&self.decode[..complete_frame_count]).map_err(|error| {
-            mark_fault(&self.shared, map_push(error, BridgeClockDomain::WaveCapture))
-        })?;
-        self.expected_position = Some(end_frame);
-        let fill = self.producer.fill_frames().map_err(|error| {
-            mark_fault(&self.shared, map_sequence(error, BridgeClockDomain::WaveCapture))
-        })?;
+        let fifo_step =
+            self.producer.prepare_push(&self.decode[..complete_frame_count]).map_err(|error| {
+                mark_fault(&self.shared, map_push(error, BridgeClockDomain::WaveCapture))
+            })?;
+        let fill = fifo_step.fill_after_commit();
+        let observation_step = self.observation_publisher.prepare_publish(observation).ok();
+
+        fifo_step.commit();
+        let observation_publication = if let Some(step) = observation_step {
+            step.commit();
+            ObservationPublication::Published
+        } else {
+            ObservationPublication::NotPublishedHandoffFull
+        };
+        self.application_position = application_end_frame;
+        self.last_observation = Some(clock);
         if self.shared.state() == BridgeState::CapturePriming && fill >= self.shared.capture_target
         {
             let _ = self
@@ -850,10 +1011,12 @@ impl CaptureIngress {
                 .transition(BridgeState::CapturePriming, BridgeState::CaptureFilterDelay);
         }
         Ok(CapturePublishReport {
-            start_frame,
-            end_frame,
+            application_start_frame,
+            application_end_frame,
+            hardware_frame_position,
             frames: complete_frame_count,
             fifo_fill_frames: fill,
+            observation_publication,
         })
     }
 }
@@ -905,13 +1068,26 @@ pub struct GraphProcessReport {
     pub frames: usize,
     pub capture_input_frames: usize,
     pub control_update_applied: bool,
-    pub preflight_discarded: bool,
+    pub delivery: GraphBoundaryDelivery,
+    pub observation_publication: ObservationPublication,
+}
+
+/// How one state-driven graph boundary treated its public outputs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphBoundaryDelivery {
+    DiscardedFilterDelay,
+    DiscardedEstimatorPriming,
+    DiscardedStartup,
+    Delivered,
 }
 
 /// The PipeWire-data-loop owner of the mixer and capture bridge consumer.
 pub struct GraphClockProcessor {
     capture_consumer: Consumer<WAVE3_CAPTURE_CHANNELS>,
     playback_producer: Producer<WAVE3_PLAYBACK_CHANNELS>,
+    capture_observation_reader: ObservationReader<CaptureClockObservation>,
+    graph_observation_publisher: ObservationPublisher<GraphClockObservation>,
+    capture_estimator: ClockRateEstimator,
     capture_matcher: RateMatcher,
     capture_controller: RateMatchController,
     engine: MixerEngine,
@@ -924,7 +1100,8 @@ pub struct GraphClockProcessor {
     monitor_output: Vec<f32>,
     stream_output: Vec<f32>,
     maximum_quantum: usize,
-    expected_position: Option<u64>,
+    last_observation: Option<ClockObservation>,
+    fixed_quantum: Option<usize>,
     shared: Arc<SharedAttempt>,
 }
 
@@ -933,69 +1110,44 @@ impl fmt::Debug for GraphClockProcessor {
         formatter
             .debug_struct("GraphClockProcessor")
             .field("maximum_quantum", &self.maximum_quantum)
-            .field("expected_position", &self.expected_position)
+            .field("last_observation", &self.last_observation)
+            .field("fixed_quantum", &self.fixed_quantum)
             .finish_non_exhaustive()
     }
 }
 
 impl GraphClockProcessor {
-    /// Processes one complete graph boundary during explicit preflight.
+    /// Processes one graph observation according to the attempt state.
     ///
     /// # Errors
     ///
-    /// Returns a state error before work starts, or a terminal error for
-    /// position, quantum, System input, FIFO state, controller, ASRC, mixer,
-    /// or output data.
-    pub fn process_preflight(
-        &mut self,
-        graph_start_frame: u64,
-        quantum_frames: usize,
-        system: GraphSystemInput<'_>,
-    ) -> Result<GraphProcessReport, BridgeError> {
-        self.process(graph_start_frame, quantum_frames, system, None)
-    }
-
-    /// Processes and exposes one complete active fake graph boundary.
-    ///
-    /// # Errors
-    ///
-    /// Returns a state error before work starts, or a terminal error for
-    /// position, quantum, System input, output buffers, FIFO state,
-    /// controller, ASRC, mixer, or samples.
-    pub fn process_active(
-        &mut self,
-        graph_start_frame: u64,
-        quantum_frames: usize,
-        system: GraphSystemInput<'_>,
-        outputs: GraphOutputBuffers<'_>,
-    ) -> Result<GraphProcessReport, BridgeError> {
-        self.process(graph_start_frame, quantum_frames, system, Some(outputs))
-    }
-
+    /// Returns a state error before work starts, or a terminal error for a
+    /// clock observation, fixed quantum, buffer, FIFO, estimator, controller,
+    /// ASRC, or mixer failure.
     #[allow(clippy::too_many_lines)]
-    fn process(
+    pub fn process(
         &mut self,
-        graph_start_frame: u64,
-        quantum_frames: usize,
+        observation: GraphClockObservation,
         system: GraphSystemInput<'_>,
-        mut outputs: Option<GraphOutputBuffers<'_>>,
+        mut outputs: GraphOutputBuffers<'_>,
     ) -> Result<GraphProcessReport, BridgeError> {
         let _activity = ActivityGuard::enter(&self.shared.graph_in_flight);
         let state = attempt_state(&self.shared)?;
-        if outputs.is_some() && state != BridgeState::Active {
+        if !matches!(
+            state,
+            BridgeState::CaptureFilterDelay
+                | BridgeState::CaptureEstimatorPriming
+                | BridgeState::PlaybackPriming
+                | BridgeState::PlaybackFilterDelay
+                | BridgeState::PlaybackEstimatorPriming
+                | BridgeState::PlaybackStabilizing
+                | BridgeState::Active
+        ) {
             return Err(BridgeError::State { actual: state });
         }
-        if outputs.is_none()
-            && !matches!(
-                state,
-                BridgeState::CaptureFilterDelay
-                    | BridgeState::PlaybackPriming
-                    | BridgeState::PlaybackFilterDelay
-                    | BridgeState::PlaybackStabilizing
-            )
-        {
-            return Err(BridgeError::State { actual: state });
-        }
+        let clock = observation.clock();
+        let quantum_frames = observation.quantum_frames();
+        let graph_start_frame = clock.frame_position().get();
         if quantum_frames == 0 || quantum_frames > self.maximum_quantum {
             return fault(
                 &self.shared,
@@ -1005,12 +1157,41 @@ impl GraphClockProcessor {
                 },
             );
         }
-        validate_position(
+        if let Some(expected) = self.fixed_quantum
+            && expected != quantum_frames
+        {
+            return fault(
+                &self.shared,
+                BridgeError::FixedQuantumChanged { expected, actual: quantum_frames },
+            );
+        }
+        validate_observation_epoch(&self.shared, BridgeClockDomain::PipeWireGraph, clock)
+            .map_err(|error| mark_fault(&self.shared, error))?;
+        validate_clock_progress(
             BridgeClockDomain::PipeWireGraph,
-            self.expected_position,
-            graph_start_frame,
+            self.last_observation,
+            clock,
+            true,
         )
         .map_err(|error| mark_fault(&self.shared, error))?;
+        if let Some(previous) = self.last_observation {
+            let expected = checked_end(
+                BridgeClockDomain::PipeWireGraph,
+                previous.frame_position().get(),
+                quantum_frames,
+            )
+            .map_err(|error| mark_fault(&self.shared, error))?;
+            if expected != graph_start_frame {
+                return fault(
+                    &self.shared,
+                    BridgeError::Discontinuity {
+                        domain: BridgeClockDomain::PipeWireGraph,
+                        expected,
+                        actual: graph_start_frame,
+                    },
+                );
+            }
+        }
         let graph_end_frame =
             checked_end(BridgeClockDomain::PipeWireGraph, graph_start_frame, quantum_frames)
                 .map_err(|error| mark_fault(&self.shared, error))?;
@@ -1030,41 +1211,58 @@ impl GraphClockProcessor {
             quantum_frames,
             &mut self.system_input[..sample_count],
         )?;
-        if let Some(output) = outputs.as_ref() {
-            validate_output_lengths(output, quantum_frames)
-                .map_err(|error| mark_fault(&self.shared, error))?;
-        }
-        let playback_remaining = self.playback_producer.free_frames().map_err(|error| {
-            mark_fault(&self.shared, map_sequence(error, BridgeClockDomain::WavePlayback))
-        })?;
-        if quantum_frames > playback_remaining {
-            return fault(
-                &self.shared,
-                BridgeError::Overflow {
-                    domain: BridgeClockDomain::WavePlayback,
-                    requested: quantum_frames,
-                    remaining: playback_remaining,
-                    capacity: self.playback_producer.capacity_frames(),
-                },
-            );
-        }
+        validate_output_lengths(&outputs, quantum_frames)
+            .map_err(|error| mark_fault(&self.shared, error))?;
 
         let fill = self.capture_consumer.available_frames().map_err(|error| {
             mark_fault(&self.shared, map_sequence(error, BridgeClockDomain::WaveCapture))
         })?;
-        let controller_step = if state == BridgeState::CaptureFilterDelay {
+        let committed_ratio = self.capture_estimator.ratio();
+        let capture_observation_step = self.capture_observation_reader.peek().ok();
+        let mut candidate_ratio = committed_ratio;
+        let estimator_step = if let Some(observation_step) = capture_observation_step.as_ref() {
+            let step = self
+                .capture_estimator
+                .preview(observation_step.value().clock(), clock)
+                .map_err(|error| {
+                    mark_fault(
+                        &self.shared,
+                        BridgeError::Estimator { domain: BridgeClockDomain::WaveCapture, error },
+                    )
+                })?;
+            candidate_ratio = step.ratio();
+            Some(step)
+        } else {
+            if state == BridgeState::Active {
+                validate_estimator_freshness(&self.capture_estimator, clock).map_err(|error| {
+                    mark_fault(
+                        &self.shared,
+                        BridgeError::Estimator { domain: BridgeClockDomain::WaveCapture, error },
+                    )
+                })?;
+            }
+            None
+        };
+        let nominal_state =
+            matches!(state, BridgeState::CaptureFilterDelay | BridgeState::CaptureEstimatorPriming);
+        let controller_step = if nominal_state {
             None
         } else {
-            Some(self.capture_controller.preview(fill).map_err(|error| {
+            let Some(measured_feed_forward) = candidate_ratio else {
+                return fault(
+                    &self.shared,
+                    BridgeError::ObservationUnavailable { domain: BridgeClockDomain::WaveCapture },
+                );
+            };
+            Some(self.capture_controller.preview(fill, measured_feed_forward).map_err(|error| {
                 mark_fault(
                     &self.shared,
                     BridgeError::Controller { domain: BridgeClockDomain::WaveCapture, error },
                 )
             })?)
         };
-        let ratio = controller_step
-            .as_ref()
-            .map_or(1.0, librewave_engine::RateMatchControllerStep::relative_ratio);
+        let ratio =
+            controller_step.as_ref().map_or(1.0, librewave_engine::RateMatchControllerStep::ratio);
         let cycle = self
             .capture_matcher
             .prepare(quantum_frames, ratio, &mut self.capture_matched[..quantum_frames])
@@ -1075,9 +1273,12 @@ impl GraphClockProcessor {
                 )
             })?;
         let capture_input_frames = cycle.input_frames();
-        self.capture_consumer.peek_exact(&mut self.capture_input[..capture_input_frames]).map_err(
-            |error| mark_fault(&self.shared, map_peek(error, BridgeClockDomain::WaveCapture)),
-        )?;
+        let capture_fifo_step = self
+            .capture_consumer
+            .peek_exact(&mut self.capture_input[..capture_input_frames])
+            .map_err(|error| {
+                mark_fault(&self.shared, map_peek(error, BridgeClockDomain::WaveCapture))
+            })?;
         cycle.process(&self.capture_input[..capture_input_frames]).map_err(|error| {
             mark_fault(
                 &self.shared,
@@ -1106,66 +1307,89 @@ impl GraphClockProcessor {
         validate_finite_output(&self.shared, &self.monitor_output[..sample_count])?;
         validate_finite_output(&self.shared, &self.stream_output[..sample_count])?;
 
-        self.playback_producer.try_push(&self.monitor_output[..sample_count]).map_err(|error| {
-            mark_fault(&self.shared, map_push(error, BridgeClockDomain::WavePlayback))
-        })?;
-        if let Some(output) = outputs.as_mut() {
+        let playback_fifo_step =
+            self.playback_producer.prepare_push(&self.monitor_output[..sample_count]).map_err(
+                |error| mark_fault(&self.shared, map_push(error, BridgeClockDomain::WavePlayback)),
+            )?;
+        let playback_fill = playback_fifo_step.fill_after_commit();
+        let (graph_observation_step, observation_publication) =
+            match self.graph_observation_publisher.prepare_publish(observation) {
+                Ok(step) => (Some(step), ObservationPublication::Published),
+                Err(_) => (None, ObservationPublication::NotPublishedHandoffFull),
+            };
+        let delivery = graph_delivery(state);
+        if delivery == GraphBoundaryDelivery::Delivered {
             deinterleave(
                 &self.microphone_output[..sample_count],
-                output.microphone_left,
-                output.microphone_right,
+                outputs.microphone_left,
+                outputs.microphone_right,
             );
             deinterleave(
                 &self.monitor_output[..sample_count],
-                output.monitor_left,
-                output.monitor_right,
+                outputs.monitor_left,
+                outputs.monitor_right,
             );
             deinterleave(
                 &self.stream_output[..sample_count],
-                output.stream_left,
-                output.stream_right,
+                outputs.stream_left,
+                outputs.stream_right,
             );
+        } else {
+            clear_graph_outputs(&mut outputs);
         }
-        let _ = self.meter_publisher.try_publish(engine_report.meters());
 
-        self.capture_consumer.commit_peek().map_err(|error| {
-            mark_fault(&self.shared, map_sequence(error, BridgeClockDomain::WaveCapture))
-        })?;
+        capture_fifo_step.commit();
+        playback_fifo_step.commit();
+        if let Some(step) = capture_observation_step {
+            step.commit();
+        }
+        if let Some(step) = graph_observation_step {
+            step.commit();
+        }
+        if let Some(step) = estimator_step {
+            step.commit();
+        }
         if let Some(controller_step) = controller_step {
             controller_step.commit();
         }
-        self.expected_position = Some(graph_end_frame);
-        let playback_fill = self.playback_producer.fill_frames().map_err(|error| {
-            mark_fault(&self.shared, map_sequence(error, BridgeClockDomain::WavePlayback))
-        })?;
-        if outputs.is_none() {
-            self.finish_preflight_boundary(state, quantum_frames, playback_fill);
-        }
+        self.last_observation = Some(clock);
+        self.fixed_quantum = Some(quantum_frames);
+        self.finish_boundary(state, quantum_frames, playback_fill, candidate_ratio.is_some());
+        let _ = self.meter_publisher.try_publish(engine_report.meters());
         Ok(GraphProcessReport {
             start_frame: graph_start_frame,
             end_frame: graph_end_frame,
             frames: quantum_frames,
             capture_input_frames,
             control_update_applied: engine_report.control_update_applied(),
-            preflight_discarded: outputs.is_none(),
+            delivery,
+            observation_publication,
         })
     }
 
-    fn finish_preflight_boundary(
+    fn finish_boundary(
         &self,
         starting_state: BridgeState,
         quantum_frames: usize,
         playback_fill: usize,
+        estimator_measured: bool,
     ) {
         if starting_state == BridgeState::CaptureFilterDelay {
             let previous = self.shared.capture_delay_remaining.load(Ordering::Acquire);
             let remaining = previous.saturating_sub(quantum_frames);
             self.shared.capture_delay_remaining.store(remaining, Ordering::Release);
             if remaining == 0 {
-                let _ = self
-                    .shared
-                    .transition(BridgeState::CaptureFilterDelay, BridgeState::PlaybackPriming);
+                let next = if estimator_measured {
+                    BridgeState::PlaybackPriming
+                } else {
+                    BridgeState::CaptureEstimatorPriming
+                };
+                let _ = self.shared.transition(BridgeState::CaptureFilterDelay, next);
             }
+        } else if starting_state == BridgeState::CaptureEstimatorPriming && estimator_measured {
+            let _ = self
+                .shared
+                .transition(BridgeState::CaptureEstimatorPriming, BridgeState::PlaybackPriming);
         } else if starting_state == BridgeState::PlaybackPriming
             && playback_fill >= self.shared.playback_target
         {
@@ -1262,24 +1486,37 @@ fn deinterleave(interleaved: &[f32], left: &mut [f32], right: &mut [f32]) {
 /// One successful playback-domain period.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PlaybackProcessReport {
-    pub start_frame: u64,
-    pub end_frame: u64,
+    pub application_start_frame: u64,
+    pub application_end_frame: u64,
+    pub hardware_frame_position: u64,
     pub output_frames: usize,
     pub input_frames: usize,
-    pub preflight_discarded: bool,
+    pub delivery: PlaybackBoundaryDelivery,
+}
+
+/// How one state-driven playback boundary handled its output period.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlaybackBoundaryDelivery {
+    DiscardedFilterDelay,
+    SubmittedEstimatorPriming,
+    SubmittedStabilizing,
+    SubmittedActive,
 }
 
 /// The playback-worker owner of the stereo matcher and FIFO consumer.
 pub struct PlaybackEgress {
     consumer: Consumer<WAVE3_PLAYBACK_CHANNELS>,
     capture_fill_observer: FillObserver<WAVE3_CAPTURE_CHANNELS>,
+    graph_observation_reader: ObservationReader<GraphClockObservation>,
+    estimator: ClockRateEstimator,
     matcher: RateMatcher,
     controller: RateMatchController,
     input: Vec<f32>,
     output: Vec<f32>,
     encoded: Vec<u8>,
     period_frames: usize,
-    expected_position: Option<u64>,
+    submitted_position: u64,
+    last_hardware_observation: Option<ClockObservation>,
     shared: Arc<SharedAttempt>,
 }
 
@@ -1288,81 +1525,134 @@ impl fmt::Debug for PlaybackEgress {
         formatter
             .debug_struct("PlaybackEgress")
             .field("period_frames", &self.period_frames)
-            .field("expected_position", &self.expected_position)
+            .field("submitted_position", &self.submitted_position)
+            .field("last_hardware_observation", &self.last_hardware_observation)
             .finish_non_exhaustive()
     }
 }
 
 impl PlaybackEgress {
-    /// Processes and discards one complete playback preflight period.
+    /// Processes one observed playback boundary according to attempt state.
     ///
     /// # Errors
     ///
     /// Returns a state error before work starts, or a terminal error for
-    /// position, FIFO data, controller, ASRC, or packed conversion.
-    pub fn process_preflight(
-        &mut self,
-        playback_start_frame: u64,
-    ) -> Result<PlaybackProcessReport, BridgeError> {
-        self.process(playback_start_frame, None)
-    }
-
-    /// Processes and delivers one complete active fake playback period.
-    ///
-    /// # Errors
-    ///
-    /// Returns a state error before work starts, or a terminal error for
-    /// position, FIFO data, controller, ASRC, packed conversion, writer
-    /// failure, or wrong progress.
-    pub fn process_active(
-        &mut self,
-        playback_start_frame: u64,
-        writer: &mut dyn PlaybackPeriodWriter,
-    ) -> Result<PlaybackProcessReport, BridgeError> {
-        self.process(playback_start_frame, Some(writer))
-    }
-
+    /// observation, FIFO, estimator, controller, ASRC, packed conversion,
+    /// submitter failure, or wrong application progress.
     #[allow(clippy::too_many_lines)]
-    fn process(
+    pub fn process(
         &mut self,
-        playback_start_frame: u64,
-        mut writer: Option<&mut dyn PlaybackPeriodWriter>,
+        observation: PlaybackClockObservation,
+        submitter: &mut dyn PlaybackPeriodSubmitter,
     ) -> Result<PlaybackProcessReport, BridgeError> {
         let _activity = ActivityGuard::enter(&self.shared.playback_in_flight);
         let state = attempt_state(&self.shared)?;
-        if writer.is_some() && state != BridgeState::Active {
+        if !matches!(
+            state,
+            BridgeState::PlaybackFilterDelay
+                | BridgeState::PlaybackEstimatorPriming
+                | BridgeState::PlaybackStabilizing
+                | BridgeState::Active
+        ) {
             return Err(BridgeError::State { actual: state });
         }
-        if writer.is_none()
-            && !matches!(state, BridgeState::PlaybackFilterDelay | BridgeState::PlaybackStabilizing)
-        {
-            return Err(BridgeError::State { actual: state });
+        let hardware = observation.hardware();
+        validate_observation_epoch(&self.shared, BridgeClockDomain::WavePlayback, hardware)
+            .map_err(|error| mark_fault(&self.shared, error))?;
+        let observed_application_position = observation.application_frame_position().get();
+        if observed_application_position != self.submitted_position {
+            return fault(
+                &self.shared,
+                BridgeError::PlaybackApplicationPosition {
+                    expected: self.submitted_position,
+                    actual: observed_application_position,
+                },
+            );
         }
-        validate_position(
+        let hardware_position = hardware.frame_position().get();
+        if hardware_position > self.submitted_position {
+            return fault(
+                &self.shared,
+                BridgeError::PlaybackHardwareAhead {
+                    hardware: hardware_position,
+                    application: self.submitted_position,
+                },
+            );
+        }
+        let hardware_progress = playback_hardware_progress(
             BridgeClockDomain::WavePlayback,
-            self.expected_position,
-            playback_start_frame,
+            self.last_hardware_observation,
+            hardware,
+            state == BridgeState::Active,
         )
         .map_err(|error| mark_fault(&self.shared, error))?;
-        let playback_end_frame =
-            checked_end(BridgeClockDomain::WavePlayback, playback_start_frame, self.period_frames)
-                .map_err(|error| mark_fault(&self.shared, error))?;
+        let submits_period = state != BridgeState::PlaybackFilterDelay;
+        let application_start_frame = self.submitted_position;
+        let application_end_frame = if submits_period {
+            checked_end(
+                BridgeClockDomain::WavePlayback,
+                application_start_frame,
+                self.period_frames,
+            )
+            .map_err(|error| mark_fault(&self.shared, error))?
+        } else {
+            application_start_frame
+        };
         let fill = self.consumer.available_frames().map_err(|error| {
             mark_fault(&self.shared, map_sequence(error, BridgeClockDomain::WavePlayback))
         })?;
-        let controller_step = if state == BridgeState::PlaybackFilterDelay {
+        let committed_ratio = self.estimator.ratio();
+        let mut candidate_ratio = committed_ratio;
+        let graph_observation_step = if state != BridgeState::PlaybackFilterDelay
+            && hardware_progress != HardwareProgress::Repeated
+        {
+            self.graph_observation_reader.peek().ok()
+        } else {
+            None
+        };
+        let estimator_step = if let Some(graph_step) = graph_observation_step.as_ref() {
+            let step =
+                self.estimator.preview(graph_step.value().clock(), hardware).map_err(|error| {
+                    mark_fault(
+                        &self.shared,
+                        BridgeError::Estimator { domain: BridgeClockDomain::WavePlayback, error },
+                    )
+                })?;
+            candidate_ratio = step.ratio();
+            Some(step)
+        } else {
+            if state == BridgeState::Active {
+                validate_estimator_freshness(&self.estimator, hardware).map_err(|error| {
+                    mark_fault(
+                        &self.shared,
+                        BridgeError::Estimator { domain: BridgeClockDomain::WavePlayback, error },
+                    )
+                })?;
+            }
+            None
+        };
+        let nominal_state = matches!(
+            state,
+            BridgeState::PlaybackFilterDelay | BridgeState::PlaybackEstimatorPriming
+        );
+        let controller_step = if nominal_state {
             None
         } else {
-            Some(self.controller.preview(fill).map_err(|error| {
+            let Some(measured_feed_forward) = candidate_ratio else {
+                return fault(
+                    &self.shared,
+                    BridgeError::ObservationUnavailable { domain: BridgeClockDomain::WavePlayback },
+                );
+            };
+            Some(self.controller.preview(fill, measured_feed_forward).map_err(|error| {
                 mark_fault(
                     &self.shared,
                     BridgeError::Controller { domain: BridgeClockDomain::WavePlayback, error },
                 )
             })?)
         };
-        let ratio = controller_step
-            .as_ref()
-            .map_or(1.0, librewave_engine::RateMatchControllerStep::relative_ratio);
+        let ratio =
+            controller_step.as_ref().map_or(1.0, librewave_engine::RateMatchControllerStep::ratio);
         let cycle =
             self.matcher.prepare(self.period_frames, ratio, &mut self.output).map_err(|error| {
                 mark_fault(
@@ -1377,9 +1667,20 @@ impl PlaybackEgress {
                 BridgeError::InvalidPeriod { actual: input_frames, expected: self.period_frames },
             )
         })?;
-        self.consumer.peek_exact(&mut self.input[..input_samples]).map_err(|error| {
-            mark_fault(&self.shared, map_peek(error, BridgeClockDomain::WavePlayback))
+        let playback_fill_after_commit = fill.checked_sub(input_frames).ok_or_else(|| {
+            mark_fault(
+                &self.shared,
+                BridgeError::Shortage {
+                    domain: BridgeClockDomain::WavePlayback,
+                    required: input_frames,
+                    available: fill,
+                },
+            )
         })?;
+        let fifo_step =
+            self.consumer.peek_exact(&mut self.input[..input_samples]).map_err(|error| {
+                mark_fault(&self.shared, map_peek(error, BridgeClockDomain::WavePlayback))
+            })?;
         cycle.process(&self.input[..input_samples]).map_err(|error| {
             mark_fault(
                 &self.shared,
@@ -1388,88 +1689,102 @@ impl PlaybackEgress {
         })?;
         encode_s24_3le(&self.output, WAVE3_PLAYBACK_CHANNELS, &mut self.encoded)
             .map_err(|error| mark_fault(&self.shared, BridgeError::Packed(error)))?;
-        if let Some(writer) = writer.as_mut() {
-            let progress = writer
-                .write_packed_s24_3le(playback_start_frame, self.period_frames, &self.encoded)
+        if submits_period {
+            let progress = submitter
+                .submit_packed_s24_3le(self.period_frames, &self.encoded)
                 .map_err(|error| mark_fault(&self.shared, BridgeError::Playback(error)))?;
-            if progress.start_frame != playback_start_frame
-                || progress.frames_written != self.period_frames
-            {
+            if progress.frames_submitted != self.period_frames {
                 return fault(
                     &self.shared,
-                    BridgeError::PlaybackProgress {
-                        expected_start: playback_start_frame,
-                        actual_start: progress.start_frame,
+                    BridgeError::PlaybackSubmission {
                         expected_frames: self.period_frames,
-                        actual_frames: progress.frames_written,
+                        actual_frames: progress.frames_submitted,
                     },
                 );
             }
         }
+        let priming_gate = if state == BridgeState::PlaybackStabilizing
+            && hardware_progress == HardwareProgress::Advanced
+        {
+            Some(prepare_priming_gate(
+                &self.shared,
+                &self.capture_fill_observer,
+                playback_fill_after_commit,
+            )?)
+        } else {
+            None
+        };
 
-        self.consumer.commit_peek().map_err(|error| {
-            mark_fault(&self.shared, map_sequence(error, BridgeClockDomain::WavePlayback))
-        })?;
+        fifo_step.commit();
+        if let Some(step) = graph_observation_step {
+            step.commit();
+        }
+        if let Some(step) = estimator_step {
+            step.commit();
+        }
         if let Some(controller_step) = controller_step {
             controller_step.commit();
         }
-        self.expected_position = Some(playback_end_frame);
-        if writer.is_none() {
+        if hardware_progress != HardwareProgress::Repeated {
+            self.last_hardware_observation = Some(hardware);
+        }
+        self.submitted_position = application_end_frame;
+        if state == BridgeState::PlaybackFilterDelay {
             let delay = self.shared.playback_delay_remaining.load(Ordering::Acquire);
-            if state == BridgeState::PlaybackFilterDelay {
-                self.shared
-                    .playback_delay_remaining
-                    .store(delay.saturating_sub(self.period_frames), Ordering::Release);
-                if delay <= self.period_frames {
-                    let _ = self.shared.transition(
-                        BridgeState::PlaybackFilterDelay,
-                        BridgeState::PlaybackStabilizing,
-                    );
-                }
-            } else if state == BridgeState::PlaybackStabilizing {
-                self.try_enter_primed()?;
+            self.shared
+                .playback_delay_remaining
+                .store(delay.saturating_sub(self.period_frames), Ordering::Release);
+            if delay <= self.period_frames {
+                let _ = self.shared.transition(
+                    BridgeState::PlaybackFilterDelay,
+                    BridgeState::PlaybackEstimatorPriming,
+                );
             }
+        } else if state == BridgeState::PlaybackEstimatorPriming && candidate_ratio.is_some() {
+            let _ = self.shared.transition(
+                BridgeState::PlaybackEstimatorPriming,
+                BridgeState::PlaybackStabilizing,
+            );
+        } else if let Some(next) = priming_gate {
+            let _ = self.shared.transition(BridgeState::PrimingCheck, next);
         }
         Ok(PlaybackProcessReport {
-            start_frame: playback_start_frame,
-            end_frame: playback_end_frame,
+            application_start_frame,
+            application_end_frame,
+            hardware_frame_position: hardware_position,
             output_frames: self.period_frames,
             input_frames,
-            preflight_discarded: writer.is_none(),
+            delivery: playback_delivery(state),
         })
     }
+}
 
-    fn try_enter_primed(&self) -> Result<(), BridgeError> {
-        if !self.shared.transition(BridgeState::PlaybackStabilizing, BridgeState::PrimingCheck) {
-            return Ok(());
-        }
-
-        // Activity counters increment before their owner reads the state. The
-        // sequentially consistent gate therefore either observes an earlier
-        // owner in flight or makes that owner observe PrimingCheck and stop
-        // before it can change a FIFO.
-        let capture_in_flight = self.shared.capture_in_flight.load(Ordering::SeqCst);
-        let graph_in_flight = self.shared.graph_in_flight.load(Ordering::SeqCst);
-        if capture_in_flight != 0 || graph_in_flight != 0 {
-            let _ =
-                self.shared.transition(BridgeState::PrimingCheck, BridgeState::PlaybackStabilizing);
-            return Ok(());
-        }
-
-        let capture_fill = self.capture_fill_observer.stable_fill_frames().map_err(|error| {
-            mark_fault(&self.shared, map_sequence(error, BridgeClockDomain::WaveCapture))
-        })?;
-        let playback_fill = self.consumer.available_frames().map_err(|error| {
-            mark_fault(&self.shared, map_sequence(error, BridgeClockDomain::WavePlayback))
-        })?;
-        let next = if self.shared.within_startup_guards(capture_fill, playback_fill) {
-            BridgeState::Primed
-        } else {
-            BridgeState::PlaybackStabilizing
-        };
-        let _ = self.shared.transition(BridgeState::PrimingCheck, next);
-        Ok(())
+fn prepare_priming_gate(
+    shared: &SharedAttempt,
+    capture_fill_observer: &FillObserver<WAVE3_CAPTURE_CHANNELS>,
+    playback_fill: usize,
+) -> Result<BridgeState, BridgeError> {
+    if !shared.transition(BridgeState::PlaybackStabilizing, BridgeState::PrimingCheck) {
+        return Err(BridgeError::State { actual: shared.state() });
     }
+
+    // Activity counters increment before their owner reads the state. The
+    // sequentially consistent gate therefore either observes an earlier
+    // owner in flight or makes that owner observe PrimingCheck and stop before
+    // it can publish a FIFO sequence.
+    let capture_in_flight = shared.capture_in_flight.load(Ordering::SeqCst);
+    let graph_in_flight = shared.graph_in_flight.load(Ordering::SeqCst);
+    if capture_in_flight != 0 || graph_in_flight != 0 {
+        return Ok(BridgeState::PlaybackStabilizing);
+    }
+    let capture_fill = capture_fill_observer
+        .stable_fill_frames()
+        .map_err(|error| mark_fault(shared, map_sequence(error, BridgeClockDomain::WaveCapture)))?;
+    Ok(if shared.within_startup_guards(capture_fill, playback_fill) {
+        BridgeState::Primed
+    } else {
+        BridgeState::PlaybackStabilizing
+    })
 }
 
 fn attempt_state(shared: &SharedAttempt) -> Result<BridgeState, BridgeError> {
@@ -1483,23 +1798,152 @@ fn attempt_state(shared: &SharedAttempt) -> Result<BridgeState, BridgeError> {
         | BridgeState::Allocated
         | BridgeState::CapturePriming
         | BridgeState::CaptureFilterDelay
+        | BridgeState::CaptureEstimatorPriming
         | BridgeState::PlaybackPriming
         | BridgeState::PlaybackFilterDelay
+        | BridgeState::PlaybackEstimatorPriming
         | BridgeState::PlaybackStabilizing => Ok(state),
     }
 }
 
-fn validate_position(
+fn validate_observation_epoch(
+    shared: &SharedAttempt,
     domain: BridgeClockDomain,
-    expected: Option<u64>,
-    actual: u64,
+    observation: ClockObservation,
 ) -> Result<(), BridgeError> {
-    if let Some(expected) = expected
-        && expected != actual
-    {
-        return Err(BridgeError::Discontinuity { domain, expected, actual });
+    if observation.epoch() != shared.attempt_epoch {
+        return Err(BridgeError::ObservationEpoch {
+            domain,
+            expected: shared.attempt_epoch,
+            actual: observation.epoch(),
+        });
     }
     Ok(())
+}
+
+fn validate_clock_progress(
+    domain: BridgeClockDomain,
+    previous: Option<ClockObservation>,
+    actual: ClockObservation,
+    reject_repeated: bool,
+) -> Result<(), BridgeError> {
+    let Some(previous) = previous else {
+        return Ok(());
+    };
+    let previous_frame = previous.frame_position().get();
+    let actual_frame = actual.frame_position().get();
+    if actual_frame < previous_frame {
+        return Err(BridgeError::Discontinuity {
+            domain,
+            expected: previous_frame,
+            actual: actual_frame,
+        });
+    }
+    if actual_frame == previous_frame && reject_repeated {
+        return Err(BridgeError::RepeatedClockObservation { domain });
+    }
+    let previous_time = previous.monotonic_time().get();
+    let actual_time = actual.monotonic_time().get();
+    if actual_time <= previous_time && (actual_frame != previous_frame || reject_repeated) {
+        return Err(BridgeError::MonotonicTimeDiscontinuity {
+            domain,
+            previous: previous_time,
+            actual: actual_time,
+        });
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HardwareProgress {
+    First,
+    Repeated,
+    Advanced,
+}
+
+fn playback_hardware_progress(
+    domain: BridgeClockDomain,
+    previous: Option<ClockObservation>,
+    actual: ClockObservation,
+    active: bool,
+) -> Result<HardwareProgress, BridgeError> {
+    let Some(previous) = previous else {
+        return Ok(HardwareProgress::First);
+    };
+    validate_clock_progress(domain, Some(previous), actual, active)?;
+    if actual.frame_position() == previous.frame_position() {
+        Ok(HardwareProgress::Repeated)
+    } else {
+        Ok(HardwareProgress::Advanced)
+    }
+}
+
+fn validate_estimator_freshness(
+    estimator: &ClockRateEstimator,
+    current_output: ClockObservation,
+) -> Result<(), ClockRateEstimatorError> {
+    let Some(latest_input) = estimator.latest_input() else {
+        return Ok(());
+    };
+    let actual =
+        latest_input.monotonic_time().get().abs_diff(current_output.monotonic_time().get());
+    let maximum = estimator.config().maximum_observation_skew_nanoseconds();
+    if actual > maximum {
+        return Err(ClockRateEstimatorError::ObservationSkew {
+            actual_nanoseconds: actual,
+            maximum_nanoseconds: maximum,
+        });
+    }
+    Ok(())
+}
+
+fn graph_delivery(state: BridgeState) -> GraphBoundaryDelivery {
+    match state {
+        BridgeState::CaptureFilterDelay => GraphBoundaryDelivery::DiscardedFilterDelay,
+        BridgeState::CaptureEstimatorPriming => GraphBoundaryDelivery::DiscardedEstimatorPriming,
+        BridgeState::Active => GraphBoundaryDelivery::Delivered,
+        BridgeState::Allocated
+        | BridgeState::CapturePriming
+        | BridgeState::PlaybackPriming
+        | BridgeState::PlaybackFilterDelay
+        | BridgeState::PlaybackEstimatorPriming
+        | BridgeState::PlaybackStabilizing
+        | BridgeState::PrimingCheck
+        | BridgeState::Primed
+        | BridgeState::Faulted
+        | BridgeState::Quiescing
+        | BridgeState::Stopped => GraphBoundaryDelivery::DiscardedStartup,
+    }
+}
+
+fn playback_delivery(state: BridgeState) -> PlaybackBoundaryDelivery {
+    match state {
+        BridgeState::PlaybackEstimatorPriming => {
+            PlaybackBoundaryDelivery::SubmittedEstimatorPriming
+        }
+        BridgeState::PlaybackStabilizing => PlaybackBoundaryDelivery::SubmittedStabilizing,
+        BridgeState::Active => PlaybackBoundaryDelivery::SubmittedActive,
+        BridgeState::Allocated
+        | BridgeState::CapturePriming
+        | BridgeState::CaptureFilterDelay
+        | BridgeState::CaptureEstimatorPriming
+        | BridgeState::PlaybackPriming
+        | BridgeState::PlaybackFilterDelay
+        | BridgeState::PrimingCheck
+        | BridgeState::Primed
+        | BridgeState::Faulted
+        | BridgeState::Quiescing
+        | BridgeState::Stopped => PlaybackBoundaryDelivery::DiscardedFilterDelay,
+    }
+}
+
+fn clear_graph_outputs(outputs: &mut GraphOutputBuffers<'_>) {
+    outputs.microphone_left.fill(0.0);
+    outputs.microphone_right.fill(0.0);
+    outputs.monitor_left.fill(0.0);
+    outputs.monitor_right.fill(0.0);
+    outputs.stream_left.fill(0.0);
+    outputs.stream_right.fill(0.0);
 }
 
 fn checked_end(domain: BridgeClockDomain, start: u64, frames: usize) -> Result<u64, BridgeError> {
@@ -1546,7 +1990,6 @@ fn map_peek(error: RingPeekError, domain: BridgeClockDomain) -> BridgeError {
         RingPeekError::PartialFrame { samples, channels } => {
             BridgeError::Packed(PackedS24Error::PartialFrame { samples, channels })
         }
-        RingPeekError::PeekPending => BridgeError::AttemptFaulted,
         RingPeekError::Sequence(error) => map_sequence(error, domain),
     }
 }

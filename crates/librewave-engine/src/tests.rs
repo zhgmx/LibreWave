@@ -731,15 +731,15 @@ fn rate_match_controller_preview_commit_and_reset_are_transactional() {
     let mut controller = RateMatchController::new(rate_match_controller_config());
     let initial = (controller.integral(), controller.ratio());
     {
-        let preview = controller.preview(200).expect("preview arithmetic should succeed");
-        assert!(preview.relative_ratio() < 1.0);
+        let preview = controller.preview(200, 1.0).expect("preview arithmetic should succeed");
+        assert!(preview.ratio() < 1.0);
         assert_eq!((controller.integral(), controller.ratio()), initial);
     }
     assert_eq!((controller.integral(), controller.ratio()), initial);
 
     let ratio = {
-        let step = controller.preview(0).expect("preview arithmetic should succeed");
-        let ratio = step.relative_ratio();
+        let step = controller.preview(0, 1.0).expect("preview arithmetic should succeed");
+        let ratio = step.ratio();
         step.commit();
         ratio
     };
@@ -747,14 +747,48 @@ fn rate_match_controller_preview_commit_and_reset_are_transactional() {
     assert_eq!(controller.ratio(), ratio);
 
     controller.reset();
-    controller.preview(0).expect("preview arithmetic should succeed").commit();
+    controller.preview(0, 1.0).expect("preview arithmetic should succeed").commit();
     assert_eq!(controller.integral(), 1.0);
-    controller.preview(0).expect("preview arithmetic should succeed").commit();
+    controller.preview(0, 1.0).expect("preview arithmetic should succeed").commit();
     assert_eq!(controller.integral(), 1.0, "integral must clamp at its configured limit");
 
     controller.reset();
-    controller.preview(200).expect("preview arithmetic should succeed").commit();
+    controller.preview(200, 1.0).expect("preview arithmetic should succeed").commit();
     assert_eq!(controller.integral(), -1.0);
+}
+
+#[test]
+fn controller_ratio_is_the_final_measured_feed_forward_times_phase_trim() {
+    let mut controller = RateMatchController::new(rate_match_controller_config());
+    let step = controller.preview(100, 1.005).expect("unity phase trim with measured feed-forward");
+    assert_eq!(step.ratio(), 1.005);
+    step.commit();
+    assert_eq!(controller.ratio(), 1.005);
+
+    let step = controller.preview(90, 1.002).expect("measured ratio with positive phase trim");
+    assert!(step.ratio() > 1.002);
+    let ratio = step.ratio();
+    step.commit();
+    assert_eq!(controller.ratio(), ratio);
+}
+
+#[test]
+fn controller_rejects_invalid_measurement_and_final_policy_without_clamping() {
+    let mut controller = RateMatchController::new(rate_match_controller_config());
+    let initial = (controller.integral(), controller.ratio());
+    for measurement in [f64::NAN, f64::INFINITY, 0.0, 0.98, 1.02] {
+        assert!(controller.preview(100, measurement).is_err());
+        assert_eq!((controller.integral(), controller.ratio()), initial);
+    }
+
+    assert!(matches!(
+        controller.preview(0, 1.01),
+        Err(RateMatchControllerError::PreviewOutsideBounds {
+            stage: RateMatchControllerArithmetic::DesiredRatio,
+            ..
+        })
+    ));
+    assert_eq!((controller.integral(), controller.ratio()), initial);
 }
 
 #[test]
@@ -773,12 +807,35 @@ fn extreme_finite_controller_arithmetic_is_rejected_without_mutation() {
     let mut controller = RateMatchController::new(config);
     let initial = (controller.integral(), controller.ratio());
     let error =
-        controller.preview(0).expect_err("finite extreme arithmetic must not create a token");
+        controller.preview(0, 1.0).expect_err("finite extreme arithmetic must not create a token");
     assert!(matches!(
         error,
         RateMatchControllerError::NonFinitePreview {
-            stage: RateMatchControllerArithmetic::DesiredSum
+            stage: RateMatchControllerArithmetic::PhaseTrim
         }
+    ));
+    assert_eq!((controller.integral(), controller.ratio()), initial);
+}
+
+#[test]
+fn non_finite_feed_forward_product_is_rejected_without_mutation() {
+    let config = RateMatchControllerConfig::try_new(
+        100,
+        f64::MAX * 0.75,
+        0.0,
+        1.0,
+        1.0,
+        RateMatchRatioBounds::try_new(2.0, 0.5, 2.0).expect("wide ratio bounds"),
+    )
+    .expect("finite product-overflow controller config");
+    let mut controller = RateMatchController::new(config);
+    let initial = (controller.integral(), controller.ratio());
+
+    assert!(matches!(
+        controller.preview(0, 2.0),
+        Err(RateMatchControllerError::NonFinitePreview {
+            stage: RateMatchControllerArithmetic::FeedForwardProduct
+        })
     ));
     assert_eq!((controller.integral(), controller.ratio()), initial);
 }
@@ -799,9 +856,8 @@ fn rate_matcher_requires_real_warmup_and_failed_cycles_need_reset() {
     let initial = (controller.integral(), controller.ratio());
     let mut output = vec![7.0_f32; 64];
     {
-        let step = controller.preview(100).expect("preview arithmetic should succeed");
-        let cycle =
-            matcher.prepare(64, step.relative_ratio(), &mut output).expect("cycle should prepare");
+        let step = controller.preview(100, 1.0).expect("preview arithmetic should succeed");
+        let cycle = matcher.prepare(64, step.ratio(), &mut output).expect("cycle should prepare");
         drop(cycle);
     }
     assert_eq!((controller.integral(), controller.ratio()), initial);

@@ -30,10 +30,12 @@ mod worker;
 
 pub use clock_bridge::{
     BridgeBuildError, BridgeClockDomain, BridgeControlError, BridgeError, BridgeState,
-    CaptureIngress, CapturePublishReport, ClockBridgeConfig, ClockBridgeControl, ClockBridgeParts,
-    DirectionBridgeConfig, GraphClockProcessor, GraphOutputBuffers, GraphProcessReport,
-    GraphSystemInput, PlaybackEgress, PlaybackPeriodWriter, PlaybackProcessReport,
-    PlaybackWriteError, PlaybackWriteProgress,
+    CaptureClockObservation, CaptureIngress, CapturePublishReport, ClockBridgeConfig,
+    ClockBridgeControl, ClockBridgeParts, DirectionBridgeConfig, GraphBoundaryDelivery,
+    GraphClockObservation, GraphClockObservationError, GraphClockProcessor, GraphOutputBuffers,
+    GraphProcessReport, GraphSystemInput, ObservationPublication, PlaybackBoundaryDelivery,
+    PlaybackClockObservation, PlaybackEgress, PlaybackPeriodSubmitter, PlaybackProcessReport,
+    PlaybackSubmissionProgress, PlaybackWriteError,
 };
 pub use pcm::{
     PACKED_S24_SAMPLE_BYTES, PackedS24Error, PcmBufferConfig, PcmConfigError, PcmDirection,

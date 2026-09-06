@@ -103,7 +103,7 @@ fn preview(
     controller: &mut RateMatchController,
     fill_frames: usize,
 ) -> RateMatchControllerStep<'_> {
-    match controller.preview(fill_frames) {
+    match controller.preview(fill_frames, 1.0) {
         Ok(step) => step,
         Err(error) => panic!("test controller preview failed: {error}"),
     }
@@ -118,7 +118,7 @@ fn measure_retryable_output_error(
     let ((), counts) = count_operations(|| {
         let preview = preview(controller, 100);
         assert!(matches!(
-            matcher.prepare(64, preview.relative_ratio(), &mut output[..1]),
+            matcher.prepare(64, preview.ratio(), &mut output[..1]),
             Err(RateMatchError::OutputLength { .. })
         ));
     });
@@ -135,11 +135,10 @@ fn measure_dropped_cycle(
     let initial_controller_state = (controller.integral(), controller.ratio());
     let ((), counts) = count_operations(|| {
         let preview = preview(controller, 100);
-        let cycle =
-            match matcher.prepare(64, preview.relative_ratio(), &mut output[..64 * channels]) {
-                Ok(cycle) => cycle,
-                Err(error) => panic!("test cycle prepare failed: {error}"),
-            };
+        let cycle = match matcher.prepare(64, preview.ratio(), &mut output[..64 * channels]) {
+            Ok(cycle) => cycle,
+            Err(error) => panic!("test cycle prepare failed: {error}"),
+        };
         drop(cycle);
     });
     assert!(matcher.needs_reset());
@@ -157,11 +156,10 @@ fn measure_short_cycle(
     let initial_controller_state = (controller.integral(), controller.ratio());
     let ((), counts) = count_operations(|| {
         let preview = preview(controller, 100);
-        let cycle =
-            match matcher.prepare(64, preview.relative_ratio(), &mut output[..64 * channels]) {
-                Ok(cycle) => cycle,
-                Err(error) => panic!("test cycle prepare failed: {error}"),
-            };
+        let cycle = match matcher.prepare(64, preview.ratio(), &mut output[..64 * channels]) {
+            Ok(cycle) => cycle,
+            Err(error) => panic!("test cycle prepare failed: {error}"),
+        };
         let short_sample_count = cycle.input_frames() * channels - 1;
         let error =
             cycle.process(&input[..short_sample_count]).expect_err("short input must be terminal");
@@ -189,7 +187,7 @@ fn run_steady_cycles(
         };
         let fill = if iteration % 2 == 0 { 90 } else { 110 };
         let preview = preview(controller, fill);
-        let ratio = preview.relative_ratio();
+        let ratio = preview.ratio();
         let cycle = match matcher.prepare(quantum, ratio, &mut output[..quantum * channels]) {
             Ok(cycle) => cycle,
             Err(error) => panic!("steady-state cycle prepare failed: {error}"),
