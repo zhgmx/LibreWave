@@ -1,13 +1,18 @@
 #![allow(clippy::float_cmp)]
 
 use super::*;
-use crate::audio_host::{PACKED_S24_SAMPLE_BYTES, WAVE3_PCM_RATE_HZ};
+use crate::audio_host::worker::{
+    ParkedPlaybackWorker, PcmIoError, PcmStatusSnapshot, PcmWait, PlaybackPcm, PlaybackWorker,
+    PlaybackWorkerBoundary, PlaybackWorkerTerminal, WorkerIoPolicy,
+};
+use crate::audio_host::{PACKED_S24_SAMPLE_BYTES, PcmDirection, WAVE3_PCM_RATE_HZ};
 use librewave_core::MixerProfile;
 use librewave_engine::{
     ClockDeltaBounds, ClockFramePosition, MonotonicNanoseconds, RateMatchRatioBounds,
     RateMatcherConfig,
 };
-use std::sync::mpsc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 
 const EPOCH_VALUE: u64 = 7;
@@ -40,6 +45,7 @@ const SIMULATION_DELAY_PLAYBACK_BUFFER: u32 = 128;
 const SIMULATION_DELAY_FIFO_CAPACITY: usize = 4_096;
 const SIMULATION_DELAY_TARGET_FILL: usize = 2_048;
 const SIMULATION_DELAY_STARTUP_GUARD: usize = 512;
+const WORKER_POLL_LIMIT: usize = 1_000_000;
 
 #[derive(Clone, Copy, Debug)]
 struct Positions {
@@ -151,7 +157,7 @@ impl PlaybackPeriodSubmitter for FailingSubmitter {
         _complete_frame_count: usize,
         _bytes: &[u8],
     ) -> Result<PlaybackSubmissionProgress, PlaybackWriteError> {
-        Err(PlaybackWriteError::Failed)
+        Err(PlaybackWriteError::Failed { accepted_frames: 0, errno: libc::EIO })
     }
 }
 
@@ -164,6 +170,109 @@ impl PlaybackPeriodSubmitter for ShortSubmitter {
         _bytes: &[u8],
     ) -> Result<PlaybackSubmissionProgress, PlaybackWriteError> {
         Ok(PlaybackSubmissionProgress { frames_submitted: complete_frame_count - 1 })
+    }
+}
+
+struct PartialFailingSubmitter;
+
+impl PlaybackPeriodSubmitter for PartialFailingSubmitter {
+    fn submit_packed_s24_3le(
+        &mut self,
+        _complete_frame_count: usize,
+        _bytes: &[u8],
+    ) -> Result<PlaybackSubmissionProgress, PlaybackWriteError> {
+        Err(PlaybackWriteError::Xrun { accepted_frames: 17 })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlaybackWorkerCall {
+    Status,
+    Wait,
+    Write { bytes: usize },
+    StartPcm,
+    DropStream,
+}
+
+struct ScriptedPlaybackPcm {
+    waits: VecDeque<Result<PcmWait, PcmIoError>>,
+    writes: VecDeque<Result<usize, PcmIoError>>,
+    statuses: VecDeque<Result<PcmStatusSnapshot, PcmIoError>>,
+    calls: Arc<Mutex<Vec<PlaybackWorkerCall>>>,
+}
+
+struct WaitGate {
+    released: Mutex<bool>,
+    condition: Condvar,
+}
+
+struct CancellablePlaybackPcm {
+    first_status: Option<PcmStatusSnapshot>,
+    gate: Arc<WaitGate>,
+    calls: Arc<Mutex<Vec<PlaybackWorkerCall>>>,
+}
+
+impl PlaybackPcm for CancellablePlaybackPcm {
+    fn wait(&mut self, _timeout_millis: u32) -> Result<PcmWait, PcmIoError> {
+        self.calls.lock().expect("playback calls").push(PlaybackWorkerCall::Wait);
+        let mut released = self.gate.released.lock().expect("wait gate");
+        while !*released {
+            released = self.gate.condition.wait(released).expect("wait gate notification");
+        }
+        Ok(PcmWait::TimedOut)
+    }
+
+    fn write_frames(&mut self, bytes: &[u8]) -> Result<usize, PcmIoError> {
+        self.calls
+            .lock()
+            .expect("playback calls")
+            .push(PlaybackWorkerCall::Write { bytes: bytes.len() });
+        Err(PcmIoError::Failed { errno: libc::EIO })
+    }
+
+    fn status(&mut self) -> Result<PcmStatusSnapshot, PcmIoError> {
+        self.calls.lock().expect("playback calls").push(PlaybackWorkerCall::Status);
+        self.first_status.take().ok_or(PcmIoError::Again)
+    }
+
+    fn start_pcm(&mut self) -> Result<(), PcmIoError> {
+        self.calls.lock().expect("playback calls").push(PlaybackWorkerCall::StartPcm);
+        Ok(())
+    }
+
+    fn drop_stream(&mut self) -> Result<(), PcmIoError> {
+        self.calls.lock().expect("playback calls").push(PlaybackWorkerCall::DropStream);
+        Ok(())
+    }
+}
+
+impl PlaybackPcm for ScriptedPlaybackPcm {
+    fn wait(&mut self, _timeout_millis: u32) -> Result<PcmWait, PcmIoError> {
+        self.calls.lock().expect("playback calls").push(PlaybackWorkerCall::Wait);
+        self.waits.pop_front().unwrap_or(Ok(PcmWait::TimedOut))
+    }
+
+    fn write_frames(&mut self, bytes: &[u8]) -> Result<usize, PcmIoError> {
+        self.calls
+            .lock()
+            .expect("playback calls")
+            .push(PlaybackWorkerCall::Write { bytes: bytes.len() });
+        self.writes.pop_front().unwrap_or(Err(PcmIoError::Failed { errno: libc::EIO }))
+    }
+
+    fn status(&mut self) -> Result<PcmStatusSnapshot, PcmIoError> {
+        self.calls.lock().expect("playback calls").push(PlaybackWorkerCall::Status);
+        self.statuses.pop_front().unwrap_or(Err(PcmIoError::Disconnected))
+    }
+
+    fn start_pcm(&mut self) -> Result<(), PcmIoError> {
+        self.calls.lock().expect("playback calls").push(PlaybackWorkerCall::StartPcm);
+        Ok(())
+    }
+
+    fn drop_stream(&mut self) -> Result<(), PcmIoError> {
+        self.calls.lock().expect("playback calls").push(PlaybackWorkerCall::DropStream);
+        Ok(())
     }
 }
 
@@ -181,6 +290,27 @@ fn clock(frames: u64, nanoseconds: u64) -> ClockObservation {
 
 fn graph_observation(frames: u64, nanoseconds: u64, quantum: usize) -> GraphClockObservation {
     GraphClockObservation::try_new(clock(frames, nanoseconds), quantum).expect("positive quantum")
+}
+
+fn next_playback_boundary(worker: &mut PlaybackWorker) -> PlaybackWorkerBoundary {
+    for _ in 0..WORKER_POLL_LIMIT {
+        if let Some(boundary) = worker.try_boundary() {
+            return boundary;
+        }
+        assert!(!worker.is_finished(), "playback worker ended before reporting a boundary");
+        thread::yield_now();
+    }
+    panic!("playback worker did not report a boundary")
+}
+
+fn wait_for_playback_finish(worker: &PlaybackWorker) {
+    for _ in 0..WORKER_POLL_LIMIT {
+        if worker.is_finished() {
+            return;
+        }
+        thread::yield_now();
+    }
+    panic!("playback worker did not finish")
 }
 
 fn scaled_frame_time(frames: usize, ppm: i64) -> u64 {
@@ -343,14 +473,12 @@ fn publish_capture(
         .capture_time
         .checked_add(scaled_frame_time(frames, positions.capture_ppm))
         .expect("capture time");
-    parts
-        .capture_ingress
-        .publish(
-            CaptureClockObservation::new(clock(positions.capture_hardware, positions.capture_time)),
-            frames,
-            &packed_mono(frames, sample),
-        )
-        .expect("capture publication")
+    let read = parts.capture_ingress.record_completed_read(frames).expect("completed capture read");
+    read.publish(
+        CaptureClockObservation::new(clock(positions.capture_hardware, positions.capture_time)),
+        &packed_mono(frames, sample),
+    )
+    .expect("capture publication")
 }
 
 fn process_graph(
@@ -458,6 +586,134 @@ fn prime(parts: &mut ClockBridgeParts) -> Positions {
     )
 }
 
+pub(in crate::audio_host) struct PrimedWorkerFixture {
+    pub parts: ClockBridgeParts,
+    pub capture_geometry: super::super::pcm::PhysicalPcmParameters,
+    pub playback_geometry: super::super::pcm::PhysicalPcmParameters,
+    pub capture_time: u64,
+    pub playback_time: u64,
+}
+
+pub(in crate::audio_host) fn primed_worker_fixture() -> PrimedWorkerFixture {
+    let mut parts = simulation_parts();
+    let positions = prime(&mut parts);
+    PrimedWorkerFixture {
+        parts,
+        capture_geometry: simulation_capture_geometry(),
+        playback_geometry: simulation_playback_geometry(),
+        capture_time: positions.capture_time,
+        playback_time: positions.playback_time,
+    }
+}
+
+fn reach_playback_stabilizing(parts: &mut ClockBridgeParts) -> Positions {
+    parts.control.start_capture().expect("start capture priming");
+    let mut positions = Positions::new();
+    let mut output = OutputStorage::new();
+    let mut submitter = ExactSubmitter::new(SIMULATION_PLAYBACK_PERIOD);
+    for _ in 0..SIMULATION_FIFO_CAPACITY {
+        match parts.control.state() {
+            BridgeState::CapturePriming => {
+                publish_capture(parts, &mut positions, SIMULATION_CAPTURE_PERIOD, 0.25);
+            }
+            BridgeState::CaptureFilterDelay
+            | BridgeState::CaptureEstimatorPriming
+            | BridgeState::PlaybackPriming => {
+                publish_capture(parts, &mut positions, SIMULATION_PLAYBACK_PERIOD, 0.25);
+                process_graph(
+                    parts,
+                    &mut positions,
+                    SIMULATION_PLAYBACK_PERIOD,
+                    GraphSystemInput::unconnected(),
+                    &mut output,
+                );
+            }
+            BridgeState::PlaybackFilterDelay | BridgeState::PlaybackEstimatorPriming => {
+                publish_capture(parts, &mut positions, SIMULATION_PLAYBACK_PERIOD, 0.25);
+                process_graph(
+                    parts,
+                    &mut positions,
+                    SIMULATION_PLAYBACK_PERIOD,
+                    GraphSystemInput::unconnected(),
+                    &mut output,
+                );
+                process_playback(parts, &mut positions, &mut submitter, SIMULATION_PLAYBACK_PERIOD);
+            }
+            BridgeState::PlaybackStabilizing => return positions,
+            state => panic!("unexpected state before playback stabilization: {state:?}"),
+        }
+    }
+    panic!("simulation did not reach PlaybackStabilizing")
+}
+
+fn reach_playback_filter_delay(parts: &mut ClockBridgeParts) -> Positions {
+    parts.control.start_capture().expect("start capture priming");
+    let mut positions = Positions::new();
+    let mut output = OutputStorage::new();
+    for _ in 0..SIMULATION_FIFO_CAPACITY {
+        match parts.control.state() {
+            BridgeState::CapturePriming => {
+                publish_capture(parts, &mut positions, SIMULATION_CAPTURE_PERIOD, 0.25);
+            }
+            BridgeState::CaptureFilterDelay
+            | BridgeState::CaptureEstimatorPriming
+            | BridgeState::PlaybackPriming => {
+                publish_capture(parts, &mut positions, SIMULATION_PLAYBACK_PERIOD, 0.25);
+                process_graph(
+                    parts,
+                    &mut positions,
+                    SIMULATION_PLAYBACK_PERIOD,
+                    GraphSystemInput::unconnected(),
+                    &mut output,
+                );
+            }
+            BridgeState::PlaybackFilterDelay => return positions,
+            state => panic!("unexpected state before playback worker activation: {state:?}"),
+        }
+    }
+    panic!("simulation did not queue Monitor Mix")
+}
+
+fn playback_worker_status(
+    geometry: super::super::pcm::PhysicalPcmParameters,
+    nanoseconds: u64,
+    available_frames: i64,
+    state: alsa::pcm::State,
+) -> PcmStatusSnapshot {
+    PcmStatusSnapshot {
+        timestamp_seconds: i64::try_from(nanoseconds / NANOSECONDS_PER_SECOND)
+            .expect("timestamp seconds"),
+        timestamp_nanoseconds: i64::try_from(nanoseconds % NANOSECONDS_PER_SECOND)
+            .expect("timestamp nanoseconds"),
+        available_frames,
+        delay_frames: -3,
+        state_raw: state as i32,
+        geometry,
+    }
+}
+
+fn simulation_playback_geometry() -> super::super::pcm::PhysicalPcmParameters {
+    Wave3PhysicalIoConfig::try_new(
+        u32::try_from(SIMULATION_CAPTURE_PERIOD).expect("capture period"),
+        SIMULATION_CAPTURE_BUFFER,
+        u32::try_from(SIMULATION_PLAYBACK_PERIOD).expect("playback period"),
+        SIMULATION_PLAYBACK_BUFFER,
+    )
+    .expect("simulation physical geometry")
+    .parameters(PcmDirection::Playback)
+}
+
+fn simulation_capture_geometry() -> super::super::pcm::PhysicalPcmParameters {
+    Wave3PhysicalIoConfig::try_new(
+        u32::try_from(SIMULATION_CAPTURE_PERIOD).expect("capture period"),
+        SIMULATION_CAPTURE_BUFFER,
+        u32::try_from(SIMULATION_PLAYBACK_PERIOD).expect("playback period"),
+        SIMULATION_PLAYBACK_BUFFER,
+    )
+    .expect("simulation physical geometry")
+    .parameters(PcmDirection::Capture)
+}
+
 fn activate(parts: &mut ClockBridgeParts) -> Positions {
     let positions = prime(parts);
     parts.control.activate().expect("activate delivery");
@@ -542,33 +798,30 @@ fn capture_hardware_cannot_trail_completed_application_progress() {
     let last_observation = parts.capture_ingress.last_observation;
     assert!(matches!(
         parts.graph.capture_observation_reader.peek(),
-        Err(super::observation::ObservationHandoffError::Empty)
+        Err(super::observation::CopySlotError::Empty)
     ));
+    let read = parts.capture_ingress.record_completed_read(1).expect("completed capture read");
 
     assert!(matches!(
-        parts.capture_ingress.publish(
-            CaptureClockObservation::new(clock(0, 1)),
-            1,
-            &packed_mono(1, 0.0),
-        ),
+        read.publish(CaptureClockObservation::new(clock(0, 1)), &packed_mono(1, 0.0),),
         Err(BridgeError::CaptureHardwareBehindApplication { hardware: 0, application: 1 })
     ));
     assert_eq!(parts.control.state(), BridgeState::Faulted);
     assert_eq!(parts.graph.capture_consumer.available_frames(), Ok(fifo_fill));
     assert_eq!(parts.capture_ingress.producer.write_sequence(), fifo_write_sequence);
     assert_eq!(parts.graph.capture_consumer.read_sequence(), fifo_read_sequence);
-    assert_eq!(parts.capture_ingress.application_position, application_position);
+    assert_eq!(parts.capture_ingress.application_position, application_position + 1);
     assert_eq!(parts.capture_ingress.last_observation, last_observation);
     assert!(matches!(
         parts.graph.capture_observation_reader.peek(),
-        Err(super::observation::ObservationHandoffError::Empty)
+        Err(super::observation::CopySlotError::Empty)
     ));
 
     let mut parts = simulation_parts();
     parts.control.start_capture().expect("start capture");
-    let report = parts
-        .capture_ingress
-        .publish(CaptureClockObservation::new(clock(2, 1)), 1, &packed_mono(1, 0.0))
+    let read = parts.capture_ingress.record_completed_read(1).expect("completed capture read");
+    let report = read
+        .publish(CaptureClockObservation::new(clock(2, 1)), &packed_mono(1, 0.0))
         .expect("capture availability may put hardware ahead of application");
     assert_eq!(report.application_end_frame, 1);
     assert_eq!(report.hardware_frame_position, 2);
@@ -600,6 +853,150 @@ fn startup_is_state_driven_and_ready_requires_both_measured_clocks() {
         active_cycle(&mut parts, &mut positions, 0.25, &mut output, &mut submitter);
     assert_eq!(graph.delivery, GraphBoundaryDelivery::Delivered);
     assert_eq!(playback.delivery, PlaybackBoundaryDelivery::SubmittedActive);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn playback_worker_starts_pcm_only_after_a_complete_queued_period() {
+    let mut parts = simulation_parts();
+    let positions = reach_playback_filter_delay(&mut parts);
+    assert_eq!(parts.control.state(), BridgeState::PlaybackFilterDelay);
+    assert!(parts.capture_ingress.worker_application_position() > 0);
+
+    let geometry = simulation_playback_geometry();
+    let buffer_frames = i64::from(geometry.buffer_frames);
+    let period_time = scaled_frame_time(SIMULATION_PLAYBACK_PERIOD, 0);
+    let first_time = positions.graph_time;
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let pcm = ScriptedPlaybackPcm {
+        waits: VecDeque::from([
+            Ok(PcmWait::Ready),
+            Ok(PcmWait::Ready),
+            Ok(PcmWait::Ready),
+            Ok(PcmWait::Ready),
+        ]),
+        writes: VecDeque::from([
+            Ok(100),
+            Err(PcmIoError::Interrupted),
+            Ok(SIMULATION_PLAYBACK_PERIOD - 100),
+            Ok(SIMULATION_PLAYBACK_PERIOD),
+        ]),
+        statuses: VecDeque::from([
+            Ok(playback_worker_status(
+                geometry,
+                first_time,
+                buffer_frames,
+                alsa::pcm::State::Prepared,
+            )),
+            Ok(playback_worker_status(
+                geometry,
+                first_time + period_time,
+                buffer_frames,
+                alsa::pcm::State::Prepared,
+            )),
+            Ok(playback_worker_status(
+                geometry,
+                first_time + 2 * period_time,
+                buffer_frames,
+                alsa::pcm::State::Running,
+            )),
+            Err(PcmIoError::Disconnected),
+        ]),
+        calls: Arc::clone(&calls),
+    };
+    let policy = WorkerIoPolicy::try_new(1, 2).expect("worker I/O policy");
+    let parked = ParkedPlaybackWorker::new(Box::new(pcm), parts.playback, geometry, policy)
+        .expect("parked playback worker");
+    assert!(calls.lock().expect("playback calls").is_empty());
+    let mut worker =
+        parked.activate_thread_after_monitor_mix_queued().expect("playback thread activation");
+
+    wait_for_playback_finish(&worker);
+    let first = next_playback_boundary(&mut worker);
+    assert!(matches!(
+        first,
+        PlaybackWorkerBoundary {
+            report: PlaybackProcessReport {
+                delivery: PlaybackBoundaryDelivery::DiscardedFilterDelay,
+                ..
+            },
+            pcm_started: false,
+            ..
+        }
+    ));
+    assert!(worker.try_boundary().is_none(), "full boundary slot must retain its first value");
+    let shutdown = worker.park_and_join().expect("playback worker join");
+    assert_eq!(
+        shutdown.terminal,
+        PlaybackWorkerTerminal::Observe(PlaybackWriteError::Disconnected { accepted_frames: 0 })
+    );
+    assert_eq!(shutdown.drop_stream_result, Ok(()));
+    assert_eq!(
+        shutdown.egress.worker_application_position(),
+        (2 * SIMULATION_PLAYBACK_PERIOD) as u64
+    );
+    assert_eq!(
+        shutdown
+            .egress
+            .last_hardware_observation
+            .expect("later playback hardware observation")
+            .frame_position()
+            .get(),
+        SIMULATION_PLAYBACK_PERIOD as u64
+    );
+    assert_eq!(parts.control.state(), BridgeState::Faulted);
+
+    let calls = calls.lock().expect("playback calls");
+    let start = calls
+        .iter()
+        .position(|call| *call == PlaybackWorkerCall::StartPcm)
+        .expect("explicit PCM start");
+    let writes_before_start = calls[..start]
+        .iter()
+        .filter(|call| matches!(call, PlaybackWorkerCall::Write { .. }))
+        .count();
+    assert_eq!(writes_before_start, 3);
+    assert!(matches!(calls.last(), Some(PlaybackWorkerCall::DropStream)));
+}
+
+#[test]
+fn playback_worker_shutdown_cancels_a_finite_wait_without_faulting() {
+    let mut parts = simulation_parts();
+    let positions = reach_playback_filter_delay(&mut parts);
+    let geometry = simulation_playback_geometry();
+    let gate = Arc::new(WaitGate { released: Mutex::new(false), condition: Condvar::new() });
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let pcm = CancellablePlaybackPcm {
+        first_status: Some(playback_worker_status(
+            geometry,
+            positions.graph_time,
+            i64::from(geometry.buffer_frames),
+            alsa::pcm::State::Prepared,
+        )),
+        gate: Arc::clone(&gate),
+        calls: Arc::clone(&calls),
+    };
+    let parked = ParkedPlaybackWorker::new(
+        Box::new(pcm),
+        parts.playback,
+        geometry,
+        WorkerIoPolicy::try_new(1, 2).expect("worker I/O policy"),
+    )
+    .expect("parked playback worker");
+    let mut worker =
+        parked.activate_thread_after_monitor_mix_queued().expect("playback thread activation");
+    assert!(!next_playback_boundary(&mut worker).pcm_started);
+    worker.request_stop();
+    {
+        let mut released = gate.released.lock().expect("wait gate");
+        *released = true;
+        gate.condition.notify_all();
+    }
+    let shutdown = worker.park_and_join().expect("playback worker join");
+    assert_eq!(shutdown.terminal, PlaybackWorkerTerminal::Stopped);
+    assert_eq!(shutdown.drop_stream_result, Ok(()));
+    assert_ne!(parts.control.state(), BridgeState::Faulted);
+    assert_eq!(calls.lock().expect("playback calls").last(), Some(&PlaybackWorkerCall::DropStream));
 }
 
 #[test]
@@ -704,6 +1101,106 @@ fn priming_check_rechecks_published_fifo_sequences() {
 }
 
 #[test]
+fn completed_capture_boundary_spans_gate_accounting_and_publishes_once() {
+    let mut parts = simulation_parts();
+    let mut positions = reach_playback_stabilizing(&mut parts);
+    let mut output = OutputStorage::new();
+    process_graph(
+        &mut parts,
+        &mut positions,
+        SIMULATION_PLAYBACK_PERIOD,
+        GraphSystemInput::unconnected(),
+        &mut output,
+    );
+
+    let application_start = parts.capture_ingress.worker_application_position();
+    positions.capture_hardware += SIMULATION_PLAYBACK_PERIOD as u64;
+    positions.capture_time += scaled_frame_time(SIMULATION_PLAYBACK_PERIOD, 0);
+    let capture_observation =
+        CaptureClockObservation::new(clock(positions.capture_hardware, positions.capture_time));
+    let packed = packed_mono(SIMULATION_PLAYBACK_PERIOD, 0.25);
+    let boundary = parts
+        .capture_ingress
+        .record_completed_read(SIMULATION_PLAYBACK_PERIOD)
+        .expect("completed read enters one capture boundary");
+    assert_eq!(
+        parts.control.shared.capture_in_flight.load(Ordering::SeqCst),
+        1,
+        "completed-read accounting must keep the gate token"
+    );
+
+    let mut submitter = ExactSubmitter::new(SIMULATION_PLAYBACK_PERIOD);
+    let playback_observation = positions.playback_observation();
+    let (release_tx, release_rx) = mpsc::sync_channel(0);
+    let report = thread::scope(|scope| {
+        let capture = scope.spawn(move || {
+            release_rx.recv().expect("release capture publication");
+            boundary.publish(capture_observation, &packed)
+        });
+        let playback = parts
+            .playback
+            .process(playback_observation, &mut submitter)
+            .expect("playback gate observes in-flight capture");
+        assert_eq!(parts.control.state(), BridgeState::PlaybackStabilizing);
+        release_tx.send(()).expect("release retained capture prefix");
+        let capture = capture.join().expect("capture publication thread").expect("capture report");
+        (capture, playback)
+    });
+
+    assert_eq!(report.0.application_start_frame, application_start);
+    assert_eq!(
+        report.0.application_end_frame,
+        application_start + SIMULATION_PLAYBACK_PERIOD as u64
+    );
+    assert_eq!(report.0.frames, SIMULATION_PLAYBACK_PERIOD);
+    assert_eq!(parts.capture_ingress.worker_application_position(), report.0.application_end_frame);
+    assert_eq!(parts.control.shared.capture_in_flight.load(Ordering::SeqCst), 0);
+    assert_eq!(report.1.delivery, PlaybackBoundaryDelivery::SubmittedStabilizing);
+}
+
+#[test]
+fn completed_capture_prefix_retries_accounting_after_priming_check() {
+    let mut parts = simulation_parts();
+    let mut positions = reach_playback_stabilizing(&mut parts);
+    let application_start = parts.capture_ingress.worker_application_position();
+    positions.capture_hardware += SIMULATION_PLAYBACK_PERIOD as u64;
+    positions.capture_time += scaled_frame_time(SIMULATION_PLAYBACK_PERIOD, 0);
+    let bytes = packed_mono(SIMULATION_PLAYBACK_PERIOD, 0.25);
+
+    assert!(
+        parts
+            .control
+            .shared
+            .transition(BridgeState::PlaybackStabilizing, BridgeState::PrimingCheck)
+    );
+    assert!(matches!(
+        parts.capture_ingress.record_completed_read(SIMULATION_PLAYBACK_PERIOD),
+        Err(BridgeError::State { actual: BridgeState::PrimingCheck })
+    ));
+    assert_eq!(parts.capture_ingress.worker_application_position(), application_start);
+    assert!(
+        parts
+            .control
+            .shared
+            .transition(BridgeState::PrimingCheck, BridgeState::PlaybackStabilizing)
+    );
+
+    let boundary = parts
+        .capture_ingress
+        .record_completed_read(SIMULATION_PLAYBACK_PERIOD)
+        .expect("retry retained completed prefix");
+    let report = boundary
+        .publish(
+            CaptureClockObservation::new(clock(positions.capture_hardware, positions.capture_time)),
+            &bytes,
+        )
+        .expect("publish retained prefix once");
+    assert_eq!(report.application_start_frame, application_start);
+    assert_eq!(report.application_end_frame, application_start + SIMULATION_PLAYBACK_PERIOD as u64);
+    assert_eq!(parts.capture_ingress.worker_application_position(), report.application_end_frame);
+}
+
+#[test]
 fn mono_capture_duplication_and_packed_playback_are_deterministic() {
     fn one_run() -> (Vec<f32>, Vec<f32>, Vec<u8>) {
         let mut parts = simulation_parts();
@@ -758,31 +1255,30 @@ fn cross_epoch_repeated_regressing_and_fixed_quantum_observations_fault() {
         ClockFramePosition::new(1),
         MonotonicNanoseconds::new(1),
     );
+    let read = parts.capture_ingress.record_completed_read(1).expect("completed capture read");
     assert!(matches!(
-        parts.capture_ingress.publish(CaptureClockObservation::new(wrong), 1, &packed_mono(1, 0.0)),
+        read.publish(CaptureClockObservation::new(wrong), &packed_mono(1, 0.0)),
         Err(BridgeError::ObservationEpoch { domain: BridgeClockDomain::WaveCapture, .. })
     ));
 
     let mut parts = simulation_parts();
     parts.control.start_capture().expect("start capture");
     let bytes = packed_mono(1, 0.0);
-    parts
-        .capture_ingress
-        .publish(CaptureClockObservation::new(clock(1, 1)), 1, &bytes)
-        .expect("first observation");
+    let read = parts.capture_ingress.record_completed_read(1).expect("completed capture read");
+    read.publish(CaptureClockObservation::new(clock(1, 1)), &bytes).expect("first observation");
+    let read = parts.capture_ingress.record_completed_read(1).expect("completed capture read");
     assert!(matches!(
-        parts.capture_ingress.publish(CaptureClockObservation::new(clock(1, 2)), 1, &bytes),
+        read.publish(CaptureClockObservation::new(clock(1, 2)), &bytes),
         Err(BridgeError::RepeatedClockObservation { domain: BridgeClockDomain::WaveCapture })
     ));
 
     let mut parts = simulation_parts();
     parts.control.start_capture().expect("start capture");
-    parts
-        .capture_ingress
-        .publish(CaptureClockObservation::new(clock(2, 2)), 1, &bytes)
-        .expect("first observation");
+    let read = parts.capture_ingress.record_completed_read(1).expect("completed capture read");
+    read.publish(CaptureClockObservation::new(clock(2, 2)), &bytes).expect("first observation");
+    let read = parts.capture_ingress.record_completed_read(1).expect("completed capture read");
     assert!(matches!(
-        parts.capture_ingress.publish(CaptureClockObservation::new(clock(1, 3)), 1, &bytes),
+        read.publish(CaptureClockObservation::new(clock(1, 3)), &bytes),
         Err(BridgeError::Discontinuity { domain: BridgeClockDomain::WaveCapture, .. })
     ));
 
@@ -975,10 +1471,10 @@ fn fifo_shortage_and_overflow_are_terminal() {
     }
     positions.capture_hardware += 1;
     positions.capture_time += 1;
+    let read = parts.capture_ingress.record_completed_read(1).expect("completed capture read");
     assert!(matches!(
-        parts.capture_ingress.publish(
+        read.publish(
             CaptureClockObservation::new(clock(positions.capture_hardware, positions.capture_time)),
-            1,
             &packed_mono(1, 0.0),
         ),
         Err(BridgeError::Overflow { domain: BridgeClockDomain::WaveCapture, .. })
@@ -1146,7 +1642,10 @@ fn failed_downstream_boundaries_commit_no_controller_fifo_estimator_or_position_
     let submitted = parts.playback.submitted_position;
     assert!(matches!(
         parts.playback.process(positions.playback_observation(), &mut FailingSubmitter),
-        Err(BridgeError::Playback(PlaybackWriteError::Failed))
+        Err(BridgeError::Playback(PlaybackWriteError::Failed {
+            accepted_frames: 0,
+            errno: libc::EIO,
+        }))
     ));
     assert_eq!(
         (parts.playback.controller.integral(), parts.playback.controller.ratio()),
@@ -1168,6 +1667,21 @@ fn failed_downstream_boundaries_commit_no_controller_fifo_estimator_or_position_
             actual_frames
         }) if actual_frames == SIMULATION_PLAYBACK_PERIOD - 1
     ));
+}
+
+#[test]
+fn partial_playback_failure_commits_only_accepted_application_progress() {
+    let mut parts = simulation_parts();
+    let positions = activate(&mut parts);
+    let submitted = parts.playback.submitted_position;
+    let fifo_fill = parts.playback.consumer.available_frames();
+    assert_eq!(
+        parts.playback.process(positions.playback_observation(), &mut PartialFailingSubmitter),
+        Err(BridgeError::Playback(PlaybackWriteError::Xrun { accepted_frames: 17 }))
+    );
+    assert_eq!(parts.playback.submitted_position, submitted + 17);
+    assert_eq!(parts.playback.consumer.available_frames(), fifo_fill);
+    assert_eq!(parts.control.state(), BridgeState::Faulted);
 }
 
 #[test]
@@ -1213,7 +1727,7 @@ fn playback_fifo_rejection_after_graph_processing_commits_no_boundary_state() {
     );
     assert!(matches!(
         parts.playback.graph_observation_reader.peek(),
-        Err(super::observation::ObservationHandoffError::Empty)
+        Err(super::observation::CopySlotError::Empty)
     ));
 
     let mut output = OutputStorage::new();
@@ -1260,7 +1774,7 @@ fn playback_fifo_rejection_after_graph_processing_commits_no_boundary_state() {
     );
     assert!(matches!(
         parts.playback.graph_observation_reader.peek(),
-        Err(super::observation::ObservationHandoffError::Empty)
+        Err(super::observation::CopySlotError::Empty)
     ));
     for buffer in [
         &output.microphone_left,
@@ -1405,6 +1919,37 @@ impl PlaybackPeriodSubmitter for BlockingSubmitter {
         self.release.recv().expect("release submitter");
         Ok(PlaybackSubmissionProgress { frames_submitted: complete_frame_count })
     }
+}
+
+#[test]
+fn admitted_capture_boundary_finishes_during_teardown() {
+    let mut parts = simulation_parts();
+    parts.control.start_capture().expect("start capture priming");
+    let application_start = parts.capture_ingress.worker_application_position();
+    let boundary = parts.capture_ingress.record_completed_read(1).expect("admit capture boundary");
+
+    parts.control.begin_teardown();
+    assert_eq!(parts.control.state(), BridgeState::Quiescing);
+    assert_eq!(
+        parts.control.finish_teardown(),
+        Err(BridgeError::TeardownNotQuiescent { capture: 1, graph: 0, playback: 0 })
+    );
+
+    let report = boundary
+        .publish(
+            CaptureClockObservation::new(clock(application_start + 1, 1)),
+            &packed_mono(1, 0.25),
+        )
+        .expect("admitted capture publication during teardown");
+    assert_eq!(report.application_start_frame, application_start);
+    assert_eq!(report.application_end_frame, application_start + 1);
+    assert_eq!(report.frames, 1);
+    assert_eq!(report.fifo_fill_frames, 1);
+    assert_eq!(parts.capture_ingress.worker_application_position(), application_start + 1);
+    assert_eq!(parts.control.state(), BridgeState::Quiescing);
+
+    parts.control.finish_teardown().expect("capture boundary quiesced");
+    assert_eq!(parts.control.state(), BridgeState::Stopped);
 }
 
 #[test]

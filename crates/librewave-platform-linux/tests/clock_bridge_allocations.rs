@@ -190,14 +190,15 @@ fn exact_callback_reachable_sequence_does_not_allocate_or_deallocate() {
             BridgeState::CapturePriming => {
                 capture_hardware += SIMULATION_CAPTURE_PERIOD as u64;
                 capture_time += frame_time(SIMULATION_CAPTURE_PERIOD);
-                parts
+                let read = parts
                     .capture_ingress
-                    .publish(
-                        CaptureClockObservation::new(observation(capture_hardware, capture_time)),
-                        SIMULATION_CAPTURE_PERIOD,
-                        &capture_period,
-                    )
-                    .expect("capture priming");
+                    .record_completed_read(SIMULATION_CAPTURE_PERIOD)
+                    .expect("completed capture read");
+                read.publish(
+                    CaptureClockObservation::new(observation(capture_hardware, capture_time)),
+                    &capture_period,
+                )
+                .expect("capture priming");
             }
             BridgeState::CaptureFilterDelay
             | BridgeState::CaptureEstimatorPriming
@@ -207,14 +208,15 @@ fn exact_callback_reachable_sequence_does_not_allocate_or_deallocate() {
             | BridgeState::PlaybackStabilizing => {
                 capture_hardware += SIMULATION_GRAPH_QUANTUM as u64;
                 capture_time += frame_time(SIMULATION_GRAPH_QUANTUM);
-                parts
+                let read = parts
                     .capture_ingress
-                    .publish(
-                        CaptureClockObservation::new(observation(capture_hardware, capture_time)),
-                        SIMULATION_GRAPH_QUANTUM,
-                        &capture_quantum,
-                    )
-                    .expect("capture preflight");
+                    .record_completed_read(SIMULATION_GRAPH_QUANTUM)
+                    .expect("completed capture read");
+                read.publish(
+                    CaptureClockObservation::new(observation(capture_hardware, capture_time)),
+                    &capture_quantum,
+                )
+                .expect("capture preflight");
                 parts
                     .graph
                     .process(
@@ -284,11 +286,8 @@ fn exact_callback_reachable_sequence_does_not_allocate_or_deallocate() {
         ClockFramePosition::new(playback_application),
     );
     let (result, operations) = count_operations(|| {
-        parts.capture_ingress.publish(
-            capture_observation,
-            SIMULATION_GRAPH_QUANTUM,
-            &capture_quantum,
-        )?;
+        let read = parts.capture_ingress.record_completed_read(SIMULATION_GRAPH_QUANTUM)?;
+        read.publish(capture_observation, &capture_quantum)?;
         parts.graph.process(
             graph_observation,
             GraphSystemInput::unconnected(),

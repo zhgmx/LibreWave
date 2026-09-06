@@ -18,7 +18,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
-mod observation;
+pub(super) mod observation;
 mod spsc;
 
 pub use observation::{
@@ -26,7 +26,7 @@ pub use observation::{
     PlaybackClockObservation,
 };
 
-use observation::{ObservationPublisher, ObservationReader};
+use observation::{CopySlotPublisher, CopySlotReader};
 use spsc::{
     Consumer, FillObserver, Producer, RingBuildError, RingPeekError, RingPushError,
     RingSequenceError,
@@ -34,7 +34,7 @@ use spsc::{
 
 #[cfg(test)]
 #[path = "clock_bridge/tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 /// One of the three independent frame-position domains.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -268,9 +268,30 @@ impl std::error::Error for BridgeControlError {}
 /// Stable playback-submission failure classes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlaybackWriteError {
-    XrunRecoveryFailed,
-    Disconnected,
-    Failed,
+    AgainRetryLimit { accepted_frames: usize },
+    InterruptedRetryLimit { accepted_frames: usize },
+    Xrun { accepted_frames: usize },
+    Suspended { accepted_frames: usize },
+    Disconnected { accepted_frames: usize },
+    Stopped { accepted_frames: usize },
+    InvalidProgress { accepted_frames: usize },
+    Failed { accepted_frames: usize, errno: i32 },
+}
+
+impl PlaybackWriteError {
+    #[must_use]
+    pub const fn accepted_frames(self) -> usize {
+        match self {
+            Self::AgainRetryLimit { accepted_frames }
+            | Self::InterruptedRetryLimit { accepted_frames }
+            | Self::Xrun { accepted_frames }
+            | Self::Suspended { accepted_frames }
+            | Self::Disconnected { accepted_frames }
+            | Self::Stopped { accepted_frames }
+            | Self::InvalidProgress { accepted_frames }
+            | Self::Failed { accepted_frames, .. } => accepted_frames,
+        }
+    }
 }
 
 /// Playback application progress reported after one worker submission.
@@ -400,6 +421,10 @@ pub enum BridgeError {
         expected: u64,
         actual: u64,
     },
+    CaptureApplicationPosition {
+        expected: u64,
+        actual: u64,
+    },
     PlaybackHardwareAhead {
         hardware: u64,
         application: u64,
@@ -513,6 +538,10 @@ impl ClockBridgeControl {
     #[must_use]
     pub fn state(&self) -> BridgeState {
         self.shared.state()
+    }
+
+    pub(super) fn worker_attempt_epoch(&self) -> ClockAttemptEpoch {
+        self.shared.attempt_epoch
     }
 
     /// Starts the capture-first priming sequence.
@@ -749,9 +778,9 @@ impl ClockBridgeParts {
             spsc::channel::<WAVE3_PLAYBACK_CHANNELS>(config.playback.fifo_capacity_frames)
                 .map_err(map_ring_build)?;
         let (capture_observation_publisher, capture_observation_reader) =
-            observation::channel::<CaptureClockObservation>();
+            observation::copy_slot::<CaptureClockObservation>();
         let (graph_observation_publisher, graph_observation_reader) =
-            observation::channel::<GraphClockObservation>();
+            observation::copy_slot::<GraphClockObservation>();
         let source_ids =
             [profile.sources[0].controls.source(), profile.sources[1].controls.source()];
         let mixer_config = MixerConfig::try_new(
@@ -897,7 +926,7 @@ pub struct CaptureIngress {
     maximum_frames: usize,
     application_position: u64,
     last_observation: Option<ClockObservation>,
-    observation_publisher: ObservationPublisher<CaptureClockObservation>,
+    observation_publisher: CopySlotPublisher<CaptureClockObservation>,
     shared: Arc<SharedAttempt>,
 }
 
@@ -919,26 +948,181 @@ pub struct CapturePublishReport {
     pub observation_publication: ObservationPublication,
 }
 
-impl CaptureIngress {
-    /// Publishes one complete capture-domain block without waiting.
+/// One in-flight capture boundary from completed-read accounting through publication.
+pub struct CaptureReadBoundary<'a> {
+    ingress: &'a mut CaptureIngress,
+    application_start_frame: u64,
+    application_end_frame: u64,
+    frames: usize,
+}
+
+impl fmt::Debug for CaptureReadBoundary<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CaptureReadBoundary")
+            .field("application_start_frame", &self.application_start_frame)
+            .field("application_end_frame", &self.application_end_frame)
+            .field("frames", &self.frames)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CaptureReadBoundary<'_> {
+    /// Returns the attempt epoch used by the status validator.
+    #[must_use]
+    pub fn attempt_epoch(&self) -> ClockAttemptEpoch {
+        self.ingress.shared.attempt_epoch
+    }
+
+    /// Returns the application position immediately after the completed read.
+    #[must_use]
+    pub const fn application_end_frame(&self) -> u64 {
+        self.application_end_frame
+    }
+
+    /// Publishes the complete captured prefix and ends this capture boundary.
     ///
     /// # Errors
     ///
-    /// Returns a state error before work starts, or a terminal error for
-    /// geometry, position, packed data, non-finite samples, or insufficient
-    /// FIFO capacity.
+    /// Returns a terminal error for geometry, position, packed data,
+    /// non-finite samples, or insufficient FIFO capacity.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "consuming the boundary prevents duplicate capture publication"
+    )]
     pub fn publish(
-        &mut self,
+        self,
         observation: CaptureClockObservation,
-        complete_frame_count: usize,
         packed_s24_3le: &[u8],
     ) -> Result<CapturePublishReport, BridgeError> {
-        let _activity = ActivityGuard::enter(&self.shared.capture_in_flight);
-        let state = attempt_state(&self.shared)?;
-        if state == BridgeState::Allocated {
+        let application_start_frame = self.application_start_frame;
+        let application_end_frame = self.application_end_frame;
+        let frames = self.frames;
+        let ingress = &mut *self.ingress;
+        if application_end_frame != ingress.application_position {
+            return fault(
+                &ingress.shared,
+                BridgeError::CaptureApplicationPosition {
+                    expected: ingress.application_position,
+                    actual: application_end_frame,
+                },
+            );
+        }
+        let clock = observation.clock();
+        validate_observation_epoch(&ingress.shared, BridgeClockDomain::WaveCapture, clock)
+            .map_err(|error| mark_fault(&ingress.shared, error))?;
+        validate_clock_progress(
+            BridgeClockDomain::WaveCapture,
+            ingress.last_observation,
+            clock,
+            true,
+        )
+        .map_err(|error| mark_fault(&ingress.shared, error))?;
+        let hardware_frame_position = clock.frame_position().get();
+        if hardware_frame_position < application_end_frame {
+            return fault(
+                &ingress.shared,
+                BridgeError::CaptureHardwareBehindApplication {
+                    hardware: hardware_frame_position,
+                    application: application_end_frame,
+                },
+            );
+        }
+        let encoded_frames = packed_frame_count(packed_s24_3le.len(), WAVE3_CAPTURE_CHANNELS)
+            .map_err(|error| mark_fault(&ingress.shared, BridgeError::Packed(error)))?;
+        if encoded_frames != frames {
+            return fault(
+                &ingress.shared,
+                BridgeError::FrameCountMismatch {
+                    domain: BridgeClockDomain::WaveCapture,
+                    declared: frames,
+                    encoded: encoded_frames,
+                },
+            );
+        }
+        decode_s24_3le(packed_s24_3le, WAVE3_CAPTURE_CHANNELS, &mut ingress.decode[..frames])
+            .map_err(|error| mark_fault(&ingress.shared, BridgeError::Packed(error)))?;
+        let fifo_step =
+            ingress.producer.prepare_push(&ingress.decode[..frames]).map_err(|error| {
+                mark_fault(&ingress.shared, map_push(error, BridgeClockDomain::WaveCapture))
+            })?;
+        let fill = fifo_step.fill_after_commit();
+        let observation_step = ingress.observation_publisher.prepare_publish(observation).ok();
+
+        fifo_step.commit();
+        let observation_publication = if let Some(step) = observation_step {
+            step.commit();
+            ObservationPublication::Published
+        } else {
+            ObservationPublication::NotPublishedHandoffFull
+        };
+        ingress.last_observation = Some(clock);
+        if ingress.shared.state() == BridgeState::CapturePriming
+            && fill >= ingress.shared.capture_target
+        {
+            let _ = ingress
+                .shared
+                .transition(BridgeState::CapturePriming, BridgeState::CaptureFilterDelay);
+        }
+        Ok(CapturePublishReport {
+            application_start_frame,
+            application_end_frame,
+            hardware_frame_position,
+            frames,
+            fifo_fill_frames: fill,
+            observation_publication,
+        })
+    }
+}
+
+impl Drop for CaptureReadBoundary<'_> {
+    fn drop(&mut self) {
+        self.ingress.shared.capture_in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl CaptureIngress {
+    pub(super) fn worker_attempt_epoch(&self) -> ClockAttemptEpoch {
+        self.shared.attempt_epoch
+    }
+
+    #[cfg(test)]
+    pub(super) const fn worker_application_position(&self) -> u64 {
+        self.application_position
+    }
+
+    pub(super) fn worker_fault(&self) {
+        self.shared.fault();
+    }
+
+    pub(super) fn worker_state(&self) -> BridgeState {
+        self.shared.state()
+    }
+
+    /// Records one completed ALSA read before its status sample is obtained.
+    ///
+    /// # Errors
+    ///
+    /// Returns a state error, an invalid frame count, or checked position
+    /// overflow. A terminal validation error faults the bridge attempt.
+    pub fn record_completed_read(
+        &mut self,
+        complete_frame_count: usize,
+    ) -> Result<CaptureReadBoundary<'_>, BridgeError> {
+        self.shared.capture_in_flight.fetch_add(1, Ordering::SeqCst);
+        let state = match attempt_state(&self.shared) {
+            Ok(state) => state,
+            Err(error) => {
+                self.shared.capture_in_flight.fetch_sub(1, Ordering::SeqCst);
+                return Err(error);
+            }
+        };
+        if matches!(state, BridgeState::Allocated | BridgeState::Primed) {
+            self.shared.capture_in_flight.fetch_sub(1, Ordering::SeqCst);
             return Err(BridgeError::State { actual: state });
         }
         if complete_frame_count == 0 || complete_frame_count > self.maximum_frames {
+            self.shared.capture_in_flight.fetch_sub(1, Ordering::SeqCst);
             return fault(
                 &self.shared,
                 BridgeError::FrameCount {
@@ -948,75 +1132,24 @@ impl CaptureIngress {
                 },
             );
         }
-        let clock = observation.clock();
-        validate_observation_epoch(&self.shared, BridgeClockDomain::WaveCapture, clock)
-            .map_err(|error| mark_fault(&self.shared, error))?;
-        validate_clock_progress(BridgeClockDomain::WaveCapture, self.last_observation, clock, true)
-            .map_err(|error| mark_fault(&self.shared, error))?;
         let application_start_frame = self.application_position;
-        let application_end_frame = checked_end(
+        let application_end_frame = match checked_end(
             BridgeClockDomain::WaveCapture,
             application_start_frame,
             complete_frame_count,
-        )
-        .map_err(|error| mark_fault(&self.shared, error))?;
-        let hardware_frame_position = clock.frame_position().get();
-        if hardware_frame_position < application_end_frame {
-            return fault(
-                &self.shared,
-                BridgeError::CaptureHardwareBehindApplication {
-                    hardware: hardware_frame_position,
-                    application: application_end_frame,
-                },
-            );
-        }
-        let encoded_frames = packed_frame_count(packed_s24_3le.len(), WAVE3_CAPTURE_CHANNELS)
-            .map_err(|error| mark_fault(&self.shared, BridgeError::Packed(error)))?;
-        if encoded_frames != complete_frame_count {
-            return fault(
-                &self.shared,
-                BridgeError::FrameCountMismatch {
-                    domain: BridgeClockDomain::WaveCapture,
-                    declared: complete_frame_count,
-                    encoded: encoded_frames,
-                },
-            );
-        }
-        decode_s24_3le(
-            packed_s24_3le,
-            WAVE3_CAPTURE_CHANNELS,
-            &mut self.decode[..complete_frame_count],
-        )
-        .map_err(|error| mark_fault(&self.shared, BridgeError::Packed(error)))?;
-        let fifo_step =
-            self.producer.prepare_push(&self.decode[..complete_frame_count]).map_err(|error| {
-                mark_fault(&self.shared, map_push(error, BridgeClockDomain::WaveCapture))
-            })?;
-        let fill = fifo_step.fill_after_commit();
-        let observation_step = self.observation_publisher.prepare_publish(observation).ok();
-
-        fifo_step.commit();
-        let observation_publication = if let Some(step) = observation_step {
-            step.commit();
-            ObservationPublication::Published
-        } else {
-            ObservationPublication::NotPublishedHandoffFull
+        ) {
+            Ok(position) => position,
+            Err(error) => {
+                self.shared.capture_in_flight.fetch_sub(1, Ordering::SeqCst);
+                return Err(mark_fault(&self.shared, error));
+            }
         };
         self.application_position = application_end_frame;
-        self.last_observation = Some(clock);
-        if self.shared.state() == BridgeState::CapturePriming && fill >= self.shared.capture_target
-        {
-            let _ = self
-                .shared
-                .transition(BridgeState::CapturePriming, BridgeState::CaptureFilterDelay);
-        }
-        Ok(CapturePublishReport {
+        Ok(CaptureReadBoundary {
+            ingress: self,
             application_start_frame,
             application_end_frame,
-            hardware_frame_position,
             frames: complete_frame_count,
-            fifo_fill_frames: fill,
-            observation_publication,
         })
     }
 }
@@ -1085,8 +1218,8 @@ pub enum GraphBoundaryDelivery {
 pub struct GraphClockProcessor {
     capture_consumer: Consumer<WAVE3_CAPTURE_CHANNELS>,
     playback_producer: Producer<WAVE3_PLAYBACK_CHANNELS>,
-    capture_observation_reader: ObservationReader<CaptureClockObservation>,
-    graph_observation_publisher: ObservationPublisher<GraphClockObservation>,
+    capture_observation_reader: CopySlotReader<CaptureClockObservation>,
+    graph_observation_publisher: CopySlotPublisher<GraphClockObservation>,
     capture_estimator: ClockRateEstimator,
     capture_matcher: RateMatcher,
     capture_controller: RateMatchController,
@@ -1507,7 +1640,7 @@ pub enum PlaybackBoundaryDelivery {
 pub struct PlaybackEgress {
     consumer: Consumer<WAVE3_PLAYBACK_CHANNELS>,
     capture_fill_observer: FillObserver<WAVE3_CAPTURE_CHANNELS>,
-    graph_observation_reader: ObservationReader<GraphClockObservation>,
+    graph_observation_reader: CopySlotReader<GraphClockObservation>,
     estimator: ClockRateEstimator,
     matcher: RateMatcher,
     controller: RateMatchController,
@@ -1532,6 +1665,22 @@ impl fmt::Debug for PlaybackEgress {
 }
 
 impl PlaybackEgress {
+    pub(super) fn worker_attempt_epoch(&self) -> ClockAttemptEpoch {
+        self.shared.attempt_epoch
+    }
+
+    pub(super) const fn worker_application_position(&self) -> u64 {
+        self.submitted_position
+    }
+
+    pub(super) fn worker_fault(&self) {
+        self.shared.fault();
+    }
+
+    pub(super) fn worker_state(&self) -> BridgeState {
+        self.shared.state()
+    }
+
     /// Processes one observed playback boundary according to attempt state.
     ///
     /// # Errors
@@ -1690,10 +1839,31 @@ impl PlaybackEgress {
         encode_s24_3le(&self.output, WAVE3_PLAYBACK_CHANNELS, &mut self.encoded)
             .map_err(|error| mark_fault(&self.shared, BridgeError::Packed(error)))?;
         if submits_period {
-            let progress = submitter
-                .submit_packed_s24_3le(self.period_frames, &self.encoded)
-                .map_err(|error| mark_fault(&self.shared, BridgeError::Playback(error)))?;
+            let progress = match submitter.submit_packed_s24_3le(self.period_frames, &self.encoded)
+            {
+                Ok(progress) => progress,
+                Err(error) => {
+                    let accepted_position = accepted_application_position(
+                        application_start_frame,
+                        error.accepted_frames(),
+                        self.period_frames,
+                    )
+                    .map_err(|error| mark_fault(&self.shared, error))?;
+                    self.submitted_position = accepted_position;
+                    if matches!(error, PlaybackWriteError::Stopped { accepted_frames: 0 }) {
+                        return Err(BridgeError::Playback(error));
+                    }
+                    return Err(mark_fault(&self.shared, BridgeError::Playback(error)));
+                }
+            };
             if progress.frames_submitted != self.period_frames {
+                let accepted_position = accepted_application_position(
+                    application_start_frame,
+                    progress.frames_submitted,
+                    self.period_frames,
+                )
+                .map_err(|error| mark_fault(&self.shared, error))?;
+                self.submitted_position = accepted_position;
                 return fault(
                     &self.shared,
                     BridgeError::PlaybackSubmission {
@@ -1757,6 +1927,20 @@ impl PlaybackEgress {
             delivery: playback_delivery(state),
         })
     }
+}
+
+fn accepted_application_position(
+    application_start_frame: u64,
+    accepted_frames: usize,
+    period_frames: usize,
+) -> Result<u64, BridgeError> {
+    if accepted_frames > period_frames {
+        return Err(BridgeError::PlaybackSubmission {
+            expected_frames: period_frames,
+            actual_frames: accepted_frames,
+        });
+    }
+    checked_end(BridgeClockDomain::WavePlayback, application_start_frame, accepted_frames)
 }
 
 fn prepare_priming_gate(

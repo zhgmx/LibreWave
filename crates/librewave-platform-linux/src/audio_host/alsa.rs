@@ -1,18 +1,15 @@
 //! Safe ALSA card selection, PCM configuration, and direct I/O.
 
 use super::pcm::PhysicalPcmParameters;
-use super::{
-    AlsaFacade, CapturePcm, CaptureRead, LinuxAudioError, PcmDirection, PlaybackPcm,
-    Wave3PhysicalIoConfig,
-};
+use super::worker::{CapturePcm, PcmIoError, PcmStatusSnapshot, PcmWait, PlaybackPcm};
+use super::{AlsaFacade, LinuxAudioError, PcmDirection, Wave3PhysicalIoConfig};
 use crate::{
     AlsaCardInfo, DeviceIdentity, DiscoveryPaths, LinuxInventory, UsbDeviceCandidate, UsbTopology,
     WAVE3_USB,
 };
 use alsa::ctl::{Ctl, DeviceIter};
-use alsa::pcm::{Access, Format, HwParams, PCM, State};
+use alsa::pcm::{Access, Format, HwParams, PCM, TstampType};
 use alsa::{Direction, ValueOr};
-const ALSA_WAIT_MILLIS: u32 = 100;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct SelectedPcmCard {
@@ -137,7 +134,6 @@ impl RealAlsaFacade {
         if info.get_card() != i32::try_from(selected.card_number).unwrap_or(-1)
             || info.get_device() != device
             || info.get_subdevice() != 0
-            || info.get_stream() != direction
         {
             return Err(LinuxAudioError::AlsaCardChanged);
         }
@@ -180,15 +176,17 @@ impl AlsaFacade for RealAlsaFacade {
         })
     }
 
-    fn start_capture(
+    fn open_capture(
         &mut self,
         candidate: &UsbDeviceCandidate,
         selected: &SelectedPcmCard,
     ) -> Result<Box<dyn CapturePcm>, LinuxAudioError> {
         self.revalidate_selection(candidate, selected)?;
         let pcm = self.open_pcm(selected, selected.capture_device, Direction::Capture)?;
-        pcm.start().map_err(|error| LinuxAudioError::Alsa(error.to_string()))?;
-        Ok(Box::new(RealCapturePcm { pcm }))
+        Ok(Box::new(RealCapturePcm {
+            pcm,
+            geometry: self.config.parameters(PcmDirection::Capture),
+        }))
     }
 
     fn open_playback(
@@ -198,7 +196,10 @@ impl AlsaFacade for RealAlsaFacade {
     ) -> Result<Box<dyn PlaybackPcm>, LinuxAudioError> {
         self.revalidate_selection(candidate, selected)?;
         let pcm = self.open_pcm(selected, selected.playback_device, Direction::Playback)?;
-        Ok(Box::new(RealPlaybackPcm { pcm }))
+        Ok(Box::new(RealPlaybackPcm {
+            pcm,
+            geometry: self.config.parameters(PcmDirection::Playback),
+        }))
     }
 }
 
@@ -223,6 +224,30 @@ fn configure_pcm(pcm: &PCM, config: PhysicalPcmParameters) -> Result<(), LinuxAu
         && applied.get_period_size() == Ok(config.period_frames.into())
         && applied.get_buffer_size() == Ok(config.buffer_frames.into());
     validate_applied_pcm(config.direction, packed_format, exact_geometry)?;
+    let software =
+        pcm.sw_params_current().map_err(|error| LinuxAudioError::Alsa(error.to_string()))?;
+    software
+        .set_tstamp_mode(true)
+        .and_then(|()| software.set_tstamp_type(TstampType::Monotonic))
+        .map_err(|error| LinuxAudioError::Alsa(error.to_string()))?;
+    let playback_start_threshold = if config.direction == PcmDirection::Playback {
+        let boundary =
+            software.get_boundary().map_err(|error| LinuxAudioError::Alsa(error.to_string()))?;
+        software
+            .set_start_threshold(boundary)
+            .map_err(|error| LinuxAudioError::Alsa(error.to_string()))?;
+        Some(boundary)
+    } else {
+        None
+    };
+    pcm.sw_params(&software).map_err(|error| LinuxAudioError::Alsa(error.to_string()))?;
+    let applied_software =
+        pcm.sw_params_current().map_err(|error| LinuxAudioError::Alsa(error.to_string()))?;
+    let timestamp_exact = applied_software.get_tstamp_mode() == Ok(true)
+        && applied_software.get_tstamp_type() == Ok(TstampType::Monotonic);
+    let start_threshold_exact = playback_start_threshold
+        .is_none_or(|expected| applied_software.get_start_threshold() == Ok(expected));
+    validate_applied_software(config.direction, timestamp_exact, start_threshold_exact)?;
     pcm.prepare().map_err(|error| LinuxAudioError::Alsa(error.to_string()))
 }
 
@@ -240,61 +265,115 @@ pub(super) fn validate_applied_pcm(
     Ok(())
 }
 
+pub(super) fn validate_applied_software(
+    direction: PcmDirection,
+    timestamp_exact: bool,
+    start_threshold_exact: bool,
+) -> Result<(), LinuxAudioError> {
+    if !timestamp_exact {
+        return Err(LinuxAudioError::PcmTimestampConfigurationAdjusted { direction });
+    }
+    if !start_threshold_exact {
+        return Err(LinuxAudioError::PlaybackStartThresholdAdjusted);
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct RealCapturePcm {
     pcm: PCM,
+    geometry: PhysicalPcmParameters,
 }
 
 impl CapturePcm for RealCapturePcm {
-    fn read_frames(&mut self, bytes: &mut [u8]) -> CaptureRead {
-        match self.pcm.wait(Some(ALSA_WAIT_MILLIS)) {
-            Ok(false) => CaptureRead::WouldBlock,
-            Err(error) => classify_alsa_read_error(&self.pcm, error),
-            Ok(true) => match self.pcm.io_bytes().readi(bytes) {
-                Ok(frames) => CaptureRead::Frames(u64::try_from(frames).unwrap_or(u64::MAX)),
-                Err(error) => classify_alsa_read_error(&self.pcm, error),
-            },
-        }
+    fn start_pcm(&mut self) -> Result<(), PcmIoError> {
+        self.pcm.start().map_err(classify_alsa_error)
     }
-}
 
-fn classify_alsa_read_error(pcm: &PCM, error: alsa::Error) -> CaptureRead {
-    match error.errno() {
-        libc::EAGAIN | libc::EINTR => CaptureRead::WouldBlock,
-        libc::EPIPE | libc::ESTRPIPE => match pcm.try_recover(error, true) {
-            Ok(()) => finish_alsa_recovery(pcm),
-            Err(recovery) if matches!(recovery.errno(), libc::ENODEV | libc::ENXIO) => {
-                CaptureRead::Disconnected
-            }
-            Err(_) => CaptureRead::Failed,
-        },
-        libc::ENODEV | libc::ENXIO => CaptureRead::Disconnected,
-        _ => CaptureRead::Failed,
+    fn wait(&mut self, timeout_millis: u32) -> Result<PcmWait, PcmIoError> {
+        self.pcm
+            .wait(Some(timeout_millis))
+            .map(|ready| if ready { PcmWait::Ready } else { PcmWait::TimedOut })
+            .map_err(classify_alsa_error)
     }
-}
 
-fn finish_alsa_recovery(pcm: &PCM) -> CaptureRead {
-    match pcm.state_raw() {
-        state if state == State::Prepared as i32 => match pcm.start() {
-            Ok(()) => CaptureRead::RecoveredXrun,
-            Err(error) if matches!(error.errno(), libc::ENODEV | libc::ENXIO) => {
-                CaptureRead::Disconnected
-            }
-            Err(_) => CaptureRead::Failed,
-        },
-        state if state == State::Running as i32 => CaptureRead::RecoveredXrun,
-        state if state == State::Disconnected as i32 => CaptureRead::Disconnected,
-        _ => CaptureRead::Failed,
+    fn read_frames(&mut self, bytes: &mut [u8]) -> Result<usize, PcmIoError> {
+        self.pcm.io_bytes().readi(bytes).map_err(classify_alsa_error)
+    }
+
+    fn status(&mut self) -> Result<PcmStatusSnapshot, PcmIoError> {
+        pcm_status(&self.pcm, self.geometry)
+    }
+
+    fn drop_stream(&mut self) -> Result<(), PcmIoError> {
+        self.pcm.drop().map_err(classify_alsa_error)
     }
 }
 
 #[derive(Debug)]
 struct RealPlaybackPcm {
     pcm: PCM,
+    geometry: PhysicalPcmParameters,
 }
 
 impl PlaybackPcm for RealPlaybackPcm {
-    fn close(&mut self) -> Result<(), LinuxAudioError> {
-        self.pcm.drop().map_err(|error| LinuxAudioError::Alsa(error.to_string()))
+    fn wait(&mut self, timeout_millis: u32) -> Result<PcmWait, PcmIoError> {
+        self.pcm
+            .wait(Some(timeout_millis))
+            .map(|ready| if ready { PcmWait::Ready } else { PcmWait::TimedOut })
+            .map_err(classify_alsa_error)
+    }
+
+    fn write_frames(&mut self, bytes: &[u8]) -> Result<usize, PcmIoError> {
+        self.pcm.io_bytes().writei(bytes).map_err(classify_alsa_error)
+    }
+
+    fn status(&mut self) -> Result<PcmStatusSnapshot, PcmIoError> {
+        pcm_status(&self.pcm, self.geometry)
+    }
+
+    fn start_pcm(&mut self) -> Result<(), PcmIoError> {
+        self.pcm.start().map_err(classify_alsa_error)
+    }
+
+    fn drop_stream(&mut self) -> Result<(), PcmIoError> {
+        self.pcm.drop().map_err(classify_alsa_error)
+    }
+}
+
+fn pcm_status(pcm: &PCM, geometry: PhysicalPcmParameters) -> Result<PcmStatusSnapshot, PcmIoError> {
+    let status = pcm.status().map_err(classify_alsa_error)?;
+    let timestamp = status.get_htstamp();
+    let available_frames = status.get_avail();
+    let delay_frames = status.get_delay();
+    // alsa 0.12.1 unwraps inside Status::get_state. The separate raw state
+    // sample keeps invalid state values on the checked error path. ALSA can
+    // advance between these calls, so the state gate has a small sampling skew.
+    let state_raw = pcm.state_raw();
+    Ok(PcmStatusSnapshot {
+        timestamp_seconds: checked_i64(timestamp.tv_sec)?,
+        timestamp_nanoseconds: checked_i64(timestamp.tv_nsec)?,
+        available_frames: checked_i64(available_frames)?,
+        delay_frames: checked_i64(delay_frames)?,
+        state_raw,
+        geometry,
+    })
+}
+
+fn checked_i64<T>(value: T) -> Result<i64, PcmIoError>
+where
+    i64: TryFrom<T>,
+{
+    i64::try_from(value).map_err(|_| PcmIoError::Failed { errno: libc::EOVERFLOW })
+}
+
+fn classify_alsa_error(error: alsa::Error) -> PcmIoError {
+    match error.errno() {
+        libc::EAGAIN => PcmIoError::Again,
+        libc::EINTR => PcmIoError::Interrupted,
+        libc::EPIPE => PcmIoError::Xrun,
+        libc::ESTRPIPE => PcmIoError::Suspended,
+        libc::ENODEV | libc::ENXIO => PcmIoError::Disconnected,
+        errno => PcmIoError::Failed { errno },
     }
 }

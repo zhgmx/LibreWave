@@ -1,6 +1,6 @@
 //! `PipeWire` core ownership and physical-object inspection.
 
-use super::{EndpointPlan, LinuxAudioError, PipeWireFacade};
+use super::{LinuxAudioError, PipeWireFacade};
 use crate::{UsbDeviceCandidate, WAVE3_USB};
 use pipewire as pw;
 use pw::types::ObjectType;
@@ -93,13 +93,6 @@ impl PipeWireFacade for RealPipeWireFacade {
             .ok_or_else(|| LinuxAudioError::PipeWire("connection disappeared".to_owned()))?
             .physical_object_visible(card.number)?;
         if exposed { Err(LinuxAudioError::PhysicalNodeExposed) } else { Ok(()) }
-    }
-
-    fn publish_endpoints(&mut self, plans: &[EndpointPlan]) -> Result<(), LinuxAudioError> {
-        if plans.is_empty() {
-            return Ok(());
-        }
-        Err(LinuxAudioError::EndpointStreamTransportUnavailable)
     }
 
     fn disconnect(&mut self) -> Result<(), LinuxAudioError> {

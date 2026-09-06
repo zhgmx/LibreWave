@@ -103,40 +103,45 @@ impl PlaybackClockObservation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ObservationHandoffError {
+pub(in crate::audio_host) enum CopySlotError {
     Full,
     Empty,
 }
 
-pub(super) struct ObservationPublisher<T: Copy> {
-    shared: Arc<ObservationSlot<T>>,
+pub(in crate::audio_host) struct CopySlotPublisher<T: Copy> {
+    shared: Arc<CopySlot<T>>,
 }
 
-impl<T: Copy> fmt::Debug for ObservationPublisher<T> {
+impl<T: Copy> fmt::Debug for CopySlotPublisher<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ObservationPublisher")
+        formatter.write_str("CopySlotPublisher")
     }
 }
 
-impl<T: Copy> ObservationPublisher<T> {
-    pub(super) fn prepare_publish(
+impl<T: Copy> CopySlotPublisher<T> {
+    pub(in crate::audio_host) fn prepare_publish(
         &mut self,
         value: T,
-    ) -> Result<PreparedObservationPublish<'_, T>, ObservationHandoffError> {
+    ) -> Result<PreparedCopySlotPublish<'_, T>, CopySlotError> {
         if self.shared.state.load(Ordering::Acquire) != EMPTY {
-            return Err(ObservationHandoffError::Full);
+            return Err(CopySlotError::Full);
         }
-        Ok(PreparedObservationPublish { publisher: self, value })
+        Ok(PreparedCopySlotPublish { publisher: self, value })
+    }
+
+    pub(in crate::audio_host) fn try_publish(&mut self, value: T) -> Result<(), CopySlotError> {
+        self.prepare_publish(value)?.commit();
+        Ok(())
     }
 }
 
-pub(super) struct PreparedObservationPublish<'a, T: Copy> {
-    publisher: &'a mut ObservationPublisher<T>,
+pub(in crate::audio_host) struct PreparedCopySlotPublish<'a, T: Copy> {
+    publisher: &'a mut CopySlotPublisher<T>,
     value: T,
 }
 
-impl<T: Copy> PreparedObservationPublish<'_, T> {
-    pub(super) fn commit(self) {
+impl<T: Copy> PreparedCopySlotPublish<'_, T> {
+    pub(in crate::audio_host) fn commit(self) {
         // SAFETY: there is one publisher and EMPTY proves that the reader does
         // not own this slot. Release publication happens after the copy.
         unsafe {
@@ -146,55 +151,62 @@ impl<T: Copy> PreparedObservationPublish<'_, T> {
     }
 }
 
-pub(super) struct ObservationReader<T: Copy> {
-    shared: Arc<ObservationSlot<T>>,
+pub(in crate::audio_host) struct CopySlotReader<T: Copy> {
+    shared: Arc<CopySlot<T>>,
 }
 
-impl<T: Copy> ObservationReader<T> {
-    pub(super) fn peek(
+impl<T: Copy> CopySlotReader<T> {
+    pub(in crate::audio_host) fn peek(
         &mut self,
-    ) -> Result<PreparedObservationRead<'_, T>, ObservationHandoffError> {
+    ) -> Result<PreparedCopySlotRead<'_, T>, CopySlotError> {
         if self.shared.state.load(Ordering::Acquire) != FULL {
-            return Err(ObservationHandoffError::Empty);
+            return Err(CopySlotError::Empty);
         }
         // SAFETY: the acquired FULL state proves that the publisher completed
         // the only write, and it cannot write again until this reader commits.
         let value = unsafe { (*self.shared.value.get()).assume_init_read() };
-        Ok(PreparedObservationRead { reader: self, value })
+        Ok(PreparedCopySlotRead { reader: self, value })
+    }
+
+    pub(in crate::audio_host) fn try_take(&mut self) -> Result<T, CopySlotError> {
+        let read = self.peek()?;
+        let value = read.value();
+        read.commit();
+        Ok(value)
     }
 }
 
-pub(super) struct PreparedObservationRead<'a, T: Copy> {
-    reader: &'a mut ObservationReader<T>,
+pub(in crate::audio_host) struct PreparedCopySlotRead<'a, T: Copy> {
+    reader: &'a mut CopySlotReader<T>,
     value: T,
 }
 
-impl<T: Copy> PreparedObservationRead<'_, T> {
-    pub(super) const fn value(&self) -> T {
+impl<T: Copy> PreparedCopySlotRead<'_, T> {
+    pub(in crate::audio_host) const fn value(&self) -> T {
         self.value
     }
 
-    pub(super) fn commit(self) {
+    pub(in crate::audio_host) fn commit(self) {
         self.reader.shared.state.store(EMPTY, Ordering::Release);
     }
 }
 
-pub(super) fn channel<T: Copy>() -> (ObservationPublisher<T>, ObservationReader<T>) {
-    let shared = Arc::new(ObservationSlot {
+pub(in crate::audio_host) fn copy_slot<T: Copy>() -> (CopySlotPublisher<T>, CopySlotReader<T>) {
+    let shared = Arc::new(CopySlot {
         value: UnsafeCell::new(MaybeUninit::uninit()),
         state: AtomicU8::new(EMPTY),
     });
-    (ObservationPublisher { shared: Arc::clone(&shared) }, ObservationReader { shared })
+    (CopySlotPublisher { shared: Arc::clone(&shared) }, CopySlotReader { shared })
 }
 
-struct ObservationSlot<T: Copy> {
+struct CopySlot<T: Copy> {
     value: UnsafeCell<MaybeUninit<T>>,
     state: AtomicU8,
 }
 
 // SAFETY: the slot has exactly one publisher and one reader. Release/acquire
 // state publication transfers access to the single `Copy` value.
-unsafe impl<T: Copy + Send> Sync for ObservationSlot<T> {}
+unsafe impl<T: Copy + Send> Sync for CopySlot<T> {}
 
 #[cfg(test)]
 mod tests {
@@ -203,19 +215,30 @@ mod tests {
     #[test]
     #[allow(clippy::drop_non_drop)]
     fn publication_and_consumption_are_transactional_and_do_not_overwrite() {
-        let (mut publisher, mut reader) = channel::<u64>();
+        let (mut publisher, mut reader) = copy_slot::<u64>();
         drop(publisher.prepare_publish(1).expect("first preview"));
-        assert!(matches!(reader.peek(), Err(ObservationHandoffError::Empty)));
+        assert!(matches!(reader.peek(), Err(CopySlotError::Empty)));
 
         publisher.prepare_publish(2).expect("second preview").commit();
-        assert!(matches!(publisher.prepare_publish(3), Err(ObservationHandoffError::Full)));
+        assert!(matches!(publisher.prepare_publish(3), Err(CopySlotError::Full)));
         let read = reader.peek().expect("published value");
         assert_eq!(read.value(), 2);
         drop(read);
-        assert!(matches!(publisher.prepare_publish(3), Err(ObservationHandoffError::Full)));
+        assert!(matches!(publisher.prepare_publish(3), Err(CopySlotError::Full)));
 
         reader.peek().expect("same published value").commit();
         publisher.prepare_publish(3).expect("slot released").commit();
         assert_eq!(reader.peek().expect("next value").value(), 3);
+    }
+
+    #[test]
+    fn direct_publication_drops_new_values_while_full() {
+        let (mut publisher, mut reader) = copy_slot::<u64>();
+        publisher.try_publish(7).expect("empty slot");
+        assert_eq!(publisher.try_publish(8), Err(CopySlotError::Full));
+        assert_eq!(reader.try_take(), Ok(7));
+        assert_eq!(reader.try_take(), Err(CopySlotError::Empty));
+        publisher.try_publish(9).expect("released slot");
+        assert_eq!(reader.try_take(), Ok(9));
     }
 }

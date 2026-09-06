@@ -94,12 +94,12 @@ pub trait AudioHost {
         capture: &CaptureConsumption,
     ) -> Result<CaptureObservation, Self::Error>;
 
-    /// Starts physical playback after confirmed capture.
+    /// Opens and prepares physical playback after confirmed capture.
     ///
     /// # Errors
     ///
-    /// Returns the host-specific error when playback cannot start.
-    fn start_playback(&mut self, candidate: &UsbDeviceCandidate) -> Result<(), Self::Error>;
+    /// Returns the host-specific error when playback cannot be prepared.
+    fn prepare_playback(&mut self, candidate: &UsbDeviceCandidate) -> Result<(), Self::Error>;
 
     /// Publishes only the deliberate user-facing endpoints.
     ///
@@ -146,8 +146,8 @@ pub enum DegradedState {
     CaptureStartFailed,
     /// Capture did not produce a confirmed active observation.
     CaptureNotConfirmed,
-    /// Physical playback could not start.
-    PlaybackStartFailed,
+    /// Physical playback could not be opened and prepared.
+    PlaybackPrepareFailed,
     /// Deliberate endpoints could not be published.
     EndpointPublicationFailed,
     /// Saved software routing could not be restored.
@@ -264,8 +264,8 @@ impl AudioLifecycle {
         if !observation.active || observation.frames_consumed == 0 {
             return self.fail(host, DegradedState::CaptureNotConfirmed);
         }
-        self.run_host_step(host, DegradedState::PlaybackStartFailed, |host| {
-            host.start_playback(candidate)
+        self.run_host_step(host, DegradedState::PlaybackPrepareFailed, |host| {
+            host.prepare_playback(candidate)
         })?;
         self.run_host_step(host, DegradedState::EndpointPublicationFailed, |host| {
             host.publish_endpoints(candidate, DELIBERATE_ENDPOINTS)
@@ -420,7 +420,7 @@ mod tests {
         VerifyPhysicalNodesHidden,
         StartCapture,
         ObserveCapture,
-        StartPlayback,
+        PreparePlayback,
         PublishEndpoints,
         RestoreRouting,
         Teardown,
@@ -488,8 +488,8 @@ mod tests {
             }
         }
 
-        fn start_playback(&mut self, _candidate: &UsbDeviceCandidate) -> Result<(), Self::Error> {
-            self.call(Operation::StartPlayback)
+        fn prepare_playback(&mut self, _candidate: &UsbDeviceCandidate) -> Result<(), Self::Error> {
+            self.call(Operation::PreparePlayback)
         }
 
         fn publish_endpoints(
@@ -530,7 +530,7 @@ mod tests {
         Operation::VerifyPhysicalNodesHidden,
         Operation::StartCapture,
         Operation::ObserveCapture,
-        Operation::StartPlayback,
+        Operation::PreparePlayback,
         Operation::PublishEndpoints,
         Operation::RestoreRouting,
     ];
@@ -550,7 +550,7 @@ mod tests {
             (Operation::VerifyPhysicalNodesHidden, DegradedState::PhysicalNodesExposed),
             (Operation::StartCapture, DegradedState::CaptureStartFailed),
             (Operation::ObserveCapture, DegradedState::CaptureNotConfirmed),
-            (Operation::StartPlayback, DegradedState::PlaybackStartFailed),
+            (Operation::PreparePlayback, DegradedState::PlaybackPrepareFailed),
             (Operation::PublishEndpoints, DegradedState::EndpointPublicationFailed),
             (Operation::RestoreRouting, DegradedState::RoutingRestoreFailed),
         ];
@@ -579,7 +579,7 @@ mod tests {
                 result,
                 Err(LifecycleError::Unavailable(DegradedState::CaptureNotConfirmed))
             ));
-            assert!(!host.calls.contains(&Operation::StartPlayback));
+            assert!(!host.calls.contains(&Operation::PreparePlayback));
             assert_eq!(host.calls.last(), Some(&Operation::Teardown));
         }
     }
@@ -618,7 +618,7 @@ mod tests {
                 Operation::VerifyPhysicalNodesHidden,
                 Operation::StartCapture,
                 Operation::ObserveCapture,
-                Operation::StartPlayback,
+                Operation::PreparePlayback,
                 Operation::PublishEndpoints,
                 Operation::RestoreRouting,
                 Operation::Teardown,

@@ -1,15 +1,15 @@
 //! Fake-backed regressions for the production host orchestration path.
 
-use super::alsa::{select_revalidated_card, validate_applied_pcm, validate_card_id};
+use super::alsa::{
+    RealAlsaFacade, select_revalidated_card, validate_applied_pcm, validate_applied_software,
+    validate_card_id,
+};
 use super::pipewire::{
     PhysicalObjectKind, PhysicalObjectProperties, RealPipeWireFacade, is_candidate_physical_object,
 };
 use super::*;
 use crate::audio_lifecycle::{AudioLifecycle, DegradedState, LifecycleError, LifecycleState};
 use crate::{AlsaCardInfo, DeviceIdentity, UsbTopology};
-use std::collections::VecDeque;
-use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 fn card(number: u32, id: &str) -> AlsaCardInfo {
@@ -21,17 +21,6 @@ fn candidate() -> UsbDeviceCandidate {
         identity: DeviceIdentity::wave3(),
         topology: UsbTopology::new("1-8.3"),
         alsa_cards: vec![card(7, "Wave3")],
-    }
-}
-
-fn selected() -> SelectedPcmCard {
-    SelectedPcmCard {
-        identity: DeviceIdentity::wave3(),
-        topology: UsbTopology::new("1-8.3"),
-        card_number: 7,
-        card_id: "Wave3".to_owned(),
-        capture_device: 0,
-        playback_device: 0,
     }
 }
 
@@ -226,107 +215,39 @@ fn pcm_config_sizes_independent_checked_period_buffers() {
 }
 
 #[test]
-fn capture_timeout_must_form_a_nonzero_deadline() {
-    for timeout in [Duration::ZERO, Duration::MAX] {
-        assert!(matches!(
-            LinuxAudioHost::new(pcm_config(), timeout),
-            Err(LinuxAudioError::InvalidCaptureTimeout)
-        ));
-    }
-}
-
-#[test]
-fn capture_worker_propagates_thread_spawn_failure() {
-    let capture = ScriptedCapture { reads: Arc::new(Mutex::new(VecDeque::new())) };
-    let result = CaptureWorker::start_with(Box::new(capture), 2_048, |_| {
-        Err(io::Error::other("thread limit"))
-    });
-    assert!(matches!(
-        result,
-        Err(LinuxAudioError::CaptureWorkerSpawn(message)) if message == "thread limit"
-    ));
+fn applied_software_validation_requires_monotonic_time_and_manual_playback_start() {
+    assert_eq!(validate_applied_software(PcmDirection::Capture, true, true), Ok(()));
+    assert_eq!(
+        validate_applied_software(PcmDirection::Capture, false, true),
+        Err(LinuxAudioError::PcmTimestampConfigurationAdjusted {
+            direction: PcmDirection::Capture,
+        })
+    );
+    assert_eq!(
+        validate_applied_software(PcmDirection::Playback, true, false),
+        Err(LinuxAudioError::PlaybackStartThresholdAdjusted)
+    );
 }
 
 #[test]
 fn host_rejects_an_unknown_hidden_node_contract() {
-    let mut harness =
-        harness(std::iter::empty::<Vec<CaptureRead>>(), true, Duration::from_millis(5));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut host = LinuxAudioHost::with_facade(Box::new(FakePipeWire {
+        calls: Arc::clone(&calls),
+        connected: false,
+        fail_disconnect: false,
+    }));
     assert_eq!(
-        harness.host.verify_physical_nodes_hidden(&candidate(), &[HiddenPhysicalNode::Capture]),
+        host.verify_physical_nodes_hidden(&candidate(), &[HiddenPhysicalNode::Capture]),
         Err(LinuxAudioError::InvalidHiddenPhysicalNodeContract)
     );
-    assert!(harness.pipewire_calls.lock().expect("calls lock").is_empty());
-}
-
-#[derive(Debug)]
-struct ScriptedCapture {
-    reads: Arc<Mutex<VecDeque<CaptureRead>>>,
-}
-
-impl CapturePcm for ScriptedCapture {
-    fn read_frames(&mut self, _bytes: &mut [u8]) -> CaptureRead {
-        self.reads.lock().expect("script lock").pop_front().unwrap_or(CaptureRead::WouldBlock)
-    }
-}
-
-#[derive(Debug)]
-struct FakePlayback {
-    close_count: Arc<AtomicU64>,
-    fail_close: bool,
-}
-
-impl PlaybackPcm for FakePlayback {
-    fn close(&mut self) -> Result<(), LinuxAudioError> {
-        self.close_count.fetch_add(1, Ordering::Relaxed);
-        if self.fail_close { Err(LinuxAudioError::TeardownFailed) } else { Ok(()) }
-    }
-}
-
-#[derive(Debug)]
-struct FakeAlsa {
-    capture_scripts: VecDeque<VecDeque<CaptureRead>>,
-    calls: Arc<Mutex<Vec<&'static str>>>,
-    close_count: Arc<AtomicU64>,
-    fail_playback: bool,
-}
-
-impl AlsaFacade for FakeAlsa {
-    fn select(
-        &mut self,
-        _candidate: &UsbDeviceCandidate,
-    ) -> Result<SelectedPcmCard, LinuxAudioError> {
-        self.calls.lock().expect("calls lock").push("select");
-        Ok(selected())
-    }
-
-    fn start_capture(
-        &mut self,
-        _candidate: &UsbDeviceCandidate,
-        _selected: &SelectedPcmCard,
-    ) -> Result<Box<dyn CapturePcm>, LinuxAudioError> {
-        self.calls.lock().expect("calls lock").push("capture-started");
-        let reads = self.capture_scripts.pop_front().unwrap_or_default();
-        Ok(Box::new(ScriptedCapture { reads: Arc::new(Mutex::new(reads)) }))
-    }
-
-    fn open_playback(
-        &mut self,
-        _candidate: &UsbDeviceCandidate,
-        _selected: &SelectedPcmCard,
-    ) -> Result<Box<dyn PlaybackPcm>, LinuxAudioError> {
-        self.calls.lock().expect("calls lock").push("playback");
-        if self.fail_playback {
-            return Err(LinuxAudioError::Alsa("playback failed".to_owned()));
-        }
-        Ok(Box::new(FakePlayback { close_count: Arc::clone(&self.close_count), fail_close: false }))
-    }
+    assert!(calls.lock().expect("calls lock").is_empty());
 }
 
 #[derive(Debug)]
 struct FakePipeWire {
     calls: Arc<Mutex<Vec<&'static str>>>,
     connected: bool,
-    endpoint_streams_available: bool,
     fail_disconnect: bool,
 }
 
@@ -340,19 +261,6 @@ impl PipeWireFacade for FakePipeWire {
         Ok(())
     }
 
-    fn publish_endpoints(&mut self, plans: &[EndpointPlan]) -> Result<(), LinuxAudioError> {
-        assert_eq!(
-            plans.iter().map(|plan| plan.endpoint).collect::<Vec<_>>(),
-            DELIBERATE_ENDPOINTS
-        );
-        self.calls.lock().expect("calls lock").push("publish");
-        if self.endpoint_streams_available {
-            Ok(())
-        } else {
-            Err(LinuxAudioError::EndpointStreamTransportUnavailable)
-        }
-    }
-
     fn disconnect(&mut self) -> Result<(), LinuxAudioError> {
         self.calls.lock().expect("calls lock").push("pipewire-disconnect");
         self.connected = false;
@@ -364,184 +272,44 @@ impl PipeWireFacade for FakePipeWire {
     }
 }
 
-struct Harness {
-    host: LinuxAudioHost,
-    alsa_calls: Arc<Mutex<Vec<&'static str>>>,
-    pipewire_calls: Arc<Mutex<Vec<&'static str>>>,
-    close_count: Arc<AtomicU64>,
-}
-
-fn harness(
-    capture_scripts: impl IntoIterator<Item = Vec<CaptureRead>>,
-    endpoint_streams_available: bool,
-    timeout: Duration,
-) -> Harness {
-    harness_with_playback_failure(capture_scripts, endpoint_streams_available, timeout, false)
-}
-
-fn harness_with_playback_failure(
-    capture_scripts: impl IntoIterator<Item = Vec<CaptureRead>>,
-    endpoint_streams_available: bool,
-    timeout: Duration,
-    fail_playback: bool,
-) -> Harness {
-    let alsa_calls = Arc::new(Mutex::new(Vec::new()));
-    let pipewire_calls = Arc::new(Mutex::new(Vec::new()));
-    let close_count = Arc::new(AtomicU64::new(0));
-    let alsa = FakeAlsa {
-        capture_scripts: capture_scripts.into_iter().map(VecDeque::from).collect::<VecDeque<_>>(),
-        calls: Arc::clone(&alsa_calls),
-        close_count: Arc::clone(&close_count),
-        fail_playback,
-    };
-    let pipewire = FakePipeWire {
-        calls: Arc::clone(&pipewire_calls),
-        connected: false,
-        endpoint_streams_available,
-        fail_disconnect: false,
-    };
-    Harness {
-        host: LinuxAudioHost::with_facades(Box::new(alsa), Box::new(pipewire), timeout, 2_048),
-        alsa_calls,
-        pipewire_calls,
-        close_count,
-    }
-}
-
 #[test]
-fn capture_frame_and_xrun_are_observed_before_playback() {
-    let mut harness = harness(
-        [vec![CaptureRead::RecoveredXrun, CaptureRead::Frames(64)]],
-        true,
-        Duration::from_millis(100),
-    );
+fn production_host_refuses_before_alsa_until_graph_composition_exists() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let pipewire =
+        FakePipeWire { calls: Arc::clone(&calls), connected: false, fail_disconnect: false };
+    let mut host = LinuxAudioHost::with_facade(Box::new(pipewire));
     let mut lifecycle = AudioLifecycle::new();
-    lifecycle.start(&mut harness.host, Some(&candidate())).expect("startup succeeds");
-    assert_eq!(lifecycle.state(), LifecycleState::Ready);
-    assert_eq!(
-        *harness.alsa_calls.lock().expect("calls lock"),
-        ["select", "capture-started", "playback"]
-    );
-    let state = harness.host.resource_state();
-    assert_eq!(state.capture, ResourceActivity::Active);
-    assert_eq!(state.playback, ResourceActivity::Active);
-    assert!(state.capture_frames >= 64);
-    assert_eq!(state.recovered_xruns, 1);
-    lifecycle.teardown(&mut harness.host).expect("teardown succeeds");
-    assert_eq!(harness.close_count.load(Ordering::Relaxed), 1);
-}
-
-#[test]
-fn prepared_playback_stays_starting_until_processing_is_active() {
-    let mut harness = harness([vec![CaptureRead::Frames(64)]], true, Duration::from_millis(100));
-    let device = candidate();
-    harness
-        .host
-        .verify_physical_nodes_hidden(&device, &HIDDEN_PHYSICAL_NODES)
-        .expect("physical objects are hidden");
-    let capture = harness.host.start_capture(&device).expect("capture starts");
-    harness.host.observe_capture(&device, &capture).expect("capture is active");
-    harness.host.start_playback(&device).expect("playback opens");
-    assert_eq!(harness.host.resource_state().playback, ResourceActivity::Starting);
-    harness.host.publish_endpoints(&device, DELIBERATE_ENDPOINTS).expect("processing activates");
-    assert_eq!(harness.host.resource_state().playback, ResourceActivity::Active);
-    harness.host.teardown().expect("teardown succeeds");
-}
-
-#[test]
-fn timeout_and_disconnect_never_open_playback() {
-    for (reads, expected) in [
-        (vec![], LinuxAudioError::CaptureTimedOut),
-        (vec![CaptureRead::Disconnected], LinuxAudioError::CaptureDisconnected),
-        (vec![CaptureRead::Failed], LinuxAudioError::CaptureWorkerFailed),
-    ] {
-        let mut harness = harness([reads], true, Duration::from_millis(5));
-        let mut lifecycle = AudioLifecycle::new();
-        let error = lifecycle.start(&mut harness.host, Some(&candidate())).expect_err("fails");
-        assert!(matches!(
-            error,
-            LifecycleError::Host {
-                state: DegradedState::CaptureNotConfirmed,
-                source,
-            } if source == expected
-        ));
-        assert!(!harness.alsa_calls.lock().expect("calls lock").contains(&"playback"));
-    }
-}
-
-#[test]
-fn engine_boundary_cleans_partial_startup_and_never_claims_endpoints() {
-    let mut harness = harness([vec![CaptureRead::Frames(32)]], false, Duration::from_millis(100));
-    let mut lifecycle = AudioLifecycle::new();
-    let error = lifecycle.start(&mut harness.host, Some(&candidate())).expect_err("fails");
+    let error = lifecycle.start(&mut host, Some(&candidate())).expect_err("Stage 2 is not ready");
     assert!(matches!(
         error,
         LifecycleError::Host {
-            state: DegradedState::EndpointPublicationFailed,
+            state: DegradedState::CaptureStartFailed,
             source: LinuxAudioError::EndpointStreamTransportUnavailable,
         }
     ));
-    assert_eq!(harness.close_count.load(Ordering::Relaxed), 1);
+    assert_eq!(lifecycle.state(), LifecycleState::Degraded(DegradedState::CaptureStartFailed));
     assert_eq!(
-        harness.host.resource_state(),
+        host.resource_state(),
         AudioResourceState {
             not_ready: Some(GraphNotReady::EndpointStreamTransportUnavailable),
             ..AudioResourceState::default()
         }
     );
-    harness.host.teardown().expect("repeated host teardown succeeds");
-    assert_eq!(harness.close_count.load(Ordering::Relaxed), 1);
+    assert_eq!(*calls.lock().expect("calls lock"), ["pipewire-connect", "pipewire-disconnect"]);
 }
 
 #[test]
-fn playback_open_failure_closes_the_confirmed_capture_worker() {
-    let mut harness = harness_with_playback_failure(
-        [vec![CaptureRead::Frames(32)]],
-        true,
-        Duration::from_millis(100),
-        true,
-    );
-    let mut lifecycle = AudioLifecycle::new();
-    let error = lifecycle.start(&mut harness.host, Some(&candidate())).expect_err("fails");
-    assert!(matches!(
-        error,
-        LifecycleError::Host {
-            state: DegradedState::PlaybackStartFailed,
-            source: LinuxAudioError::Alsa(_),
-        }
-    ));
-    assert_eq!(harness.host.resource_state(), AudioResourceState::default());
-    assert_eq!(harness.close_count.load(Ordering::Relaxed), 0);
-}
-
-#[test]
-fn teardown_is_idempotent_and_pipewire_restart_reuses_one_path() {
-    let mut harness = harness(
-        [vec![CaptureRead::Frames(32)], vec![CaptureRead::Frames(32)]],
-        true,
-        Duration::from_millis(100),
-    );
-    let mut lifecycle = AudioLifecycle::new();
+fn endpoint_publication_cannot_bypass_the_stage_two_boundary() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let pipewire =
+        FakePipeWire { calls: Arc::clone(&calls), connected: false, fail_disconnect: false };
+    let mut host = LinuxAudioHost::with_facade(Box::new(pipewire));
     let device = candidate();
-    lifecycle.start(&mut harness.host, Some(&device)).expect("startup succeeds");
-    lifecycle.teardown(&mut harness.host).expect("teardown succeeds");
-    lifecycle.teardown(&mut harness.host).expect("teardown stays idempotent");
-    assert_eq!(harness.close_count.load(Ordering::Relaxed), 1);
-    lifecycle
-        .recover_after_host_restart(&mut harness.host, Some(&device))
-        .expect("restart recovery succeeds");
-    assert_eq!(lifecycle.state(), LifecycleState::Ready);
     assert_eq!(
-        harness
-            .pipewire_calls
-            .lock()
-            .expect("calls lock")
-            .iter()
-            .filter(|call| **call == "pipewire-connect")
-            .count(),
-        2
+        host.publish_endpoints(&device, DELIBERATE_ENDPOINTS),
+        Err(LinuxAudioError::EndpointStreamTransportUnavailable)
     );
-    lifecycle.teardown(&mut harness.host).expect("final teardown succeeds");
+    assert!(!calls.lock().expect("calls lock").contains(&"publish"));
 }
 
 #[test]
