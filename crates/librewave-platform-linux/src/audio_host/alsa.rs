@@ -1,8 +1,9 @@
 //! Safe ALSA card selection, PCM configuration, and direct I/O.
 
+use super::pcm::PhysicalPcmParameters;
 use super::{
-    AlsaFacade, CapturePcm, CaptureRead, LinuxAudioError, PhysicalPcmConfig, PhysicalSampleFormat,
-    PlaybackPcm,
+    AlsaFacade, CapturePcm, CaptureRead, LinuxAudioError, PcmDirection, PlaybackPcm,
+    Wave3PhysicalIoConfig,
 };
 use crate::{
     AlsaCardInfo, DeviceIdentity, DiscoveryPaths, LinuxInventory, UsbDeviceCandidate, UsbTopology,
@@ -66,12 +67,12 @@ pub(super) fn validate_card_id(card_id: &str) -> Result<(), LinuxAudioError> {
 
 #[derive(Debug)]
 pub(super) struct RealAlsaFacade {
-    config: PhysicalPcmConfig,
+    config: Wave3PhysicalIoConfig,
     paths: DiscoveryPaths,
 }
 
 impl RealAlsaFacade {
-    pub(super) fn new(config: PhysicalPcmConfig) -> Self {
+    pub(super) fn new(config: Wave3PhysicalIoConfig) -> Self {
         Self { config, paths: DiscoveryPaths::default() }
     }
 
@@ -140,7 +141,13 @@ impl RealAlsaFacade {
         {
             return Err(LinuxAudioError::AlsaCardChanged);
         }
-        configure_pcm(&pcm, self.config)?;
+        configure_pcm(
+            &pcm,
+            self.config.parameters(match direction {
+                Direction::Capture => PcmDirection::Capture,
+                Direction::Playback => PcmDirection::Playback,
+            }),
+        )?;
         Ok(pcm)
     }
 }
@@ -195,10 +202,8 @@ impl AlsaFacade for RealAlsaFacade {
     }
 }
 
-fn configure_pcm(pcm: &PCM, config: PhysicalPcmConfig) -> Result<(), LinuxAudioError> {
-    let format = match config.sample_format {
-        PhysicalSampleFormat::Signed32LittleEndian => Format::S32LE,
-    };
+fn configure_pcm(pcm: &PCM, config: PhysicalPcmParameters) -> Result<(), LinuxAudioError> {
+    let format = Format::S243LE;
     let params = HwParams::any(pcm).map_err(|error| LinuxAudioError::Alsa(error.to_string()))?;
     params
         .set_access(Access::RWInterleaved)
@@ -211,16 +216,28 @@ fn configure_pcm(pcm: &PCM, config: PhysicalPcmConfig) -> Result<(), LinuxAudioE
         .map_err(|error| LinuxAudioError::Alsa(error.to_string()))?;
     let applied =
         pcm.hw_params_current().map_err(|error| LinuxAudioError::Alsa(error.to_string()))?;
-    let exact = applied.get_access() == Ok(Access::RWInterleaved)
-        && applied.get_format() == Ok(format)
+    let packed_format = applied.get_format() == Ok(format);
+    let exact_geometry = applied.get_access() == Ok(Access::RWInterleaved)
         && applied.get_channels() == Ok(config.channels)
         && applied.get_rate() == Ok(config.rate)
         && applied.get_period_size() == Ok(config.period_frames.into())
         && applied.get_buffer_size() == Ok(config.buffer_frames.into());
-    if !exact {
-        return Err(LinuxAudioError::Alsa("ALSA changed the required PCM format".to_owned()));
-    }
+    validate_applied_pcm(config.direction, packed_format, exact_geometry)?;
     pcm.prepare().map_err(|error| LinuxAudioError::Alsa(error.to_string()))
+}
+
+pub(super) fn validate_applied_pcm(
+    direction: PcmDirection,
+    packed_format: bool,
+    exact_geometry: bool,
+) -> Result<(), LinuxAudioError> {
+    if !packed_format {
+        return Err(LinuxAudioError::UnsupportedPcmFormat { direction });
+    }
+    if !exact_geometry {
+        return Err(LinuxAudioError::PcmConfigurationAdjusted { direction });
+    }
+    Ok(())
 }
 
 #[derive(Debug)]

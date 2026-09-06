@@ -2,9 +2,9 @@
 //!
 //! The host opens only a revalidated PCM on the card correlated to the admitted
 //! USB candidate. It consumes capture on a bounded worker before opening
-//! playback. A bounded capture-clock seam can process frames with the portable
-//! engine in tests. The production `PipeWire` adapter cannot create endpoint
-//! streams yet, so it refuses publication and never substitutes silence.
+//! playback. An offline graph-clock bridge tests the independent capture and
+//! playback clock boundaries. The production `PipeWire` adapter cannot create
+//! endpoint streams yet, so it refuses publication and never substitutes silence.
 
 use self::alsa::{RealAlsaFacade, SelectedPcmCard};
 use self::pipewire::RealPipeWireFacade;
@@ -19,83 +19,31 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod alsa;
+mod clock_bridge;
+mod pcm;
 mod pipewire;
 #[cfg_attr(not(test), allow(dead_code))]
 mod pipewire_filter_ffi;
 #[cfg_attr(not(test), allow(dead_code))]
 mod pipewire_graph;
-mod transport;
 mod worker;
 
-pub use transport::{
-    CaptureClockTransport, ProcessedCapture, ProcessedDelivery, SystemIngress, SystemIngressError,
-    TransportBuildError, TransportControl, TransportControlError, TransportCounters,
-    TransportError, TransportHandles, TransportPlayback, TransportPlaybackError,
+pub use clock_bridge::{
+    BridgeBuildError, BridgeClockDomain, BridgeControlError, BridgeError, BridgeState,
+    CaptureIngress, CapturePublishReport, ClockBridgeConfig, ClockBridgeControl, ClockBridgeParts,
+    DirectionBridgeConfig, GraphClockProcessor, GraphOutputBuffers, GraphProcessReport,
+    GraphSystemInput, PlaybackEgress, PlaybackPeriodWriter, PlaybackProcessReport,
+    PlaybackWriteError, PlaybackWriteProgress,
+};
+pub use pcm::{
+    PACKED_S24_SAMPLE_BYTES, PackedS24Error, PcmBufferConfig, PcmConfigError, PcmDirection,
+    WAVE3_CAPTURE_CHANNELS, WAVE3_PCM_RATE_HZ, WAVE3_PLAYBACK_CHANNELS, Wave3PhysicalIoConfig,
 };
 
 #[cfg(test)]
 mod tests;
 
 const CAPTURE_OBSERVATION_POLL: Duration = Duration::from_millis(1);
-
-/// The exact physical PCM format requested by the daemon-owned engine.
-///
-/// The current daemon does not construct this value. A caller must supply the
-/// complete format instead of relying on a platform default.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PhysicalPcmConfig {
-    /// Interleaved sample representation.
-    pub sample_format: PhysicalSampleFormat,
-    /// Frames per second.
-    pub rate: u32,
-    /// Interleaved channels per frame.
-    pub channels: u32,
-    /// Frames in one hardware period.
-    pub period_frames: u32,
-    /// Frames in the complete hardware buffer.
-    pub buffer_frames: u32,
-}
-
-/// Sample formats implemented by the direct PCM worker.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PhysicalSampleFormat {
-    /// Signed 32-bit little-endian samples.
-    Signed32LittleEndian,
-}
-
-impl PhysicalPcmConfig {
-    /// Validates the complete PCM format.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LinuxAudioError::InvalidPcmConfig`] when a field is zero or
-    /// the buffer cannot hold two complete periods.
-    pub fn validate(self) -> Result<Self, LinuxAudioError> {
-        let Some(minimum_buffer) = self.period_frames.checked_mul(2) else {
-            return Err(LinuxAudioError::InvalidPcmConfig);
-        };
-        if self.rate == 0
-            || self.channels == 0
-            || self.period_frames == 0
-            || self.buffer_frames < minimum_buffer
-        {
-            return Err(LinuxAudioError::InvalidPcmConfig);
-        }
-        self.period_bytes()?;
-        Ok(self)
-    }
-
-    fn period_bytes(self) -> Result<usize, LinuxAudioError> {
-        let sample_bytes = match self.sample_format {
-            PhysicalSampleFormat::Signed32LittleEndian => 4_u64,
-        };
-        u64::from(self.period_frames)
-            .checked_mul(u64::from(self.channels))
-            .and_then(|bytes| bytes.checked_mul(sample_bytes))
-            .and_then(|bytes| usize::try_from(bytes).ok())
-            .ok_or(LinuxAudioError::InvalidPcmConfig)
-    }
-}
 
 /// `PipeWire`'s direction for one deliberate endpoint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -240,6 +188,10 @@ pub enum LinuxAudioError {
     AmbiguousPcmDirection { direction: &'static str },
     /// A safe ALSA wrapper operation failed.
     Alsa(String),
+    /// ALSA did not apply packed signed `S24_3LE` for the requested direction.
+    UnsupportedPcmFormat { direction: PcmDirection },
+    /// ALSA adjusted the exact rate, channels, period, buffer, or access mode.
+    PcmConfigurationAdjusted { direction: PcmDirection },
     /// Capture did not produce a frame before the configured deadline.
     CaptureTimedOut,
     /// The worker buffer could not be allocated before capture started.
@@ -293,6 +245,12 @@ impl fmt::Display for LinuxAudioError {
                 write!(formatter, "the ALSA card does not have one {direction} PCM")
             }
             Self::Alsa(message) => write!(formatter, "ALSA failed: {message}"),
+            Self::UnsupportedPcmFormat { direction } => {
+                write!(formatter, "ALSA did not apply S24_3LE for {direction:?}")
+            }
+            Self::PcmConfigurationAdjusted { direction } => {
+                write!(formatter, "ALSA adjusted the required {direction:?} PCM configuration")
+            }
             Self::CaptureTimedOut => {
                 formatter.write_str("capture produced no frame before timeout")
             }
@@ -415,12 +373,15 @@ impl LinuxAudioHost {
     /// # Errors
     ///
     /// Returns an error when the physical PCM format or capture timeout is invalid.
-    pub fn new(pcm: PhysicalPcmConfig, capture_timeout: Duration) -> Result<Self, LinuxAudioError> {
-        let pcm = pcm.validate()?;
+    pub fn new(
+        pcm: Wave3PhysicalIoConfig,
+        capture_timeout: Duration,
+    ) -> Result<Self, LinuxAudioError> {
         if capture_timeout.is_zero() || Instant::now().checked_add(capture_timeout).is_none() {
             return Err(LinuxAudioError::InvalidCaptureTimeout);
         }
-        let capture_buffer_bytes = pcm.period_bytes()?;
+        let capture_buffer_bytes =
+            pcm.capture_period_bytes().map_err(|_| LinuxAudioError::InvalidPcmConfig)?;
         Ok(Self::with_facades(
             Box::new(RealAlsaFacade::new(pcm)),
             Box::new(RealPipeWireFacade::default()),

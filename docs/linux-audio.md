@@ -1,6 +1,6 @@
 # Linux audio integration
 
-Status: the direct host owns ALSA resources and inspects PipeWire through safe Rust wrappers. Two offline seams now cover separate scheduling boundaries. The capture-clock transport tests bounded engine processing. The PipeWire graph seam tests one graph callback and the four deliberate endpoints. Neither seam is connected to the production host, so the lifecycle cannot report the graph as ready.
+Status: the direct host owns ALSA resources and inspects PipeWire through safe Rust wrappers. Offline tests cover the PipeWire graph seam and a separate bridge across the Wave capture, PipeWire graph, and Wave playback clocks. The bridge uses the portable rate matcher and fake delivery boundaries. Neither offline seam is connected to the production host. The production lifecycle therefore keeps `AudioResourceState` at `GraphNotReady`.
 
 ## Reference system
 
@@ -16,7 +16,7 @@ LibreWave uses one physical audio owner. `librewaved` will open the Wave:3 ALSA 
 
 The host correlates an admitted USB candidate to one ALSA card. It requires one stable ALSA card identifier and one PCM device for each direction. It repeats the sysfs and procfs correlation immediately before each open. The open uses the revalidated card identifier, device number, and subdevice zero. A changed card number, identifier, topology, or PCM set stops startup.
 
-The daemon must supply an exact physical PCM format. The host has no default sample rate, channel count, period size, or buffer size. It currently supports interleaved signed 32-bit little-endian samples. ALSA must apply the complete requested format without adjustment.
+Wave:3 has one admitted physical PCM mode. Capture uses interleaved packed signed S24_3LE, one channel, and exactly 48 kHz. Playback uses interleaved packed signed S24_3LE, two channels, and exactly 48 kHz. Capture and playback have independent period and buffer values. Each value must be nonzero, and each period must not exceed its buffer. Frame, sample, and byte calculations use checked arithmetic. ALSA must apply the full configuration without adjustment.
 
 ## WirePlumber policy
 
@@ -83,7 +83,7 @@ The physical Wave capture and playback PCMs are not desktop endpoints. LibreWave
 
 The host connects to the user's existing PipeWire instance and completes a registry round trip. It checks the admitted candidate's exact ALSA card number. A Device global must have the Wave:3 vendor and product values, and its `api.alsa.card` value must identify that card. A Node global matches through the card component of `api.alsa.path`. Node globals do not need vendor or product properties. Startup fails while any matching Device or Node global remains visible.
 
-Endpoint plans come only from `librewave-core`. The production adapter still returns `EndpointStreamTransportUnavailable` before it creates an endpoint and records the matching `GraphNotReady` reason. Playback remains prepared, not active, at this boundary. The adapter does not publish silence or report the graph as ready. The offline graph seam is not a production publication path. Independent ALSA and PipeWire clocks still need ASRC boundaries before the endpoints can carry live hardware audio.
+Endpoint plans come only from `librewave-core`. The production adapter still returns `EndpointStreamTransportUnavailable` before it creates an endpoint and records the matching `GraphNotReady` reason. Playback remains prepared, not active, at this boundary. The adapter does not publish silence or report the graph as ready. The offline graph seam is not a production publication path. Portable ASRC now exists for both physical directions. Production clock measurement, worker composition, and host wiring are still missing.
 
 ## Offline PipeWire graph seam
 
@@ -115,21 +115,29 @@ Each source has separate monitor and stream routes. A route has an enabled value
 
 The engine reports separate left and right peak and RMS values for each source and endpoint. It applies one complete pending control snapshot at the boundary before a nonzero block. Processing uses fixed-capacity state and does not allocate, free memory, lock, block, log, perform I/O, or call platform code.
 
-## Offline capture-clock transport seam
+## Offline graph-clock bridge
 
-This earlier test seam uses physical capture as its only processing clock. It is separate from the PipeWire graph seam and remains offline. One call accepts between one frame and the configured maximum number of complete stereo frames. A zero-length read means that capture made no progress. A partial stereo frame or an oversized block fails the transport attempt. The production ALSA worker is not connected to this seam in this milestone.
+The offline bridge models three independent clocks: Wave capture, the PipeWire graph, and Wave playback. It does not infer a shared clock for the two Wave directions. The PipeWire graph position is the only clock for `MixerEngine`. System remains a direct graph-time input. Microphone, Monitor Mix, and Stream Mix remain direct graph-time outputs.
 
-The System ingress is a bounded single-producer, single-consumer FIFO. It can join blocks with different frame counts, but it does not correct rate drift between independent clocks. The producer publishes its first frames before it marks the stream active. An idle or unconnected System sink supplies intentional silence, so microphone monitoring and headphone output do not depend on application playback. Once a System producer is active, insufficient frames are an underrun and fail the attempt. An overflow also fails the attempt. The availability count in an underrun report is the snapshot that rejected that block.
+The capture side accepts a capture-domain starting frame, a complete frame count, and mono packed S24_3LE data. It rejects a partial sample, a partial frame, an oversized block, a position overflow, or a position discontinuity. The decoder sign-extends each 24-bit value and produces finite mono `f32`. The capture worker publishes complete blocks to a bounded single-producer, single-consumer FIFO. The graph processor copies the required frames into preallocated scratch without advancing the published read sequence. After `CaptureFilterDelay`, its independent fill controller previews a ratio before the mono rate matcher prepares a graph quantum. The matched mono signal is duplicated to stereo and supplied to the Microphone source.
 
-The seam converts S32LE capture samples to `f32` by dividing each signed integer by 2147483648. It converts finite `f32` output samples with deterministic rounding. Values at or below -1 map to `i32::MIN`, and values at or above 1 map to `i32::MAX`. All byte assembly uses explicit little-endian operations.
+The playback side takes the real stereo Monitor Mix output from the same graph boundary. The graph processor publishes a complete block to a second bounded single-producer, single-consumer FIFO. The playback worker copies input into its own preallocated scratch. After `PlaybackFilterDelay`, a separate fill controller and stereo rate matcher produce exactly one physical playback period. The encoder uses deterministic rounding and saturation for packed S24_3LE. A fake writer reports the playback-domain start frame and the exact delivered frame count. A later ALSA worker must derive progress from ALSA. It must not parse the USB feedback endpoint.
 
-Construction allocates the engine buffers, System FIFO, control handoff, meter handoff, and playback encoding buffer. Block processing uses no allocation, lock, blocking operation, log, or platform call other than the optional playback writer at its owned worker boundary. The playback writer must complete one block or return a classified short-write, xrun-recovery, disconnect, or general failure.
+FIFO ownership is fixed. `CaptureIngress` is the sole capture producer, and `GraphClockProcessor` is its sole consumer. `GraphClockProcessor` is the sole playback producer, and `PlaybackEgress` is its sole consumer. Each FIFO has monotonic published read and write frame sequences. They are the only source for fill and free-space values. A publication becomes visible only after the producer copies the full block and release-stores its advanced write sequence. A transactional peek can copy into preallocated scratch, but it does not change the published read sequence. A commit release-stores the advanced read sequence. There is no rollback path.
 
-The first accepted capture block is preflight work. It proves capture, conversion, engine processing, and meter delivery while readiness is false, but it does not count as playback or public endpoint delivery. Later test-runtime blocks can reach a fake playback writer. This activity is not graph readiness. A System fault observed before delivery suppresses the meter and playback for that block. If the producer publishes a fault after the final check, a playback write already in progress may finish. The next block observes the sticky failure.
+Each direction owns its controller and rate-matcher state. Outside the named filter-delay states, a controller preview occurs before matcher preparation. The graph processor commits the capture FIFO and capture controller only after capture ASRC, mixer processing, finite output validation, and complete Monitor Mix publication to the playback FIFO all succeed. The playback worker commits its FIFO and controller only after the complete packed period reaches the writer and the writer reports exact progress. A failure after matcher preparation is terminal because matcher state may already have changed.
 
-Mixer changes use the engine's existing bounded control stager and consume the exact controls in the current `MixerProfile`. One complete update applies at a block boundary. Meter delivery uses a bounded, nonblocking handoff. No meter is available before the first processed block, and the handoff does not invent a zero observation.
+The startup states are `Allocated`, `CapturePriming`, `CaptureFilterDelay`, `PlaybackPriming`, `PlaybackFilterDelay`, `PlaybackStabilizing`, `PrimingCheck`, and `Primed`. `PrimingCheck` is a short atomic gate. It prevents new processing boundaries while the playback owner checks that no earlier capture or graph boundary is in flight. The owner then derives both fill values from stable published sequences. It returns to `PlaybackStabilizing` if either fill is outside its guard. Activation uses the same gate to verify that all three owners are outside a boundary. `Primed` means that offline preflight is complete. It does not mean that a production endpoint or PCM delivery path is ready. Tests can move the bridge to `Active` only when fake offline delivery is attached. Fault handling moves the attempt to `Faulted`. Teardown moves it to `Quiescing`, waits for the capture worker, graph callback, and playback worker to leave their boundaries, and then moves it to `Stopped`.
 
-The seam owns the engine, System consumer, meter publisher, and block buffers. The returned handles own the sole System producer, control producer, and meter consumer. A future production worker must own capture, engine, and playback together if it uses this capture-clock design. That worker must stop and join before those resources are released. The current host keeps its existing capture worker and playback object separate because the seam is not connected to live hardware.
+Filter delay is removed only during named preflight states. The matcher ratio is exactly 1.0 in `CaptureFilterDelay` and `PlaybackFilterDelay`. The applicable controller is not previewed or committed in those states. Controller correction starts on a later boundary, after the applicable filter-delay state ends. If the remaining dependency delay ends inside a graph quantum or playback period, the bridge treats that complete boundary as preflight and discards the complete boundary. It never trims a boundary. If FIFO fill still needs correction after playback delay reaches zero, complete boundaries remain preflight in `PlaybackStabilizing`. No delay trimming or discard occurs in `Primed` or `Active`.
+
+An unconnected System endpoint has semantic silence. A connected System endpoint must supply two complete, finite graph-time buffers. Missing active System data is a fault. Missing capture or playback bridge data is also a fault. Other terminal faults include FIFO overflow, unsupported or adjusted physical format, invalid quantum or period, packed sample errors, position overflow or discontinuity, controller failure, ASRC failure, writer failure, incomplete playback progress, and teardown before quiescence. The active path has no sample-drop, sample-insertion, fixed-ratio fallback, or unbounded queue behavior.
+
+Construction allocates and warms the two rate matchers, audio scratch, FIFOs, control handoff, meter handoff, and packed playback buffer. The graph boundary does not allocate, deallocate, block, log, perform USB or file I/O, create a thread, panic, or acquire an unbounded lock. Mixer changes use the existing bounded control stager. Meter reports use the existing bounded, nonblocking handoff.
+
+Tests choose all FIFO capacities, guard values, controller gains, and ratio bounds as named simulation values. These values are not product policy. One fast checked frame-ledger and controller simulation covers 24 simulated hours in both drift directions. A shorter test runs real mono and stereo sinc ASRC with independent positive and negative drift. The frame ledger tests arithmetic and control stability only. It does not validate sinc sample quality. Other tests cover every graph quantum from 64 through 1024 frames, including non-multiple values, packed S24_3LE conversion, sample order, startup delay, faults, transaction commit rules, zero realtime allocation or deallocation, and quiescent teardown.
+
+This bridge is not called by daemon startup, the production ALSA workers, or the PipeWire graph seam. It does not install policy, publish a host node, or access live hardware. Production work must add clock observations, compose the workers with this ownership model, and connect the existing graph callback. Until then, the production resource state remains `GraphNotReady`.
 
 ## Mixer control plane
 
@@ -170,10 +178,11 @@ Setup does not install or reload the WirePlumber fragment. It does not enable th
 
 ## Work still required
 
-Production composition, ASRC, and the live hardware plan remain required. Completion requires all of these results:
+The portable ASRC bridge is implemented and tested offline. Production clock measurement, worker composition, and host wiring remain required. Completion requires all of these results:
 
 - `librewaved` owns the physical capture and playback PCMs directly.
 - Capture consumption produces confirmed frames before playback opens.
+- ALSA capture and playback progress provide independent clock observations to the two bridge controllers.
 - PipeWire source and sink directions come from `librewave-core`, and endpoint audio reaches the daemon-owned mixer.
 - No helper, null sink, or physical Wave node appears as a desktop device.
 - Restart, reconnect, sleep, login, teardown, and rollback tests pass on the reference system.

@@ -718,6 +718,12 @@ fn rate_match_bounds_and_resource_shape_are_checked_before_construction() {
     assert!(RateMatcherConfig::try_new(1_024, usize::MAX, rate_match_bounds()).is_err());
     assert_eq!(rate_match_config(1).channels(), 1);
     assert_eq!(rate_match_config(2).channels(), 2);
+    assert_eq!(rate_match_controller_config().target_fill_frames(), 100);
+    assert_eq!(rate_match_controller_config().ratio_bounds(), rate_match_bounds());
+
+    let matcher = RateMatcher::new(rate_match_config(2)).expect("test matcher construction");
+    assert!(matcher.maximum_input_frames() >= matcher.config().max_output_frames());
+    assert!(matcher.output_delay_frames() > 0);
 }
 
 #[test]

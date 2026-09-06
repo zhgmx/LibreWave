@@ -1,6 +1,6 @@
 //! Fake-backed regressions for the production host orchestration path.
 
-use super::alsa::{select_revalidated_card, validate_card_id};
+use super::alsa::{select_revalidated_card, validate_applied_pcm, validate_card_id};
 use super::pipewire::{
     PhysicalObjectKind, PhysicalObjectProperties, RealPipeWireFacade, is_candidate_physical_object,
 };
@@ -35,14 +35,21 @@ fn selected() -> SelectedPcmCard {
     }
 }
 
-fn pcm_config() -> PhysicalPcmConfig {
-    PhysicalPcmConfig {
-        sample_format: PhysicalSampleFormat::Signed32LittleEndian,
-        rate: 48_000,
-        channels: 2,
-        period_frames: 256,
-        buffer_frames: 1_024,
-    }
+fn pcm_config() -> Wave3PhysicalIoConfig {
+    Wave3PhysicalIoConfig::try_new(256, 1_024, 192, 768).expect("valid test PCM geometry")
+}
+
+#[test]
+fn applied_pcm_validation_has_no_format_or_geometry_fallback() {
+    assert_eq!(validate_applied_pcm(PcmDirection::Capture, true, true), Ok(()));
+    assert_eq!(
+        validate_applied_pcm(PcmDirection::Capture, false, true),
+        Err(LinuxAudioError::UnsupportedPcmFormat { direction: PcmDirection::Capture })
+    );
+    assert_eq!(
+        validate_applied_pcm(PcmDirection::Playback, true, false),
+        Err(LinuxAudioError::PcmConfigurationAdjusted { direction: PcmDirection::Playback })
+    );
 }
 
 #[test]
@@ -205,13 +212,16 @@ fn pipewire_scan_fails_closed_without_one_candidate_card() {
 }
 
 #[test]
-fn pcm_config_sizes_one_checked_period_buffer() {
+fn pcm_config_sizes_independent_checked_period_buffers() {
     let config = pcm_config();
-    assert_eq!(config.validate(), Ok(config));
-    assert_eq!(config.period_bytes(), Ok(2_048));
+    assert_eq!(config.capture_period_bytes(), Ok(768));
+    assert_eq!(config.capture_buffer_bytes(), Ok(3_072));
+    assert_eq!(config.playback_period_bytes(), Ok(1_152));
+    assert_eq!(config.playback_buffer_bytes(), Ok(4_608));
+    assert!(Wave3PhysicalIoConfig::try_new(1, 1, 1, 1).is_ok());
     assert_eq!(
-        PhysicalPcmConfig { period_frames: u32::MAX, buffer_frames: u32::MAX, ..config }.validate(),
-        Err(LinuxAudioError::InvalidPcmConfig)
+        Wave3PhysicalIoConfig::try_new(2, 1, 1, 1),
+        Err(PcmConfigError::PeriodExceedsBuffer { period_frames: 2, buffer_frames: 1 })
     );
 }
 

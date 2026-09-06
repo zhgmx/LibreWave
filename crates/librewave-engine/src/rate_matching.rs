@@ -250,6 +250,16 @@ impl RateMatchControllerConfig {
             ratio_bounds,
         })
     }
+
+    #[must_use]
+    pub const fn target_fill_frames(self) -> usize {
+        self.target_fill_frames
+    }
+
+    #[must_use]
+    pub const fn ratio_bounds(self) -> RateMatchRatioBounds {
+        self.ratio_bounds
+    }
 }
 
 /// Why controller configuration or preview was rejected.
@@ -662,6 +672,21 @@ impl RateMatcher {
     #[must_use]
     pub const fn config(&self) -> RateMatcherConfig {
         self.config
+    }
+
+    /// Returns the largest input block reserved by the pinned dependency.
+    #[must_use]
+    pub fn maximum_input_frames(&self) -> usize {
+        self.resampler.input_frames_max()
+    }
+
+    /// Returns the dependency-reported delay in output frames.
+    ///
+    /// A platform bridge may use this value to account for startup preflight.
+    /// It must not trim or discard delay after it starts active delivery.
+    #[must_use]
+    pub fn output_delay_frames(&self) -> usize {
+        self.resampler.output_delay()
     }
 
     #[must_use]
