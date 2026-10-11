@@ -132,6 +132,12 @@ pub fn default_socket_path() -> PathBuf {
     PathBuf::from(format!("/run/user/{}/librewave.sock", current_uid()))
 }
 
+/// Returns the per-user socket path or the explicit development override.
+#[must_use]
+pub fn configured_socket_path() -> PathBuf {
+    std::env::var_os("LIBREWAVE_SOCKET").map_or_else(default_socket_path, PathBuf::from)
+}
+
 /// The peer credentials observed on a Linux Unix socket.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PeerCredentials {

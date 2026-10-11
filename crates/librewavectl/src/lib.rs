@@ -7,10 +7,10 @@ use librewave_core::{
     Wave3Control,
 };
 use librewave_ipc::Response;
-use librewave_platform_linux::ipc::{Client, ClientError};
+use librewave_platform_linux::ipc::{Client, ClientError, configured_socket_path};
 use librewave_protocol::{Wave3GainDb, Wave3HeadphoneDb, Wave3MonitorPercent};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod lifecycle;
 
@@ -618,17 +618,13 @@ fn write_help<W: Write>(output: &mut W) -> io::Result<()> {
     writeln!(output, "  uninstall       Remove manifest-owned files")
 }
 
-fn configured_socket_path() -> PathBuf {
-    std::env::var_os("LIBREWAVE_SOCKET")
-        .map_or_else(librewave_platform_linux::ipc::default_socket_path, PathBuf::from)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use librewave_core::{
         AudioSnapshot, DeviceConnection, DeviceId, DeviceModel, ServiceFailureReason,
     };
+    use std::path::PathBuf;
 
     fn snapshot() -> Snapshot {
         Snapshot {

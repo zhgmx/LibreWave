@@ -119,6 +119,5 @@ pub fn run(socket_path: impl Into<PathBuf>) -> std::io::Result<()> {
 /// Returns the daemon socket path selected by the environment.
 #[must_use]
 pub fn socket_path() -> PathBuf {
-    std::env::var_os("LIBREWAVE_SOCKET")
-        .map_or_else(librewave_platform_linux::ipc::default_socket_path, PathBuf::from)
+    librewave_platform_linux::ipc::configured_socket_path()
 }

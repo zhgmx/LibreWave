@@ -4,10 +4,12 @@ use gpui::{
 };
 use librewave_core::{
     Command, ControlAccessState, DeviceAdmissionSnapshot, DeviceGeneration, DeviceId,
-    DeviceWriteAccess, FixedPointValue, Snapshot, Wave3Control,
+    DeviceWriteAccess, FaderGain, FixedPointValue, MeterAvailability, MixRoute, MixTarget,
+    MixerGeneration, MixerRuntimeState, Snapshot, SourceId, Wave3Control,
 };
 use librewave_ipc::Response;
-use librewave_platform_linux::ipc::{Client, default_socket_path};
+use librewave_platform_linux::ipc::{Client, ClientError, configured_socket_path};
+use std::time::Duration;
 
 // Neutral planes keep status, source routing, and physical controls distinct.
 const BACKGROUND: u32 = 0x000A_0E13;
@@ -19,6 +21,7 @@ const INK: u32 = 0x00F2_F6F8;
 const MUTED: u32 = 0x0095_A7B5;
 const ACCENT: u32 = 0x006B_DACB;
 const WARNING: u32 = 0x00E9_B872;
+const STATUS_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Opens the optional desktop client.
 ///
@@ -42,13 +45,32 @@ pub fn run() {
 struct Shell {
     snapshot: Option<Snapshot>,
     pending: bool,
-    error: Option<String>,
+    poll_in_flight: bool,
+    request_epoch: u64,
+    action_error: Option<String>,
+    connection_error: Option<String>,
 }
 
 impl Shell {
     fn new(cx: &mut Context<Self>) -> Self {
-        let mut shell = Self { snapshot: None, pending: false, error: None };
+        let mut shell = Self {
+            snapshot: None,
+            pending: false,
+            poll_in_flight: false,
+            request_epoch: 0,
+            action_error: None,
+            connection_error: None,
+        };
         shell.send(Command::GetStatus, cx);
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(STATUS_INTERVAL).await;
+                if this.update(cx, Shell::poll_status).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         shell
     }
 
@@ -57,38 +79,110 @@ impl Shell {
             return;
         }
         self.pending = true;
-        self.error = None;
+        self.request_epoch = self.request_epoch.wrapping_add(1);
+        self.action_error = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { Client::new(default_socket_path()).request(command) })
+                .spawn(async move { Client::new(configured_socket_path()).request(command) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.pending = false;
                 match result {
-                    Ok(Response::Status { snapshot } | Response::Refreshed { snapshot }) => {
-                        this.snapshot = Some(snapshot);
-                    }
-                    Ok(
-                        Response::DeviceInspection { device } | Response::ControlChanged { device },
-                    ) => {
-                        if let Some(snapshot) = &mut this.snapshot
-                            && let Some(current) =
-                                snapshot.devices.iter_mut().find(|current| current.id == device.id)
-                        {
-                            *current = device;
-                        }
-                    }
-                    Ok(_) => {
-                        this.error = Some("The daemon returned an unexpected response.".to_owned());
-                    }
-                    Err(error) => this.error = Some(error.to_string()),
+                    Ok(response) => this.apply_response(command, response),
+                    Err(error) => this.apply_error(&error),
                 }
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    fn poll_status(&mut self, cx: &mut Context<Self>) {
+        if self.pending || self.poll_in_flight {
+            return;
+        }
+        self.poll_in_flight = true;
+        let epoch = self.request_epoch;
+        cx.spawn(async move |this, cx| {
+            let result =
+                cx.background_executor()
+                    .spawn(async move {
+                        Client::new(configured_socket_path()).request(Command::GetStatus)
+                    })
+                    .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.apply_poll_result(epoch, result) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn apply_poll_result(&mut self, epoch: u64, result: Result<Response, ClientError>) -> bool {
+        self.poll_in_flight = false;
+        if self.pending || self.request_epoch != epoch {
+            return false;
+        }
+        match result {
+            Ok(Response::Status { snapshot }) => {
+                self.snapshot = Some(snapshot);
+                self.connection_error = None;
+            }
+            Ok(_) => {
+                self.snapshot = None;
+                self.action_error = None;
+                self.connection_error =
+                    Some("The daemon returned an unexpected status response.".to_owned());
+            }
+            Err(error) => {
+                self.snapshot = None;
+                self.action_error = None;
+                self.connection_error = Some(error.to_string());
+            }
+        }
+        true
+    }
+
+    fn apply_response(&mut self, command: Command, response: Response) {
+        match (command, response) {
+            (Command::GetStatus, Response::Status { snapshot })
+            | (Command::Refresh, Response::Refreshed { snapshot }) => {
+                self.snapshot = Some(snapshot);
+            }
+            (Command::InspectDevice { .. }, Response::DeviceInspection { device })
+            | (Command::SetWave3Control { .. }, Response::ControlChanged { device }) => {
+                if let Some(snapshot) = &mut self.snapshot
+                    && let Some(current) =
+                        snapshot.devices.iter_mut().find(|current| current.id == device.id)
+                {
+                    *current = device;
+                }
+            }
+            (Command::GetMixer, Response::Mixer { mixer })
+            | (Command::SetMixerRoute { .. }, Response::MixerRouteChanged { mixer }) => {
+                if let Some(snapshot) = &mut self.snapshot {
+                    snapshot.mixer = mixer;
+                }
+            }
+            _ => {
+                self.action_error = Some("The daemon returned an unexpected response.".to_owned());
+                return;
+            }
+        }
+        self.connection_error = None;
+    }
+
+    fn apply_error(&mut self, error: &ClientError) {
+        if let ClientError::Remote(_) = error {
+            self.action_error = Some(error.to_string());
+        } else {
+            self.snapshot = None;
+            self.action_error = None;
+            self.connection_error = Some(error.to_string());
+        }
     }
 }
 
@@ -111,17 +205,6 @@ impl Shell {
         device: Option<&librewave_core::DeviceSnapshot>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let daemon_online = self.snapshot.is_some();
-        let services = self.snapshot.as_ref().map_or_else(
-            || "The daemon is unavailable".to_owned(),
-            |snapshot| {
-                format!(
-                    "PipeWire {}  ·  WirePlumber {}",
-                    snapshot.audio.pipewire.status_word(),
-                    snapshot.audio.wireplumber.status_word()
-                )
-            },
-        );
         div()
             .id("studio-content")
             .flex_1()
@@ -157,8 +240,8 @@ impl Shell {
                             })),
                     ),
             )
-            .child(service_panel(daemon_online, services))
-            .when_some(self.error.clone(), |view, error| {
+            .child(service_panel(self.snapshot.as_ref()))
+            .when_some(self.connection_error.clone(), |view, error| {
                 view.child(
                     div()
                         .p(px(12.))
@@ -168,7 +251,17 @@ impl Shell {
                         .child(error),
                 )
             })
-            .child(mixer_matrix())
+            .when_some(self.action_error.clone(), |view, error| {
+                view.child(
+                    div()
+                        .p(px(12.))
+                        .rounded(px(8.))
+                        .bg(rgb(RAISED))
+                        .text_color(rgb(WARNING))
+                        .child(error),
+                )
+            })
+            .child(self.mixer_matrix(cx))
             .child(self.device_panel(device, cx))
     }
 
@@ -370,7 +463,30 @@ fn sidebar(device_available: bool) -> impl IntoElement {
         )
 }
 
-fn service_panel(daemon_online: bool, services: String) -> impl IntoElement {
+fn service_panel(snapshot: Option<&Snapshot>) -> impl IntoElement {
+    let (headline, badge, color) = match snapshot.map(|state| state.mixer.runtime) {
+        Some(MixerRuntimeState::Active) => {
+            ("Audio host and mixer engine connected", "ACTIVE", ACCENT)
+        }
+        Some(MixerRuntimeState::Inactive { .. }) => {
+            ("Audio host and mixer engine are not connected", "INACTIVE", WARNING)
+        }
+        None => ("Connect librewaved to see device state", "OFFLINE", WARNING),
+    };
+    let services = snapshot.map_or_else(
+        || "The daemon is unavailable".to_owned(),
+        |state| {
+            let meters = match state.mixer.meters {
+                MeterAvailability::Unavailable { .. } => "meters unavailable",
+                MeterAvailability::Unpublished => "meters not published over IPC",
+            };
+            format!(
+                "PipeWire {}  ·  WirePlumber {}  ·  {meters}",
+                state.audio.pipewire.status_word(),
+                state.audio.wireplumber.status_word(),
+            )
+        },
+    );
     div()
         .p(px(14.))
         .rounded(px(9.))
@@ -385,14 +501,10 @@ fn service_panel(daemon_online: bool, services: String) -> impl IntoElement {
                 .flex()
                 .flex_col()
                 .gap(px(3.))
-                .child(div().text_sm().child(if daemon_online {
-                    "Audio engine waiting for production host"
-                } else {
-                    "Connect librewaved to see device state"
-                }))
+                .child(div().text_sm().child(headline))
                 .child(div().text_xs().text_color(rgb(MUTED)).child(services)),
         )
-        .child(status_badge(if daemon_online { "INACTIVE" } else { "OFFLINE" }, WARNING))
+        .child(status_badge(badge, color))
 }
 
 fn section_label(label: &'static str) -> impl IntoElement {
@@ -410,34 +522,74 @@ fn status_badge(label: &str, color: u32) -> impl IntoElement {
         .child(label.to_owned())
 }
 
-fn mixer_matrix() -> impl IntoElement {
-    div()
-        .w_full()
-        .rounded(px(10.))
-        .border_1()
-        .border_color(rgb(BORDER))
-        .bg(rgb(PANEL))
-        .p(px(18.))
-        .flex()
-        .flex_col()
-        .gap(px(13.))
-        .child(section_label("SOURCE ROUTING"))
-        .child(
-            div()
-                .flex()
-                .gap(px(12.))
-                .child(matrix_cell("SOURCE", true))
-                .child(matrix_cell("MONITOR MIX", false))
-                .child(matrix_cell("STREAM MIX", false)),
-        )
-        .child(matrix_row("Microphone", "Wave:3 capture"))
-        .child(matrix_row("System", "Desktop audio"))
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(MUTED))
-                .child("Routing and live meters become available when the audio host is ready."),
-        )
+impl Shell {
+    fn mixer_matrix(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut matrix = div()
+            .w_full()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .bg(rgb(PANEL))
+            .p(px(18.))
+            .flex()
+            .flex_col()
+            .gap(px(13.))
+            .child(section_label("SOURCE ROUTING"))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(12.))
+                    .child(matrix_cell("SOURCE", true))
+                    .child(matrix_cell("MONITOR MIX", false))
+                    .child(matrix_cell("STREAM MIX", false)),
+            );
+        if let Some(snapshot) = &self.snapshot {
+            let generation = snapshot.mixer.generation();
+            for source in &snapshot.mixer.profile.sources {
+                let controls = source.controls;
+                let id = controls.source();
+                matrix = matrix.child(
+                    div()
+                        .flex()
+                        .gap(px(12.))
+                        .child(source_cell(&source.name, &source.role.to_string()))
+                        .child(route_cell(
+                            id,
+                            MixTarget::Monitor,
+                            controls.monitor(),
+                            generation,
+                            self.pending,
+                            cx,
+                        ))
+                        .child(route_cell(
+                            id,
+                            MixTarget::Stream,
+                            controls.stream(),
+                            generation,
+                            self.pending,
+                            cx,
+                        )),
+                );
+            }
+            let note = match snapshot.mixer.runtime {
+                MixerRuntimeState::Active => {
+                    "Saved route changes apply at the next graph boundary. Live meters are not published yet."
+                }
+                MixerRuntimeState::Inactive { .. } => {
+                    "Routes are saved now and apply when the audio host is active. Live meters are unavailable."
+                }
+            };
+            matrix = matrix.child(div().text_xs().text_color(rgb(MUTED)).child(note));
+        } else {
+            matrix = matrix.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(MUTED))
+                    .child("Connect to the daemon to see software routes."),
+            );
+        }
+        matrix
+    }
 }
 
 fn matrix_cell(label: &'static str, source: bool) -> impl IntoElement {
@@ -449,28 +601,31 @@ fn matrix_cell(label: &'static str, source: bool) -> impl IntoElement {
         .child(label)
 }
 
-fn matrix_row(source: &'static str, detail: &'static str) -> impl IntoElement {
+fn source_cell(source: &str, detail: &str) -> impl IntoElement {
     div()
+        .flex_1()
+        .min_w_0()
+        .p(px(11.))
+        .rounded(px(7.))
+        .bg(rgb(RAISED))
         .flex()
-        .gap(px(12.))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .p(px(11.))
-                .rounded(px(7.))
-                .bg(rgb(RAISED))
-                .flex()
-                .flex_col()
-                .gap(px(3.))
-                .child(div().text_sm().child(source))
-                .child(div().text_xs().text_color(rgb(MUTED)).child(detail)),
-        )
-        .child(matrix_unavailable())
-        .child(matrix_unavailable())
+        .flex_col()
+        .gap(px(3.))
+        .child(div().text_sm().child(source.to_owned()))
+        .child(div().text_xs().text_color(rgb(MUTED)).child(detail.to_owned()))
 }
 
-fn matrix_unavailable() -> impl IntoElement {
+fn route_cell(
+    source: SourceId,
+    target: MixTarget,
+    route: MixRoute,
+    generation: MixerGeneration,
+    pending: bool,
+    cx: &mut Context<Shell>,
+) -> impl IntoElement {
+    let toggle = route_toggle_command(source, target, route, generation);
+    let down = route_step_command(source, target, route, generation, -1);
+    let up = route_step_command(source, target, route, generation, 1);
     div()
         .flex_1()
         .min_w_0()
@@ -478,9 +633,87 @@ fn matrix_unavailable() -> impl IntoElement {
         .rounded(px(7.))
         .border_1()
         .border_color(rgb(BORDER))
-        .text_xs()
-        .text_color(rgb(MUTED))
-        .child("Unavailable")
+        .flex()
+        .flex_col()
+        .gap(px(5.))
+        .child(div().text_sm().child(format!(
+            "{}  ·  {:.1} dB",
+            if route.enabled() { "On" } else { "Off" },
+            route.fader().decibels(),
+        )))
+        .child(
+            div()
+                .flex()
+                .gap(px(5.))
+                .child(mixer_button(
+                    &format!("route-{}-{target}-toggle", source.get()),
+                    if route.enabled() { "Turn off" } else { "Turn on" },
+                    Some(toggle),
+                    pending,
+                    cx,
+                ))
+                .child(mixer_button(
+                    &format!("route-{}-{target}-down", source.get()),
+                    "−",
+                    down,
+                    pending,
+                    cx,
+                ))
+                .child(mixer_button(
+                    &format!("route-{}-{target}-up", source.get()),
+                    "+",
+                    up,
+                    pending,
+                    cx,
+                )),
+        )
+}
+
+fn mixer_button(
+    key: &str,
+    label: &str,
+    command: Option<Command>,
+    pending: bool,
+    cx: &mut Context<Shell>,
+) -> Stateful<Div> {
+    let mut element = button(key, label);
+    if !pending && let Some(command) = command {
+        element = element.on_click(cx.listener(move |this, _, _, cx| this.send(command, cx)));
+    } else {
+        element = element.text_color(rgb(MUTED));
+    }
+    element
+}
+
+fn route_toggle_command(
+    source: SourceId,
+    target: MixTarget,
+    route: MixRoute,
+    expected_generation: MixerGeneration,
+) -> Command {
+    Command::SetMixerRoute {
+        expected_generation,
+        source,
+        target,
+        route: MixRoute::new(!route.enabled(), route.fader()),
+    }
+}
+
+fn route_step_command(
+    source: SourceId,
+    target: MixTarget,
+    route: MixRoute,
+    expected_generation: MixerGeneration,
+    delta: i16,
+) -> Option<Command> {
+    let steps = route.fader().half_decibel_steps().checked_add(delta)?;
+    let fader = FaderGain::from_half_decibel_steps(steps).ok()?;
+    Some(Command::SetMixerRoute {
+        expected_generation,
+        source,
+        target,
+        route: MixRoute::new(route.enabled(), fader),
+    })
 }
 
 fn button(id: &str, label: &str) -> Stateful<Div> {
@@ -601,6 +834,19 @@ fn stepped(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use librewave_core::{MixerProfile, MixerSnapshot, SYSTEM_SOURCE_ID};
+    use std::path::PathBuf;
+
+    fn shell_with(snapshot: Snapshot) -> Shell {
+        Shell {
+            snapshot: Some(snapshot),
+            pending: false,
+            poll_in_flight: false,
+            request_epoch: 0,
+            action_error: None,
+            connection_error: None,
+        }
+    }
 
     #[test]
     fn hardware_steps_stop_at_reviewed_boundaries() {
@@ -609,5 +855,111 @@ mod tests {
         assert_eq!(stepped(gain, 128, 0, 40 * 256).map(|value| value.raw), Some(128));
         let headphone = FixedPointValue { raw: -60 * 256, fractional_bits: 8 };
         assert_eq!(stepped(headphone, -128, -60 * 256, 0), None);
+    }
+
+    #[test]
+    fn software_route_commands_keep_source_target_and_other_route_values() {
+        let source = SYSTEM_SOURCE_ID;
+        let route = MixRoute::new(false, FaderGain::from_decibels(-3.5).expect("test level"));
+        let generation = MixerGeneration(9);
+        assert_eq!(
+            route_toggle_command(source, MixTarget::Monitor, route, generation),
+            Command::SetMixerRoute {
+                expected_generation: generation,
+                source,
+                target: MixTarget::Monitor,
+                route: MixRoute::new(true, route.fader()),
+            }
+        );
+        assert_eq!(
+            route_step_command(source, MixTarget::Stream, route, generation, 1),
+            Some(Command::SetMixerRoute {
+                expected_generation: generation,
+                source,
+                target: MixTarget::Stream,
+                route: MixRoute::new(false, FaderGain::from_decibels(-3.0).expect("next level")),
+            })
+        );
+        assert!(
+            route_step_command(
+                source,
+                MixTarget::Stream,
+                MixRoute::new(true, FaderGain::MAX),
+                generation,
+                1,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn connection_loss_removes_stale_active_status_until_reconnect() {
+        let mut snapshot = Snapshot::empty();
+        snapshot.mixer = MixerSnapshot::active(MixerProfile::default());
+        let mut shell = shell_with(snapshot);
+        shell.apply_error(&ClientError::Connection {
+            path: PathBuf::from("/tmp/librewave-test.sock"),
+            message: "daemon stopped".to_owned(),
+        });
+        assert!(shell.snapshot.is_none());
+        assert!(shell.connection_error.is_some());
+        shell.apply_response(Command::GetStatus, Response::Status { snapshot: Snapshot::empty() });
+        assert_eq!(
+            shell.snapshot.as_ref().map(|snapshot| snapshot.mixer.runtime),
+            Some(MixerRuntimeState::Inactive {
+                reason: librewave_core::MixerInactiveReason::AudioHostEngineNotConnected,
+            })
+        );
+        assert!(shell.connection_error.is_none());
+    }
+
+    #[test]
+    fn status_poll_recovers_after_restart_and_cannot_overwrite_a_newer_action() {
+        let mut active = Snapshot::empty();
+        active.mixer = MixerSnapshot::active(MixerProfile::default());
+        let mut shell = shell_with(active);
+        shell.poll_in_flight = true;
+        assert!(shell.apply_poll_result(
+            0,
+            Err(ClientError::Connection {
+                path: PathBuf::from("/tmp/librewave-test.sock"),
+                message: "daemon stopped".to_owned(),
+            }),
+        ));
+        assert!(shell.snapshot.is_none());
+        assert!(shell.connection_error.is_some());
+
+        shell.poll_in_flight = true;
+        shell.request_epoch = 1;
+        assert!(!shell.apply_poll_result(0, Ok(Response::Status { snapshot: Snapshot::empty() }),));
+        assert!(shell.snapshot.is_none());
+
+        shell.poll_in_flight = true;
+        assert!(shell.apply_poll_result(1, Ok(Response::Status { snapshot: Snapshot::empty() }),));
+        assert!(shell.snapshot.is_some());
+        assert!(shell.connection_error.is_none());
+    }
+
+    #[test]
+    fn accepted_route_response_replaces_desired_mixer_state() {
+        let mut shell = shell_with(Snapshot::empty());
+        let profile = MixerProfile::default()
+            .with_route(
+                SYSTEM_SOURCE_ID,
+                MixTarget::Monitor,
+                MixRoute::new(true, FaderGain::from_decibels(-0.5).expect("route level")),
+            )
+            .expect("valid route");
+        let mixer = MixerSnapshot::inactive(profile);
+        shell.apply_response(
+            Command::SetMixerRoute {
+                expected_generation: MixerGeneration(0),
+                source: SYSTEM_SOURCE_ID,
+                target: MixTarget::Monitor,
+                route: MixRoute::new(true, FaderGain::from_decibels(-0.5).expect("route level")),
+            },
+            Response::MixerRouteChanged { mixer: mixer.clone() },
+        );
+        assert_eq!(shell.snapshot.as_ref().map(|snapshot| &snapshot.mixer), Some(&mixer));
     }
 }
