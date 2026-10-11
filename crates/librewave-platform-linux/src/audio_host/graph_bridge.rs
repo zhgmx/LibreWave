@@ -50,9 +50,11 @@ impl GraphProcessor for ClockBridgeGraphProcessor {
         if silence.map_err(|error| self.bridge_error(error))? {
             return Ok(());
         }
+        // A removed link can leave old samples in the adapter's mapped buffer.
+        // The drain state is semantic silence from the first detached cycle.
         let system = match block.system_state {
-            SystemCycleState::Idle => GraphSystemInput::unconnected(),
-            SystemCycleState::Priming | SystemCycleState::Active | SystemCycleState::Draining => {
+            SystemCycleState::Idle | SystemCycleState::Draining => GraphSystemInput::unconnected(),
+            SystemCycleState::Priming | SystemCycleState::Active => {
                 GraphSystemInput::connected(block.system.left, block.system.right)
             }
         };
@@ -143,6 +145,49 @@ mod tests {
             reader.try_take(),
             Ok(BridgeError::InvalidQuantum { actual: 2_048, maximum: 1_024 })
         );
+    }
+
+    #[test]
+    fn detached_system_buffer_is_not_read_during_drain() {
+        let mut fixture = primed_worker_fixture();
+        fixture.parts.control.activate().expect("activate primed bridge");
+        let epoch = ClockAttemptEpoch::try_new(7).expect("test epoch");
+        let mut processor = ClockBridgeGraphProcessor::new(epoch, fixture.parts.graph);
+        let input = vec![f32::NAN; 256];
+        let mut microphone_left = vec![0.0; 256];
+        let mut microphone_right = vec![0.0; 256];
+        let mut monitor_left = vec![0.0; 256];
+        let mut monitor_right = vec![0.0; 256];
+        let mut stream_left = vec![0.0; 256];
+        let mut stream_right = vec![0.0; 256];
+        processor
+            .process(ProcessBlock {
+                timing: ProcessTiming {
+                    driver_id: 42,
+                    rate: 48_000,
+                    position: fixture.graph_position,
+                    monotonic_nsec: fixture.graph_time,
+                    quantum: 256,
+                },
+                system_state: SystemCycleState::Draining,
+                system: super::super::pipewire_filter_ffi::StereoInput {
+                    left: &input,
+                    right: &input,
+                },
+                microphone: super::super::pipewire_filter_ffi::StereoOutput {
+                    left: &mut microphone_left,
+                    right: &mut microphone_right,
+                },
+                monitor: super::super::pipewire_filter_ffi::StereoOutput {
+                    left: &mut monitor_left,
+                    right: &mut monitor_right,
+                },
+                stream: super::super::pipewire_filter_ffi::StereoOutput {
+                    left: &mut stream_left,
+                    right: &mut stream_right,
+                },
+            })
+            .expect("drain ignores detached adapter data");
     }
 
     #[test]

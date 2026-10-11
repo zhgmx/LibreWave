@@ -806,6 +806,7 @@ struct TestPeerState {
     expected_driver: u32,
     expected_quantum: u32,
     cycles: AtomicU64,
+    startup_missing: AtomicU64,
     missing: AtomicU64,
     timing_errors: AtomicU64,
     vector_errors: AtomicU64,
@@ -823,6 +824,7 @@ struct TestPeerState {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct TestPeerDiagnostics {
     pub(super) cycles: u64,
+    pub(super) startup_missing: u64,
     pub(super) missing: u64,
     pub(super) timing_errors: u64,
     pub(super) vector_errors: u64,
@@ -862,6 +864,7 @@ impl TestPeer {
             expected_driver,
             expected_quantum: expected_quantum.get(),
             cycles: AtomicU64::new(0),
+            startup_missing: AtomicU64::new(0),
             missing: AtomicU64::new(0),
             timing_errors: AtomicU64::new(0),
             vector_errors: AtomicU64::new(0),
@@ -954,6 +957,7 @@ impl TestPeer {
         };
         TestPeerDiagnostics {
             cycles: self.callbacks.cycles.load(Ordering::Relaxed),
+            startup_missing: self.callbacks.startup_missing.load(Ordering::Relaxed),
             missing: self.callbacks.missing.load(Ordering::Relaxed),
             timing_errors: self.callbacks.timing_errors.load(Ordering::Relaxed),
             vector_errors: self.callbacks.vector_errors.load(Ordering::Relaxed),
@@ -1033,7 +1037,7 @@ fn test_peer_cycle(
         TestPeerMode::Consumer => 6,
     };
     if missing_mask != 0 || buffers.is_null() {
-        state.missing.fetch_add(1, Ordering::Relaxed);
+        record_test_peer_missing(state);
         return;
     }
     if driver_id != state.expected_driver
@@ -1049,7 +1053,7 @@ fn test_peer_cycle(
     let pointers = unsafe { slice::from_raw_parts(buffers, port_count) };
     if let Err(error) = validate_buffer_ranges(pointers, quantum as usize) {
         if error == BufferRangeError::Null {
-            state.missing.fetch_add(1, Ordering::Relaxed);
+            record_test_peer_missing(state);
         } else {
             state.vector_errors.fetch_add(1, Ordering::Relaxed);
         }
@@ -1065,13 +1069,25 @@ fn test_peer_cycle(
             let right = unsafe { slice::from_raw_parts_mut(pointers[1], frames) };
             for (index, (left, right)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
                 let frame = position + index as u64;
-                *left = 0.25 + (frame % 983) as f32 / 16_384.0;
-                *right = 0.375 + (frame % 977) as f32 / 16_384.0;
+                *left = 0.25 + (frame % 4093) as f32 / 16_384.0;
+                *right = 0.375 + (frame % 4091) as f32 / 16_384.0;
             }
         }
         TestPeerMode::Consumer => consume_test_vectors(state, pointers, frames, position),
     }
     state.cycles.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+fn record_test_peer_missing(state: &TestPeerState) {
+    // PipeWire may invoke an active test peer while ports are still being
+    // mapped. A missing buffer after the first complete cycle is a fault.
+    let counter = if state.cycles.load(Ordering::Relaxed) == 0 {
+        &state.startup_missing
+    } else {
+        &state.missing
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -1108,10 +1124,25 @@ fn consume_test_vectors(
             active_system = true;
             let left_code = ((system_left - 0.25) * 16_384.0).round() as i32;
             let right_code = ((system_right - 0.375) * 16_384.0).round() as i32;
-            if let Some(producer_position) = decode_position(left_code, right_code, 983, 977, 163) {
-                let system_latency = (consumer_position + 960_391 - producer_position) % 960_391;
-                state.system_latency_min.fetch_min(system_latency, Ordering::Relaxed);
-                state.system_latency_max.fetch_max(system_latency, Ordering::Relaxed);
+            let valid = u32::try_from(left_code)
+                .ok()
+                .filter(|value| *value < 4093)
+                .zip(u32::try_from(right_code).ok().filter(|value| *value < 4091));
+            if let Some((left_code, right_code)) = valid {
+                let sample_position = position + index as u64;
+                let left_latency = ((sample_position % 4093) as u32 + 4093 - left_code) % 4093;
+                let right_latency = ((sample_position % 4091) as u32 + 4091 - right_code) % 4091;
+                state
+                    .system_latency_min
+                    .fetch_min(left_latency.min(right_latency), Ordering::Relaxed);
+                state
+                    .system_latency_max
+                    .fetch_max(left_latency.max(right_latency), Ordering::Relaxed);
+                if left_latency > 2 * state.expected_quantum
+                    || right_latency > 2 * state.expected_quantum
+                {
+                    state.vector_errors.fetch_add(1, Ordering::Relaxed);
+                }
             } else {
                 state.vector_errors.fetch_add(1, Ordering::Relaxed);
             }
