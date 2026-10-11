@@ -178,6 +178,44 @@ The opt-in host composes both workers, the bridge, and the PipeWire callback. It
 
 The named provisional policy uses a 1,024-frame capture period with an 8,192-frame buffer, a 256-frame playback period with a 2,048-frame buffer, and a fixed 256-frame graph quantum. Each bridge FIFO has 16,384 frames, an 8,192-frame target, and a 4,096-frame startup guard. Capture admission advances at 4,096 queued frames. The final guard check still uses the 8,192-frame target. Playback checks both FIFO fills before it pauses the graph for that final check. The rate ratio range is 0.98 through 1.02. Capture rate estimates require at least 8,192 frames and 160 ms of observation. Playback rate estimates require at least 32,768 frames and 640 ms. ALSA waits use 10 milliseconds and four transient retries. These values favor startup headroom. They are not measured latency settings. `librewavectl start --experimental` selects this host through the installed daemon. Setup leaves audio inactive. The daemon reloads accepted audio intent from its strict audio-state file after restart.
 
+## Software performance checks
+
+Prerequisite: use the repository toolchain and dependencies in [Setup](setup.md).
+The performance example uses generated samples. It opens no USB device, ALSA
+PCM, PipeWire connection, or session service.
+
+```text
+cargo run --release -p librewave-engine --example audio_performance
+```
+
+The command writes a JSON report to standard output. It runs the real mixer
+with meters at two and twelve sources, plus mono and stereo sinc resampling.
+Each shape uses 64, 128, 256, 512, and 1024 output frames. It warms each shape
+for 128 blocks and measures 4096 blocks. Output checks reject an incorrect
+mixer sum, non-finite samples, or incomplete resampling output.
+
+The report includes median, p99, maximum call time, and the number of calls
+that exceed one audio period. Timing includes timer overhead and scheduler
+preemption. Calls run without pacing. These values measure software processing
+cost, not a scheduled audio callback or hardware round-trip latency. The sinc
+dependency's reported output delay is a separate frame count. It does not
+include FIFO, PCM, USB, or acoustic delay. Timing overruns are reported rather
+than used as a machine-dependent unit-test threshold.
+
+The existing private PipeWire test fixture can also check five graph rebuilds
+after server loss. It starts and stops only its private server. It opens no USB
+device or ALSA PCM and does not change desktop defaults or services. Run it
+separately and serially:
+
+```text
+LIBREWAVE_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux --lib audio_host::pipewire_graph::tests::integration::private_graph_rebuilds_after_repeated_server_loss -- --ignored --exact --test-threads=1
+```
+
+Each cycle requires working processing, one instance of each product node,
+quiescent teardown after server loss, and idempotent release. This proves graph
+reconstruction in the private fixture. Hardware and desktop recovery require
+their separate acceptance runs.
+
 ## Mixer control plane
 
 The current product profile has two logical sources. Source 1 is Microphone, and source 2 is System. Source 1 supplies the microphone endpoint. Each source starts with its monitor and stream routes enabled at 0 dB. Levels use integer half-decibel steps from -60 dB through +12 dB.

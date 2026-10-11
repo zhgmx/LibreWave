@@ -14,3 +14,11 @@ rubato = { version = "=4.0.0", default-features = false }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[[example]]
+name = "audio_performance"
+test = true

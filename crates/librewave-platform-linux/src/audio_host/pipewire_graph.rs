@@ -1776,6 +1776,61 @@ context.modules = [
         }
 
         #[test]
+        #[ignore = "requires LIBREWAVE_PIPEWIRE_INTEGRATION=1; restarts only private PipeWire, no USB or ALSA"]
+        fn private_graph_rebuilds_after_repeated_server_loss() {
+            assert_eq!(std::env::var("LIBREWAVE_PIPEWIRE_INTEGRATION").as_deref(), Ok("1"));
+            for cycle in 20..25 {
+                let mut server = PrivatePipeWire::start(256, cycle);
+                let plans = endpoint_plans(DELIBERATE_ENDPOINTS).expect("endpoints");
+                let proof = Arc::new(ProcessorProof::default());
+                let processor = EngineProcessor::new(1024, Arc::clone(&proof));
+                let mut graph = InactiveGraph::construct(
+                    REMOTE,
+                    &plans,
+                    NonZeroU32::new(256).expect("quantum"),
+                    AdapterPortMode::SelfConfigured,
+                    processor,
+                )
+                .expect("construct replacement graph")
+                .activate()
+                .expect("activate replacement graph");
+                run_cycles(&mut graph, 64);
+                assert!(!graph.diagnostics().failed, "cycle {cycle} faulted before recovery proof");
+                assert!(graph.diagnostics().process_cycles >= 64);
+                assert!(proof.idle.load(Ordering::Relaxed) > 0);
+                assert_eq!(proof.vector_errors.load(Ordering::Relaxed), 0);
+                let nodes = server
+                    .command("pw-cli")
+                    .args(["-r", REMOTE, "ls", "Node"])
+                    .output()
+                    .expect("inspect private graph");
+                assert!(nodes.status.success());
+                let nodes = String::from_utf8_lossy(&nodes.stdout);
+                for name in [
+                    "librewave.system",
+                    "librewave.microphone",
+                    "librewave.monitor-mix",
+                    "librewave.stream-mix",
+                    "librewave.internal.mixer",
+                ] {
+                    assert_eq!(
+                        nodes.matches(&format!("node.name = \"{name}\"")).count(),
+                        1,
+                        "cycle {cycle}: {name}"
+                    );
+                }
+                server.child.kill().expect("stop only private server");
+                server.child.wait().expect("private server exited");
+                graph.teardown().expect("release disconnected graph");
+                graph.teardown().expect("idempotent release");
+                assert_eq!(graph.inner.filter.callbacks_in_flight(), 0);
+                assert_eq!(graph.inner.filter.node_id(), None);
+                drop(graph);
+                drop(server);
+            }
+        }
+
+        #[test]
         #[ignore = "requires LIBREWAVE_PIPEWIRE_INTEGRATION=1; pauses only the private PipeWire server without USB or ALSA"]
         fn private_graph_teardown_keeps_unconfirmed_timeout_terminal() {
             assert_eq!(std::env::var("LIBREWAVE_PIPEWIRE_INTEGRATION").as_deref(), Ok("1"));
