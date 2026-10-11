@@ -38,6 +38,18 @@ fn attempt_error(phase: &'static str, reason: impl ToString) -> LinuxAudioError 
     LinuxAudioError::AudioAttempt { phase, reason: reason.to_string() }
 }
 
+fn wave3_capture_rate_estimator(
+    bounds: RateMatchRatioBounds,
+) -> Result<ClockRateEstimatorConfig, LinuxAudioError> {
+    // ALSA status timestamps and ring availability are sampled together, but
+    // USB packet delivery can move the ring cursor within one short period.
+    // Require enough running-clock evidence before testing the rate ratio.
+    // Playback must begin before its 16,384-frame startup FIFO fills.
+    let delta = ClockDeltaBounds::try_new(8_192, 1_000_000_000, 160_000_000, 60_000_000_000)
+        .map_err(|error| attempt_error("policy", error))?;
+    Ok(ClockRateEstimatorConfig::new(delta, delta, 2_000_000_000, bounds))
+}
+
 trait GraphRuntime {
     fn iterate(&mut self, timeout: Duration);
     fn cycles(&self) -> u64;
@@ -154,12 +166,10 @@ impl AudioAttemptPolicy {
             .map_err(|error| attempt_error("policy", error))?;
         let bounds = RateMatchRatioBounds::try_new(2.0, 0.98, 1.02)
             .map_err(|error| attempt_error("policy", error))?;
-        let delta = ClockDeltaBounds::try_new(1, 1_000_000_000, 1, 60_000_000_000)
-            .map_err(|error| attempt_error("policy", error))?;
-        let capture_estimator = ClockRateEstimatorConfig::new(delta, delta, 2_000_000_000, bounds);
-        // A short playback status span includes PCM start and USB packet
-        // scheduling delay. Require a running-clock interval long enough to
-        // distinguish that transient from a real rate mismatch.
+        let capture_estimator = wave3_capture_rate_estimator(bounds)?;
+        // Playback status includes PCM start and USB scheduling delay. Its
+        // estimator can wait longer because its worker is already consuming
+        // the playback FIFO.
         let playback_delta =
             ClockDeltaBounds::try_new(32_768, 1_000_000_000, 640_000_000, 60_000_000_000)
                 .map_err(|error| attempt_error("policy", error))?;
@@ -731,6 +741,10 @@ pub(in crate::audio_host) mod tests {
     use super::*;
     use crate::{AlsaCardInfo, DeviceIdentity, UsbTopology};
     use ::alsa::pcm::State;
+    use librewave_engine::{
+        ClockFramePosition, ClockObservation, ClockRateEstimate, ClockRateEstimator,
+        ClockRateEstimatorError, MonotonicNanoseconds,
+    };
     use std::sync::{Arc, Mutex};
 
     type Calls = Arc<Mutex<Vec<&'static str>>>;
@@ -1031,6 +1045,56 @@ pub(in crate::audio_host) mod tests {
                 .expect("policy");
         ClockBridgeParts::new(policy.physical, &MixerProfile::default(), policy.bridge)
             .expect("bridge policy fits physical geometry");
+    }
+
+    #[test]
+    fn wave3_rate_policy_defers_short_capture_status_jitter_but_rejects_sustained_drift() {
+        let epoch = ClockAttemptEpoch::try_new(7).expect("epoch");
+        let bounds = RateMatchRatioBounds::try_new(2.0, 0.98, 1.02).expect("ratio bounds");
+        let observation = |frames: u64, nanoseconds: u64| {
+            ClockObservation::new(
+                epoch,
+                ClockFramePosition::new(frames),
+                MonotonicNanoseconds::new(1_000_000_000 + nanoseconds),
+            )
+        };
+        let origin = observation(0, 0);
+        let capture_jitter = observation(1_056, 22_967_766);
+        let graph_period = observation(1_024, 21_333_332);
+        let short_delta = ClockDeltaBounds::try_new(1, 1_000_000_000, 1, 60_000_000_000)
+            .expect("old short evidence span");
+        let mut short = ClockRateEstimator::new(ClockRateEstimatorConfig::new(
+            short_delta,
+            short_delta,
+            2_000_000_000,
+            bounds,
+        ));
+        short.preview(origin, origin).expect("anchor").commit();
+        assert!(matches!(
+            short.preview(capture_jitter, graph_period),
+            Err(ClockRateEstimatorError::RatioOutsideBounds { .. })
+        ));
+
+        let mut measured = ClockRateEstimator::new(
+            wave3_capture_rate_estimator(bounds).expect("Wave:3 capture estimator policy"),
+        );
+        measured.preview(origin, origin).expect("anchor").commit();
+        let step = measured.preview(capture_jitter, graph_period).expect("short status interval");
+        assert_eq!(step.estimate(), ClockRateEstimate::Priming);
+        step.commit();
+        let step = measured
+            .preview(observation(8_192, 170_666_667), observation(8_192, 170_666_667))
+            .expect("running-clock evidence");
+        assert_eq!(step.estimate(), ClockRateEstimate::Measured { ratio: 1.0, updated: true });
+
+        let mut sustained = ClockRateEstimator::new(
+            wave3_capture_rate_estimator(bounds).expect("Wave:3 capture estimator policy"),
+        );
+        sustained.preview(origin, origin).expect("anchor").commit();
+        assert!(matches!(
+            sustained.preview(observation(8_192, 178_000_000), observation(8_192, 170_666_667)),
+            Err(ClockRateEstimatorError::RatioOutsideBounds { .. })
+        ));
     }
 
     #[test]
