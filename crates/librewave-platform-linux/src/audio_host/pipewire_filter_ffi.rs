@@ -333,6 +333,15 @@ enum BufferRangeError {
     Overlap,
 }
 
+fn buffer_range_fault(error: BufferRangeError) -> ProcessFault {
+    match error {
+        BufferRangeError::Null => ProcessFault::MissingBuffer,
+        BufferRangeError::Misaligned => ProcessFault::MisalignedBuffer,
+        BufferRangeError::ExtentOverflow => ProcessFault::BufferExtentOverflow,
+        BufferRangeError::Overlap => ProcessFault::AliasedBuffer,
+    }
+}
+
 fn validate_buffer_ranges(pointers: &[*mut f32], frames: usize) -> Result<(), BufferRangeError> {
     if pointers.len() > PORT_COUNT {
         return Err(BufferRangeError::ExtentOverflow);
@@ -678,6 +687,35 @@ fn process_cycle<P: GraphProcessor>(
         });
         true
     };
+    // PipeWire can schedule a new filter while only some ports are mapped.
+    // The bounded control-side startup waits for one complete cycle. Silence
+    // mapped outputs after validating their ranges so an incomplete startup
+    // cycle cannot publish stale samples. Later missing ports are faults.
+    if missing_mask != 0 && callbacks.process_cycles.load(Ordering::Relaxed) == 0 {
+        if buffers.is_null() {
+            return fail(ProcessFault::MissingBuffer, 0);
+        }
+        if quantum == 0 {
+            return fail(ProcessFault::InvalidQuantum, 0);
+        }
+        // SAFETY: the C shim supplies exactly eight pointer entries.
+        let pointers = unsafe { slice::from_raw_parts(buffers, PORT_COUNT) };
+        let mut mapped = [std::ptr::null_mut(); PORT_COUNT];
+        let mut count = 0;
+        for pointer in pointers.iter().copied().filter(|pointer| !pointer.is_null()) {
+            mapped[count] = pointer;
+            count += 1;
+        }
+        if let Err(error) = validate_buffer_ranges(&mapped[..count], quantum as usize) {
+            return fail(buffer_range_fault(error), 0);
+        }
+        for pointer in pointers[2..].iter().copied().filter(|pointer| !pointer.is_null()) {
+            // SAFETY: PipeWire mapped this output for `quantum` frames and
+            // the non-null, aligned ranges were checked for overlap above.
+            unsafe { slice::from_raw_parts_mut(pointer, quantum as usize) }.fill(0.0);
+        }
+        return false;
+    }
     if missing_mask != 0 || buffers.is_null() {
         return fail(ProcessFault::MissingBuffer, 0);
     }
@@ -690,13 +728,7 @@ fn process_cycle<P: GraphProcessor>(
     // SAFETY: the C shim always supplies exactly eight entries.
     let pointers = unsafe { slice::from_raw_parts(buffers, PORT_COUNT) };
     if let Err(error) = validate_buffer_ranges(pointers, quantum as usize) {
-        let fault = match error {
-            BufferRangeError::Null => ProcessFault::MissingBuffer,
-            BufferRangeError::Misaligned => ProcessFault::MisalignedBuffer,
-            BufferRangeError::ExtentOverflow => ProcessFault::BufferExtentOverflow,
-            BufferRangeError::Overlap => ProcessFault::AliasedBuffer,
-        };
-        return fail(fault, 0);
+        return fail(buffer_range_fault(error), 0);
     }
     let frames = quantum as usize;
     // SAFETY: pointer validity, alignment, checked byte extents, and pairwise
@@ -1101,6 +1133,108 @@ fn last_os_error() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct StartupProcessor(Arc<AtomicU32>);
+
+    impl GraphProcessor for StartupProcessor {
+        fn process(&mut self, block: ProcessBlock<'_>) -> Result<(), ProcessFault> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            block.microphone.left.fill(0.0);
+            block.microphone.right.fill(0.0);
+            block.monitor.left.fill(0.0);
+            block.monitor.right.fill(0.0);
+            block.stream.left.fill(0.0);
+            block.stream.right.fill(0.0);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn partial_port_mapping_waits_only_until_the_first_complete_cycle() {
+        let processed = Arc::new(AtomicU32::new(0));
+        let callbacks = CallbackState {
+            realtime: UnsafeCell::new(RealtimeState {
+                processor: StartupProcessor(Arc::clone(&processed)),
+                validator: CycleValidator {
+                    expected_driver: 25,
+                    expected_quantum: NonZeroU32::new(4).expect("nonzero"),
+                    previous_position: None,
+                },
+                system: SystemTracker { observed_word: 0, state: SystemCycleState::Idle },
+            }),
+            faults: FaultRecords::new(),
+            link_word: Arc::new(AtomicU64::new(0)),
+            failed: AtomicBool::new(false),
+            callbacks_in_flight: AtomicU32::new(0),
+            process_cycles: AtomicU64::new(0),
+            filter_state: AtomicI32::new(FILTER_STATE_STREAMING),
+            has_streamed: AtomicBool::new(true),
+            stopping: AtomicBool::new(false),
+        };
+        let mut samples = [[0.0_f32; 4]; PORT_COUNT];
+        for output in &mut samples[2..] {
+            output.fill(0.5);
+        }
+        let mut pointers: [*mut f32; PORT_COUNT] =
+            std::array::from_fn(|index| samples[index].as_mut_ptr());
+        pointers[0] = std::ptr::null_mut();
+        pointers[1] = std::ptr::null_mut();
+        // SAFETY: the test is single-threaded and owns the callback state.
+        let realtime = unsafe { &mut *callbacks.realtime.get() };
+        assert!(!process_cycle(
+            &callbacks,
+            realtime,
+            25,
+            1,
+            48_000,
+            0,
+            1,
+            4,
+            pointers.as_mut_ptr(),
+            0b11,
+        ));
+        assert_eq!(callbacks.process_cycles.load(Ordering::Relaxed), 0);
+        assert_eq!(processed.load(Ordering::Relaxed), 0);
+        assert!(callbacks.faults.snapshot().0.iter().all(Option::is_none));
+        assert!(samples[2..].iter().flatten().all(|sample| *sample == 0.0));
+
+        pointers[0] = samples[0].as_mut_ptr();
+        pointers[1] = samples[1].as_mut_ptr();
+        assert!(!process_cycle(
+            &callbacks,
+            realtime,
+            25,
+            1,
+            48_000,
+            4,
+            2,
+            4,
+            pointers.as_mut_ptr(),
+            0,
+        ));
+        assert_eq!(callbacks.process_cycles.load(Ordering::Relaxed), 1);
+        assert_eq!(processed.load(Ordering::Relaxed), 1);
+
+        pointers[0] = std::ptr::null_mut();
+        pointers[1] = std::ptr::null_mut();
+        assert!(process_cycle(
+            &callbacks,
+            realtime,
+            25,
+            1,
+            48_000,
+            8,
+            3,
+            4,
+            pointers.as_mut_ptr(),
+            0b11,
+        ));
+        assert_eq!(callbacks.process_cycles.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            callbacks.faults.snapshot().0[0].expect("missing buffer fault").fault,
+            ProcessFault::MissingBuffer
+        );
+    }
 
     #[test]
     fn c_shim_owns_pipewire_state_mapping() {

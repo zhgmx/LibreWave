@@ -258,10 +258,10 @@ impl<P: GraphProcessor> InactiveGraph<P> {
             .register();
         roundtrip(&main_loop, &core)?;
 
-        let system = create_adapter(&core, &endpoints[0], true)?;
-        let microphone = create_adapter(&core, &endpoints[1], false)?;
-        let monitor = create_adapter(&core, &endpoints[2], false)?;
-        let stream = create_adapter(&core, &endpoints[3], false)?;
+        let system = create_adapter(&core, &endpoints[0], true, quantum)?;
+        let microphone = create_adapter(&core, &endpoints[1], false, quantum)?;
+        let monitor = create_adapter(&core, &endpoints[2], false, quantum)?;
+        let stream = create_adapter(&core, &endpoints[3], false, quantum)?;
         roundtrip(&main_loop, &core)?;
         roundtrip(&main_loop, &core)?;
 
@@ -378,14 +378,26 @@ impl<P: GraphProcessor> InactiveGraph<P> {
                 state.node_id(FILTER_NODE_NAME)?,
             ]
         };
-        validate_drivers(
-            &self.main_loop,
-            &self.core,
-            &self.registry,
-            &self.registry_state,
-            &ids,
-            &self.endpoints,
-        )?;
+        let driver_deadline = Instant::now() + ROUNDTRIP_TIMEOUT;
+        loop {
+            match validate_drivers(
+                &self.main_loop,
+                &self.core,
+                &self.registry,
+                &self.registry_state,
+                &ids,
+                &self.endpoints,
+            ) {
+                Ok(()) => break,
+                Err(error @ GraphError::DriverMismatch { .. }) => {
+                    if Instant::now() >= driver_deadline {
+                        return Err(error);
+                    }
+                    self.main_loop.loop_().iterate(LOOP_ITERATION);
+                }
+                Err(error) => return Err(error),
+            }
+        }
         Ok(ActiveGraph { inner: self })
     }
 
@@ -470,33 +482,35 @@ fn create_adapter(
     core: &pw::core::Core,
     plan: &EndpointPlan,
     driver: bool,
+    quantum: NonZeroU32,
 ) -> Result<pw::node::Node, GraphError> {
-    core.create_object::<pw::node::Node>(
-        "adapter",
-        &pw::properties::properties! {
-            *pw::keys::FACTORY_NAME => "support.null-audio-sink",
-            *pw::keys::NODE_NAME => plan.node_name,
-            *pw::keys::NODE_DESCRIPTION => plan.node_description,
-            *pw::keys::MEDIA_CLASS => plan.media_class,
-            *pw::keys::MEDIA_TYPE => "Audio",
-            *pw::keys::MEDIA_CATEGORY => "Duplex",
-            *pw::keys::MEDIA_ROLE => "Production",
-            *pw::keys::NODE_VIRTUAL => "true",
-            *pw::keys::NODE_GROUP => "librewave.adapters",
-            "node.sync-group" => "librewave.graph",
-            *pw::keys::NODE_DRIVER => if driver { "true" } else { "false" },
-            "node.want-driver" => "true",
-            *pw::keys::NODE_ALWAYS_PROCESS => "true",
-            *pw::keys::NODE_PAUSE_ON_IDLE => "false",
-            "node.suspend-on-idle" => "false",
-            "audio.rate" => "48000",
-            *pw::keys::AUDIO_CHANNELS => "2",
-            "audio.position" => "[ FL FR ]",
-            "adapter.auto-port-config" => "{ mode = dsp monitor = true }",
-            "monitor.passthrough" => "true"
-        },
-    )
-    .map_err(pipewire_error)
+    let mut properties = pw::properties::properties! {
+        *pw::keys::FACTORY_NAME => "support.null-audio-sink",
+        *pw::keys::NODE_NAME => plan.node_name,
+        *pw::keys::NODE_DESCRIPTION => plan.node_description,
+        *pw::keys::MEDIA_CLASS => plan.media_class,
+        *pw::keys::MEDIA_TYPE => "Audio",
+        *pw::keys::MEDIA_CATEGORY => "Duplex",
+        *pw::keys::MEDIA_ROLE => "Production",
+        *pw::keys::NODE_VIRTUAL => "true",
+        *pw::keys::NODE_GROUP => "librewave.adapters",
+        "node.sync-group" => "librewave.graph",
+        *pw::keys::NODE_DRIVER => if driver { "true" } else { "false" },
+        "node.want-driver" => "true",
+        *pw::keys::NODE_ALWAYS_PROCESS => "true",
+        *pw::keys::NODE_PAUSE_ON_IDLE => "false",
+        "node.suspend-on-idle" => "false",
+        "audio.rate" => "48000",
+        *pw::keys::AUDIO_CHANNELS => "2",
+        "audio.position" => "[ FL FR ]",
+        "adapter.auto-port-config" => "{ mode = dsp monitor = true }",
+        "monitor.passthrough" => "true"
+    };
+    if driver {
+        properties.insert(*pw::keys::PRIORITY_DRIVER, "200001");
+        properties.insert("node.force-quantum", quantum.get().to_string());
+    }
+    core.create_object::<pw::node::Node>("adapter", &properties).map_err(pipewire_error)
 }
 
 fn filter_ports() -> [(usize, bool, &'static str, &'static str); 8] {
@@ -1361,7 +1375,30 @@ context.modules = [
                 "set LIBREWAVE_PIPEWIRE_INTEGRATION=1 for the private audio attempt",
             );
             let server = PrivatePipeWire::start(256, 5);
+            pw::init();
+            let main_loop = pw::main_loop::MainLoopRc::new(None).expect("test loop");
+            let context = pw::context::ContextRc::new(&main_loop, None).expect("test context");
+            let core = context.connect_rc(None).expect("test connection");
+            let desktop_driver = core
+                .create_object::<pw::node::Node>(
+                    "adapter",
+                    &pw::properties::properties! {
+                        *pw::keys::FACTORY_NAME => "support.null-audio-sink",
+                        *pw::keys::NODE_NAME => "integration.desktop-driver",
+                        *pw::keys::NODE_DRIVER => "true",
+                        *pw::keys::PRIORITY_DRIVER => "200000",
+                        *pw::keys::NODE_ALWAYS_PROCESS => "true",
+                        *pw::keys::NODE_PAUSE_ON_IDLE => "false",
+                        "audio.rate" => "48000",
+                        *pw::keys::AUDIO_CHANNELS => "2",
+                        "audio.position" => "[ FL FR ]",
+                    },
+                )
+                .expect("create competing private driver");
+            roundtrip(&main_loop, &core).expect("publish competing private driver");
             crate::audio_host::attempt::tests::private_composed_attempt(REMOTE);
+            drop(desktop_driver);
+            roundtrip(&main_loop, &core).expect("remove competing private driver");
             let nodes = server
                 .command("pw-cli")
                 .args(["-r", REMOTE, "ls", "Node"])

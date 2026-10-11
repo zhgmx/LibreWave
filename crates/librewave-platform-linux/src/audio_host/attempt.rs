@@ -39,7 +39,7 @@ fn attempt_error(phase: &'static str, reason: impl ToString) -> LinuxAudioError 
 trait GraphRuntime {
     fn iterate(&mut self, timeout: Duration);
     fn cycles(&self) -> u64;
-    fn failed(&self) -> bool;
+    fn fault_reason(&self) -> Option<String>;
     fn teardown(&mut self) -> Result<(), LinuxAudioError>;
 }
 
@@ -93,8 +93,14 @@ impl GraphRuntime for RealGraphRuntime {
     fn cycles(&self) -> u64 {
         self.0.diagnostics().process_cycles
     }
-    fn failed(&self) -> bool {
-        self.0.diagnostics().failed
+    fn fault_reason(&self) -> Option<String> {
+        let diagnostics = self.0.diagnostics();
+        diagnostics.failed.then(|| {
+            diagnostics.faults.into_iter().flatten().next().map_or_else(
+                || "PipeWire callback faulted without a record".to_owned(),
+                |record| format!("PipeWire callback fault: {record:?}"),
+            )
+        })
     }
     fn teardown(&mut self) -> Result<(), LinuxAudioError> {
         self.0.teardown().map_err(|error| attempt_error("graph teardown", error))
@@ -277,8 +283,8 @@ impl ComposedAudioHost {
     fn graph_step(&mut self, phase: &'static str) -> Result<BridgeState, LinuxAudioError> {
         let graph = self.graph.as_mut().ok_or_else(|| attempt_error(phase, "graph is absent"))?;
         graph.iterate(POLL_INTERVAL);
-        if graph.failed() {
-            return Err(attempt_error(phase, "PipeWire callback faulted"));
+        if let Some(reason) = graph.fault_reason() {
+            return Err(attempt_error(phase, reason));
         }
         let state = self
             .control
