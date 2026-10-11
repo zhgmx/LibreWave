@@ -77,11 +77,13 @@ The desktop may see only these deliberate product endpoints:
 | Endpoint ID | Display name | PipeWire node name | Flow | PipeWire direction | Media class |
 | --- | --- | --- | --- | --- | --- |
 | `System` | System | `librewave.system` | Public sink | Input | `Audio/Sink` |
-| `Microphone` | Microphone | `librewave.microphone` | Public source | Output | `Audio/Source` |
-| `MonitorMix` | Monitor mix | `librewave.monitor-mix` | Public source | Output | `Audio/Source` |
-| `StreamMix` | Stream mix | `librewave.stream-mix` | Public source | Output | `Audio/Source` |
+| `Microphone` | Microphone | `librewave.microphone` | Public source | Output | `Audio/Source/Virtual` |
+| `MonitorMix` | Monitor mix | `librewave.monitor-mix` | Public source | Output | `Audio/Source/Virtual` |
+| `StreamMix` | Stream mix | `librewave.stream-mix` | Public source | Output | `Audio/Source/Virtual` |
 
 All four plans set `node.virtual=true`. Applications render to the System sink. Its frames supply the engine's System logical source. Physical Wave:3 capture supplies the Microphone logical source. The engine produces only Microphone, Monitor Mix, and Stream Mix output buffers. The System sink does not increase the engine output count. Monitor Mix is also the intended signal for physical headphone playback.
+
+WirePlumber must create linkable session items for the four product endpoints. LibreWave leaves `wireplumber.is-virtual` unset and uses `Audio/Source/Virtual` for the three source adapters. WirePlumber gives each source an `input_FL/FR` pair for the mixer and a `capture_FL/FR` pair for clients. Graph construction waits for these ports and for 100 ms without a port change before it creates permanent links. If the ports do not settle within two seconds, construction fails and the attempt tears down.
 
 The physical Wave capture and playback PCMs are not desktop endpoints. LibreWave must not publish a keepalive sink, null sink, raw helper source, duplicate physical Wave node, or another implementation object as an ordinary device. KDE, `wpctl status`, and PulseAudio-compatible listings form the visibility acceptance test. Low-level diagnostic tools may still show internal objects needed to inspect the graph.
 
@@ -111,12 +113,14 @@ Run the integration gate only on a host with the PipeWire development files, `pi
 LIBREWAVE_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux audio_host::pipewire_graph::tests::integration::private_pipewire_graph -- --ignored --exact --test-threads=1
 LIBREWAVE_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux audio_host::pipewire_graph::tests::integration::private_composed_audio_attempt -- --ignored --exact --test-threads=1
 LIBREWAVE_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux audio_host::pipewire_graph::tests::integration::private_existing_physical_node_blocks_ownership -- --ignored --exact --test-threads=1
+LIBREWAVE_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux audio_host::pipewire_graph::tests::integration::private_wireplumber_routes_a_named_player_to_system -- --ignored --exact --test-threads=1
 ```
 
 The desktop mapping test uses the active user PipeWire session and WirePlumber. Run it separately:
 
 ```text
 LIBREWAVE_DESKTOP_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux audio_host::pipewire_graph::tests::integration::desktop_pipewire_keeps_all_filter_buffers_mapped -- --ignored --exact --test-threads=1
+LIBREWAVE_DESKTOP_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux audio_host::pipewire_graph::tests::integration::desktop_pipewire_routes_named_streams_without_manual_links -- --ignored --exact --test-threads=1
 ```
 
 The default test suite does not start a daemon and does not silently skip this gate. CI does not run the gate yet because the current runner contract does not install the PipeWire daemon tools. Add it when CI supplies a fixed PipeWire runtime image and runs the command as a separate serial job.

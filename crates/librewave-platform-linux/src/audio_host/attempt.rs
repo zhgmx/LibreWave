@@ -11,7 +11,7 @@ use super::clock_bridge::{
 };
 use super::graph_bridge::ClockBridgeGraphProcessor;
 use super::pipewire::RealPipeWireFacade;
-use super::pipewire_graph::{ActiveGraph, InactiveGraph};
+use super::pipewire_graph::{ActiveGraph, AdapterPortMode, InactiveGraph};
 use super::worker::{
     CaptureWorker, ParkedPlaybackWorker, PlaybackWorker, WorkerIoPolicy, WorkerPhase,
 };
@@ -95,10 +95,16 @@ impl GraphFactory for RealGraphFactory {
         quantum: NonZeroU32,
         processor: ClockBridgeGraphProcessor,
     ) -> Result<Box<dyn GraphRuntime>, LinuxAudioError> {
-        let graph = InactiveGraph::construct(remote, plans, quantum, processor)
-            .map_err(|error| attempt_error("graph construction", error))?
-            .activate()
-            .map_err(|error| attempt_error("graph activation", error))?;
+        let graph = InactiveGraph::construct(
+            remote,
+            plans,
+            quantum,
+            AdapterPortMode::WirePlumber,
+            processor,
+        )
+        .map_err(|error| attempt_error("graph construction", error))?
+        .activate()
+        .map_err(|error| attempt_error("graph activation", error))?;
         Ok(Box::new(RealGraphRuntime(graph)))
     }
 }

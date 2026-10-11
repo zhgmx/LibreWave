@@ -34,6 +34,7 @@ struct RegistryState {
     node_names: HashMap<String, u32>,
     node_classes: HashMap<u32, String>,
     ports: Vec<ObservedPort>,
+    port_generation: u64,
     link_inputs: HashMap<u32, u32>,
     system_playback_ports: Option<[u32; 2]>,
     system_link_generation: u64,
@@ -48,6 +49,7 @@ impl RegistryState {
             node_names: HashMap::new(),
             node_classes: HashMap::new(),
             ports: Vec::new(),
+            port_generation: 0,
             link_inputs: HashMap::new(),
             system_playback_ports: None,
             system_link_generation: 0,
@@ -99,6 +101,7 @@ impl RegistryState {
                         channel: properties.get(*pw::keys::AUDIO_CHANNEL).map(str::to_owned),
                         format_dsp: properties.get(*pw::keys::FORMAT_DSP).map(str::to_owned),
                     });
+                    self.port_generation = self.port_generation.saturating_add(1);
                 }
             }
         } else if global.type_ == ObjectType::Link
@@ -119,7 +122,11 @@ impl RegistryState {
         self.publish_system_links();
         self.node_names.retain(|_, node_id| *node_id != id);
         self.node_classes.remove(&id);
+        let prior_ports = self.ports.len();
         self.ports.retain(|port| port.id != id && port.node_id != id);
+        if self.ports.len() != prior_ports {
+            self.port_generation = self.port_generation.saturating_add(1);
+        }
     }
 
     fn node_id(&self, name: &str) -> Result<u32, GraphError> {
@@ -146,6 +153,7 @@ pub(super) enum GraphError {
     InvalidEndpointContract,
     PipeWire(String),
     RoundtripTimeout,
+    PortConfigurationTimeout,
     MissingNode(String),
     MissingPort { node_id: u32, direction: String, name: String },
     DriverMismatch { node: String, expected: u32, actual: Option<u32> },
@@ -163,6 +171,9 @@ impl std::fmt::Display for GraphError {
             }
             Self::PipeWire(error) => formatter.write_str(error),
             Self::RoundtripTimeout => formatter.write_str("PipeWire roundtrip timed out"),
+            Self::PortConfigurationTimeout => {
+                formatter.write_str("WirePlumber adapter ports did not become stable")
+            }
             Self::MissingNode(name) => write!(formatter, "PipeWire node {name} did not appear"),
             Self::MissingPort { node_id, direction, name } => {
                 write!(formatter, "PipeWire node {node_id} has no {direction} port named {name}")
@@ -228,12 +239,19 @@ pub(super) struct ActiveGraph<P: GraphProcessor> {
     inner: InactiveGraph<P>,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum AdapterPortMode {
+    SelfConfigured,
+    WirePlumber,
+}
+
 impl<P: GraphProcessor> InactiveGraph<P> {
     #[allow(clippy::too_many_lines)]
     pub(super) fn construct(
         remote_name: &str,
         endpoints: &[EndpointPlan],
         quantum: NonZeroU32,
+        port_mode: AdapterPortMode,
         processor: P,
     ) -> Result<Self, GraphError> {
         validate_endpoints(endpoints)?;
@@ -257,13 +275,38 @@ impl<P: GraphProcessor> InactiveGraph<P> {
             .global_remove(move |id| removed.borrow_mut().remove(id))
             .register();
         roundtrip(&main_loop, &core)?;
-
         let system = create_adapter(&core, &endpoints[0], true, quantum)?;
         let microphone = create_adapter(&core, &endpoints[1], false, quantum)?;
         let monitor = create_adapter(&core, &endpoints[2], false, quantum)?;
         let stream = create_adapter(&core, &endpoints[3], false, quantum)?;
         roundtrip(&main_loop, &core)?;
         roundtrip(&main_loop, &core)?;
+        // WirePlumber can replace adapter ports after the PipeWire round trips.
+        // Bind the permanent graph only after the expected port shape is quiet.
+        let port_deadline = Instant::now() + Duration::from_secs(2);
+        let mut settled = None;
+        loop {
+            let (ports, generation) = {
+                let state = registry_state.borrow();
+                (expected_adapter_ports(&state, endpoints), state.port_generation)
+            };
+            if ports.is_ok()
+                && (matches!(port_mode, AdapterPortMode::SelfConfigured)
+                    || settled.is_some_and(|(prior, since): (u64, Instant)| {
+                        prior == generation && since.elapsed() >= Duration::from_millis(100)
+                    }))
+            {
+                break;
+            }
+            if Instant::now() >= port_deadline {
+                return Err(ports.err().unwrap_or(GraphError::PortConfigurationTimeout));
+            }
+            if ports.is_ok() && settled.is_none_or(|(prior, _): (u64, Instant)| prior != generation)
+            {
+                settled = Some((generation, Instant::now()));
+            }
+            main_loop.loop_().iterate(Duration::from_millis(10));
+        }
 
         let system_id = registry_state.borrow().node_id(endpoints[0].node_name)?;
         let mut filter = FilterHandle::new(
@@ -493,9 +536,6 @@ fn create_adapter(
         *pw::keys::MEDIA_CATEGORY => "Duplex",
         *pw::keys::MEDIA_ROLE => "Production",
         *pw::keys::NODE_VIRTUAL => "true",
-        // WirePlumber must not replace this adapter's DSP port configuration.
-        // It still exposes the Audio/Sink or Audio/Source node to clients.
-        "wireplumber.is-virtual" => "true",
         *pw::keys::NODE_GROUP => "librewave.adapters",
         "node.sync-group" => "librewave.graph",
         *pw::keys::NODE_DRIVER => if driver { "true" } else { "false" },
@@ -551,23 +591,43 @@ fn validate_filter_ports(state: &RegistryState, filter_id: u32) -> Result<(), Gr
     Ok(())
 }
 
+const SOURCE_PORT_NAMES: [&str; 4] = ["input_FL", "input_FR", "capture_FL", "capture_FR"];
+
+fn expected_adapter_ports(
+    state: &RegistryState,
+    endpoints: &[EndpointPlan],
+) -> Result<(), GraphError> {
+    let system = state.node_id(endpoints[0].node_name)?;
+    for name in ["playback_FL", "playback_FR"] {
+        state.port_id(system, "in", name)?;
+    }
+    for name in ["monitor_FL", "monitor_FR"] {
+        state.port_id(system, "out", name)?;
+    }
+    for endpoint in endpoints.iter().skip(1) {
+        let node = state.node_id(endpoint.node_name)?;
+        for name in &SOURCE_PORT_NAMES[..2] {
+            state.port_id(node, "in", name)?;
+        }
+        for name in &SOURCE_PORT_NAMES[2..] {
+            state.port_id(node, "out", name)?;
+        }
+    }
+    Ok(())
+}
+
 fn internal_ports(state: &RegistryState, ids: [u32; 5]) -> Result<[(u32, u32); 8], GraphError> {
     let [system, microphone, monitor, stream, filter] = ids;
+    let [left, right, _, _] = SOURCE_PORT_NAMES;
     Ok([
         (state.port_id(system, "out", "monitor_FL")?, state.port_id(filter, "in", "system_FL")?),
         (state.port_id(system, "out", "monitor_FR")?, state.port_id(filter, "in", "system_FR")?),
-        (
-            state.port_id(filter, "out", "microphone_FL")?,
-            state.port_id(microphone, "in", "playback_FL")?,
-        ),
-        (
-            state.port_id(filter, "out", "microphone_FR")?,
-            state.port_id(microphone, "in", "playback_FR")?,
-        ),
-        (state.port_id(filter, "out", "monitor_FL")?, state.port_id(monitor, "in", "playback_FL")?),
-        (state.port_id(filter, "out", "monitor_FR")?, state.port_id(monitor, "in", "playback_FR")?),
-        (state.port_id(filter, "out", "stream_FL")?, state.port_id(stream, "in", "playback_FL")?),
-        (state.port_id(filter, "out", "stream_FR")?, state.port_id(stream, "in", "playback_FR")?),
+        (state.port_id(filter, "out", "microphone_FL")?, state.port_id(microphone, "in", left)?),
+        (state.port_id(filter, "out", "microphone_FR")?, state.port_id(microphone, "in", right)?),
+        (state.port_id(filter, "out", "monitor_FL")?, state.port_id(monitor, "in", left)?),
+        (state.port_id(filter, "out", "monitor_FR")?, state.port_id(monitor, "in", right)?),
+        (state.port_id(filter, "out", "stream_FL")?, state.port_id(stream, "in", left)?),
+        (state.port_id(filter, "out", "stream_FR")?, state.port_id(stream, "in", right)?),
     ])
 }
 
@@ -596,7 +656,7 @@ fn validate_endpoint_count(state: &RegistryState) -> Result<(), GraphError> {
             name.starts_with("librewave.")
                 && matches!(
                     state.node_classes.get(id).map(String::as_str),
-                    Some("Audio/Sink" | "Audio/Source")
+                    Some("Audio/Sink" | "Audio/Source/Virtual")
                 )
         })
         .count();
@@ -923,6 +983,15 @@ mod tests {
             prior_environment: Vec<(&'static str, Option<std::ffi::OsString>)>,
         }
 
+        struct TestChild(Child);
+
+        impl Drop for TestChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
         impl PrivatePipeWire {
             fn start(quantum: u32, cycle: u32) -> Self {
                 require_program("pipewire");
@@ -997,6 +1066,23 @@ mod tests {
                     .env("PIPEWIRE_CONFIG_NAME", "proof-client.conf")
                     .env("PIPEWIRE_REMOTE", REMOTE);
                 command
+            }
+
+            fn start_wireplumber(&self) -> TestChild {
+                require_program("wireplumber");
+                let log = fs::File::create(self.root.join("wireplumber.log"))
+                    .expect("create private WirePlumber log");
+                TestChild(
+                    self.command("wireplumber")
+                        .args(["-p", "policy"])
+                        .env("XDG_DATA_HOME", self.root.join("data"))
+                        .env("XDG_STATE_HOME", self.root.join("state"))
+                        .env("XDG_CACHE_HOME", self.root.join("cache"))
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::from(log))
+                        .spawn()
+                        .expect("start private WirePlumber"),
+                )
             }
         }
 
@@ -1142,27 +1228,27 @@ context.modules = [
                     state.port_id(system, "in", "playback_FR"),
                 ),
                 (
-                    state.port_id(microphone, "out", "monitor_FL"),
+                    state.port_id(microphone, "out", "capture_FL"),
                     state.port_id(consumer.node_id(), "in", "test_microphone_FL"),
                 ),
                 (
-                    state.port_id(microphone, "out", "monitor_FR"),
+                    state.port_id(microphone, "out", "capture_FR"),
                     state.port_id(consumer.node_id(), "in", "test_microphone_FR"),
                 ),
                 (
-                    state.port_id(monitor, "out", "monitor_FL"),
+                    state.port_id(monitor, "out", "capture_FL"),
                     state.port_id(consumer.node_id(), "in", "test_monitor_FL"),
                 ),
                 (
-                    state.port_id(monitor, "out", "monitor_FR"),
+                    state.port_id(monitor, "out", "capture_FR"),
                     state.port_id(consumer.node_id(), "in", "test_monitor_FR"),
                 ),
                 (
-                    state.port_id(stream, "out", "monitor_FL"),
+                    state.port_id(stream, "out", "capture_FL"),
                     state.port_id(consumer.node_id(), "in", "test_stream_FL"),
                 ),
                 (
-                    state.port_id(stream, "out", "monitor_FR"),
+                    state.port_id(stream, "out", "capture_FR"),
                     state.port_id(consumer.node_id(), "in", "test_stream_FR"),
                 ),
             ];
@@ -1187,10 +1273,16 @@ context.modules = [
             let proof = Arc::new(ProcessorProof::default());
             let processor = EngineProcessor::new(1024, Arc::clone(&proof));
             let quantum = NonZeroU32::new(quantum).expect("fixed quantum");
-            let mut graph = InactiveGraph::construct(REMOTE, &plans, quantum, processor)
-                .expect("construct inactive PipeWire graph")
-                .activate()
-                .expect("activate PipeWire graph once");
+            let mut graph = InactiveGraph::construct(
+                REMOTE,
+                &plans,
+                quantum,
+                AdapterPortMode::SelfConfigured,
+                processor,
+            )
+            .expect("construct inactive PipeWire graph")
+            .activate()
+            .expect("activate PipeWire graph once");
             run_cycles(&mut graph, 8);
             assert!(!graph.diagnostics().failed, "idle graph faulted");
             assert_eq!(graph.diagnostics().dropped_faults, 0);
@@ -1204,7 +1296,7 @@ context.modules = [
                 for id in &ids[1..4] {
                     assert_eq!(
                         state.node_classes.get(id).map(String::as_str),
-                        Some("Audio/Source")
+                        Some("Audio/Source/Virtual")
                     );
                 }
                 assert!(!state.node_classes.contains_key(&ids[4]));
@@ -1359,10 +1451,16 @@ context.modules = [
             let proof = Arc::new(ProcessorProof::default());
             let processor = EngineProcessor::new(1024, proof);
             let quantum = NonZeroU32::new(128).expect("fixed quantum");
-            let mut graph = InactiveGraph::construct(REMOTE, &plans, quantum, processor)
-                .expect("construct forced-change graph")
-                .activate()
-                .expect("activate forced-change graph");
+            let mut graph = InactiveGraph::construct(
+                REMOTE,
+                &plans,
+                quantum,
+                AdapterPortMode::SelfConfigured,
+                processor,
+            )
+            .expect("construct forced-change graph")
+            .activate()
+            .expect("activate forced-change graph");
             run_cycles(&mut graph, 8);
             let status = server
                 .command("pw-metadata")
@@ -1409,6 +1507,123 @@ context.modules = [
         }
 
         #[test]
+        #[ignore = "requires LIBREWAVE_PIPEWIRE_INTEGRATION=1 and private PipeWire/WirePlumber runtime tools"]
+        #[allow(
+            clippy::too_many_lines,
+            reason = "the isolated runtime and both client links are one regression"
+        )]
+        fn private_wireplumber_routes_a_named_player_to_system() {
+            assert_eq!(
+                std::env::var("LIBREWAVE_PIPEWIRE_INTEGRATION").as_deref(),
+                Ok("1"),
+                "set LIBREWAVE_PIPEWIRE_INTEGRATION=1 for the private routing proof"
+            );
+            require_program("pw-play");
+            require_program("pw-record");
+            require_program("pw-link");
+            let server = PrivatePipeWire::start(256, 5);
+            let mut wireplumber = server.start_wireplumber();
+            let plans = endpoint_plans(DELIBERATE_ENDPOINTS).expect("deliberate endpoints");
+            let processor = EngineProcessor::new(1024, Arc::new(ProcessorProof::default()));
+            let quantum = NonZeroU32::new(256).expect("fixed quantum");
+            let mut graph = InactiveGraph::construct(
+                REMOTE,
+                &plans,
+                quantum,
+                AdapterPortMode::WirePlumber,
+                processor,
+            )
+            .expect("construct private graph")
+            .activate()
+            .expect("activate private graph");
+            let mut player = TestChild(
+                server
+                    .command("pw-play")
+                    .args([
+                        "--target",
+                        "librewave.system",
+                        "--raw",
+                        "--rate",
+                        "48000",
+                        "--channels",
+                        "2",
+                        "--format",
+                        "s16",
+                        "/dev/zero",
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::from(
+                        fs::File::create(server.root.join("pw-play.log"))
+                            .expect("create private player log"),
+                    ))
+                    .spawn()
+                    .expect("start silent targeted player"),
+            );
+            let mut recorder = TestChild(
+                server
+                    .command("pw-record")
+                    .args([
+                        "--target",
+                        "librewave.monitor-mix",
+                        "--raw",
+                        "--rate",
+                        "48000",
+                        "--channels",
+                        "2",
+                        "--format",
+                        "s16",
+                        "/dev/null",
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::from(
+                        fs::File::create(server.root.join("pw-record.log"))
+                            .expect("create private recorder log"),
+                    ))
+                    .spawn()
+                    .expect("start targeted recorder"),
+            );
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut links = String::new();
+            while Instant::now() < deadline && !graph.diagnostics().failed {
+                graph.iterate(Duration::from_millis(10));
+                let output =
+                    server.command("pw-link").arg("-l").output().expect("inspect private links");
+                assert!(output.status.success(), "pw-link failed");
+                links = String::from_utf8_lossy(&output.stdout).into_owned();
+                if links.contains("pw-play:output_FL\n  |-> librewave.system:playback_FL")
+                    && links.contains("pw-play:output_FR\n  |-> librewave.system:playback_FR")
+                    && links.contains("librewave.monitor-mix:capture_FL\n  |-> pw-record:input_FL")
+                    && links.contains("librewave.monitor-mix:capture_FR\n  |-> pw-record:input_FR")
+                {
+                    break;
+                }
+            }
+            let player_status = player.0.try_wait().expect("inspect private player");
+            let recorder_status = recorder.0.try_wait().expect("inspect private recorder");
+            let wireplumber_status = wireplumber.0.try_wait().expect("inspect private WirePlumber");
+            let player_log = fs::read_to_string(server.root.join("pw-play.log"))
+                .expect("read private player log");
+            let wireplumber_log = fs::read_to_string(server.root.join("wireplumber.log"))
+                .expect("read private WirePlumber log");
+            let recorder_log = fs::read_to_string(server.root.join("pw-record.log"))
+                .expect("read private recorder log");
+            drop(player);
+            drop(recorder);
+            assert!(
+                links.contains("pw-play:output_FL\n  |-> librewave.system:playback_FL")
+                    && links.contains("pw-play:output_FR\n  |-> librewave.system:playback_FR")
+                    && links.contains("librewave.monitor-mix:capture_FL\n  |-> pw-record:input_FL")
+                    && links.contains("librewave.monitor-mix:capture_FR\n  |-> pw-record:input_FR"),
+                "named streams did not link to LibreWave endpoints: graph_failed={} graph_faults={:?} player={player_status:?} player_log={player_log} recorder={recorder_status:?} recorder_log={recorder_log} wireplumber={wireplumber_status:?} wireplumber_log={wireplumber_log} links={links}",
+                graph.diagnostics().failed,
+                graph.diagnostics().faults,
+            );
+            assert!(!graph.diagnostics().failed, "private graph faulted");
+            graph.teardown().expect("tear down private graph");
+            drop(wireplumber);
+        }
+
+        #[test]
         #[ignore = "requires LIBREWAVE_DESKTOP_PIPEWIRE_INTEGRATION=1 and the desktop PipeWire session"]
         fn desktop_pipewire_keeps_all_filter_buffers_mapped() {
             assert_eq!(
@@ -1420,10 +1635,16 @@ context.modules = [
             let proof = Arc::new(ProcessorProof::default());
             let processor = EngineProcessor::new(1024, proof);
             let quantum = NonZeroU32::new(256).expect("fixed quantum");
-            let mut graph = InactiveGraph::construct("pipewire-0", &plans, quantum, processor)
-                .expect("construct desktop graph")
-                .activate()
-                .expect("activate desktop graph");
+            let mut graph = InactiveGraph::construct(
+                "pipewire-0",
+                &plans,
+                quantum,
+                AdapterPortMode::WirePlumber,
+                processor,
+            )
+            .expect("construct desktop graph")
+            .activate()
+            .expect("activate desktop graph");
             let deadline = Instant::now() + Duration::from_millis(750);
             while Instant::now() < deadline && !graph.diagnostics().failed {
                 graph.iterate(Duration::from_millis(10));
@@ -1480,6 +1701,98 @@ context.modules = [
                 .status()
                 .expect("restore source volume");
             assert!(restored.success(), "wpctl could not restore source volume");
+            graph.teardown().expect("tear down desktop graph");
+        }
+
+        #[test]
+        #[ignore = "requires LIBREWAVE_DESKTOP_PIPEWIRE_INTEGRATION=1 and the desktop PipeWire session"]
+        fn desktop_pipewire_routes_named_streams_without_manual_links() {
+            assert_eq!(
+                std::env::var("LIBREWAVE_DESKTOP_PIPEWIRE_INTEGRATION").as_deref(),
+                Ok("1"),
+                "set LIBREWAVE_DESKTOP_PIPEWIRE_INTEGRATION=1 for the desktop routing proof",
+            );
+            require_program("pw-play");
+            require_program("pw-record");
+            require_program("pw-link");
+            let plans = endpoint_plans(DELIBERATE_ENDPOINTS).expect("deliberate endpoints");
+            let processor = EngineProcessor::new(1024, Arc::new(ProcessorProof::default()));
+            let quantum = NonZeroU32::new(256).expect("fixed quantum");
+            let mut graph = InactiveGraph::construct(
+                "pipewire-0",
+                &plans,
+                quantum,
+                AdapterPortMode::WirePlumber,
+                processor,
+            )
+            .expect("construct desktop graph")
+            .activate()
+            .expect("activate desktop graph");
+            let player = TestChild(
+                Command::new("pw-play")
+                    .args([
+                        "--target",
+                        "librewave.system",
+                        "--raw",
+                        "--rate",
+                        "48000",
+                        "--channels",
+                        "2",
+                        "--format",
+                        "s16",
+                        "/dev/zero",
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("start silent desktop player"),
+            );
+            let recorder = TestChild(
+                Command::new("pw-record")
+                    .args([
+                        "--target",
+                        "librewave.monitor-mix",
+                        "--raw",
+                        "--rate",
+                        "48000",
+                        "--channels",
+                        "2",
+                        "--format",
+                        "s16",
+                        "/dev/null",
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("start desktop recorder"),
+            );
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut links = String::new();
+            while Instant::now() < deadline && !graph.diagnostics().failed {
+                graph.iterate(Duration::from_millis(10));
+                let output = Command::new("pw-link").arg("-l").output().expect("inspect links");
+                assert!(output.status.success(), "pw-link failed");
+                links = String::from_utf8_lossy(&output.stdout).into_owned();
+                if links.contains("pw-play:output_FL\n  |-> librewave.system:playback_FL")
+                    && links.contains("pw-play:output_FR\n  |-> librewave.system:playback_FR")
+                    && links.contains("librewave.monitor-mix:capture_FL\n  |-> pw-record:input_FL")
+                    && links.contains("librewave.monitor-mix:capture_FR\n  |-> pw-record:input_FR")
+                {
+                    break;
+                }
+            }
+            drop(recorder);
+            drop(player);
+            assert!(
+                !graph.diagnostics().failed
+                    && links.contains("pw-play:output_FL\n  |-> librewave.system:playback_FL")
+                    && links.contains("pw-play:output_FR\n  |-> librewave.system:playback_FR")
+                    && links.contains("librewave.monitor-mix:capture_FL\n  |-> pw-record:input_FL")
+                    && links.contains("librewave.monitor-mix:capture_FR\n  |-> pw-record:input_FR"),
+                "desktop streams did not link to LibreWave: graph_failed={} faults={:?} links={links}",
+                graph.diagnostics().failed,
+                graph.diagnostics().faults,
+            );
             graph.teardown().expect("tear down desktop graph");
         }
 

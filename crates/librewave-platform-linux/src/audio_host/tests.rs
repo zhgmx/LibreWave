@@ -105,7 +105,7 @@ fn endpoint_allowlist_direction_names_and_properties_are_exact() {
                 direction: PipeWireEndpointDirection::Output,
                 node_name: "librewave.microphone",
                 node_description: "LibreWave Microphone",
-                media_class: "Audio/Source",
+                media_class: "Audio/Source/Virtual",
                 node_virtual: true,
             },
             EndpointPlan {
@@ -113,7 +113,7 @@ fn endpoint_allowlist_direction_names_and_properties_are_exact() {
                 direction: PipeWireEndpointDirection::Output,
                 node_name: "librewave.monitor-mix",
                 node_description: "LibreWave Monitor Mix",
-                media_class: "Audio/Source",
+                media_class: "Audio/Source/Virtual",
                 node_virtual: true,
             },
             EndpointPlan {
@@ -121,7 +121,7 @@ fn endpoint_allowlist_direction_names_and_properties_are_exact() {
                 direction: PipeWireEndpointDirection::Output,
                 node_name: "librewave.stream-mix",
                 node_description: "LibreWave Stream Mix",
-                media_class: "Audio/Source",
+                media_class: "Audio/Source/Virtual",
                 node_virtual: true,
             },
         ]

@@ -109,7 +109,8 @@ pub fn endpoint_plans(endpoints: &[EndpointId]) -> Result<Vec<EndpointPlan>, Lin
             node_description,
             media_class: match endpoint.flow() {
                 EndpointFlow::PublicSink => "Audio/Sink",
-                EndpointFlow::PublicSource => "Audio/Source",
+                // WirePlumber keeps the input and capture ports of a virtual source.
+                EndpointFlow::PublicSource => "Audio/Source/Virtual",
             },
             node_virtual: true,
         });
