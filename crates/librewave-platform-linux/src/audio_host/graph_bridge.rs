@@ -1,7 +1,8 @@
 //! Transfers one validated `PipeWire` graph boundary to the portable clock bridge.
 
+use super::clock_bridge::observation::CopySlotPublisher;
 use super::clock_bridge::{
-    GraphClockObservation, GraphClockProcessor, GraphOutputBuffers, GraphSystemInput,
+    BridgeError, GraphClockObservation, GraphClockProcessor, GraphOutputBuffers, GraphSystemInput,
 };
 use super::pipewire_filter_ffi::{
     GraphProcessor, ProcessBlock, ProcessFault, ProcessTiming, SystemCycleState,
@@ -13,11 +14,24 @@ use librewave_engine::{
 pub(super) struct ClockBridgeGraphProcessor {
     epoch: ClockAttemptEpoch,
     graph: GraphClockProcessor,
+    fault_reporter: Option<CopySlotPublisher<BridgeError>>,
 }
 
 impl ClockBridgeGraphProcessor {
     pub(super) const fn new(epoch: ClockAttemptEpoch, graph: GraphClockProcessor) -> Self {
-        Self { epoch, graph }
+        Self { epoch, graph, fault_reporter: None }
+    }
+
+    pub(super) fn report_faults(mut self, reporter: CopySlotPublisher<BridgeError>) -> Self {
+        self.fault_reporter = Some(reporter);
+        self
+    }
+
+    fn bridge_error(&mut self, error: BridgeError) -> ProcessFault {
+        if let Some(reporter) = self.fault_reporter.as_mut() {
+            let _ = reporter.try_publish(error);
+        }
+        ProcessFault::Processor
     }
 }
 
@@ -32,11 +46,8 @@ impl GraphProcessor for ClockBridgeGraphProcessor {
             stream_left: block.stream.left,
             stream_right: block.stream.right,
         };
-        if self
-            .graph
-            .try_silence_boundary(observation, &mut outputs)
-            .map_err(|_| ProcessFault::Processor)?
-        {
+        let silence = self.graph.try_silence_boundary(observation, &mut outputs);
+        if silence.map_err(|error| self.bridge_error(error))? {
             return Ok(());
         }
         let system = match block.system_state {
@@ -45,7 +56,8 @@ impl GraphProcessor for ClockBridgeGraphProcessor {
                 GraphSystemInput::connected(block.system.left, block.system.right)
             }
         };
-        self.graph.process(observation, system, outputs).map_err(|_| ProcessFault::Processor)?;
+        let result = self.graph.process(observation, system, outputs);
+        result.map_err(|error| self.bridge_error(error))?;
         Ok(())
     }
 }
@@ -66,6 +78,7 @@ fn graph_observation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio_host::clock_bridge::observation::copy_slot;
     use crate::audio_host::clock_bridge::tests::primed_worker_fixture;
 
     #[test]
@@ -86,6 +99,50 @@ mod tests {
         assert_eq!(sample.clock().frame_position().get(), 512);
         assert_eq!(sample.clock().monotonic_time().get(), 10_500_000);
         assert_eq!(sample.quantum_frames(), 128);
+    }
+
+    #[test]
+    fn callback_reports_the_exact_bridge_fault_without_logging() {
+        let fixture = primed_worker_fixture();
+        let epoch = ClockAttemptEpoch::try_new(7).expect("test epoch");
+        let (publisher, mut reader) = copy_slot();
+        let mut processor =
+            ClockBridgeGraphProcessor::new(epoch, fixture.parts.graph).report_faults(publisher);
+        let input = vec![0.0; 256];
+        let mut microphone_left = vec![0.0; 256];
+        let mut microphone_right = vec![0.0; 256];
+        let mut monitor_left = vec![0.0; 256];
+        let mut monitor_right = vec![0.0; 256];
+        let mut stream_left = vec![0.0; 256];
+        let mut stream_right = vec![0.0; 256];
+        let result = processor.process(ProcessBlock {
+            timing: ProcessTiming {
+                driver_id: 42,
+                rate: 48_000,
+                position: fixture.graph_position,
+                monotonic_nsec: fixture.graph_time,
+                quantum: 2_048,
+            },
+            system_state: SystemCycleState::Idle,
+            system: super::super::pipewire_filter_ffi::StereoInput { left: &input, right: &input },
+            microphone: super::super::pipewire_filter_ffi::StereoOutput {
+                left: &mut microphone_left,
+                right: &mut microphone_right,
+            },
+            monitor: super::super::pipewire_filter_ffi::StereoOutput {
+                left: &mut monitor_left,
+                right: &mut monitor_right,
+            },
+            stream: super::super::pipewire_filter_ffi::StereoOutput {
+                left: &mut stream_left,
+                right: &mut stream_right,
+            },
+        });
+        assert_eq!(result, Err(ProcessFault::Processor));
+        assert_eq!(
+            reader.try_take(),
+            Ok(BridgeError::InvalidQuantum { actual: 2_048, maximum: 1_024 })
+        );
     }
 
     #[test]

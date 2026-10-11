@@ -315,6 +315,10 @@ pub enum ClockRateEstimatorError {
         actual: f64,
         minimum: f64,
         maximum: f64,
+        input_frames: u64,
+        input_nanoseconds: u64,
+        output_frames: u64,
+        output_nanoseconds: u64,
     },
 }
 
@@ -440,6 +444,10 @@ impl ClockRateEstimator {
                 actual: ratio,
                 minimum: bounds.minimum(),
                 maximum: bounds.maximum(),
+                input_frames: input_delta.frames,
+                input_nanoseconds: input_delta.nanoseconds,
+                output_frames: output_delta.frames,
+                output_nanoseconds: output_delta.nanoseconds,
             });
         }
         Ok(ClockRateEstimatorStep {
@@ -837,13 +845,24 @@ mod tests {
             narrow,
         ));
         estimator.preview(observation(1, 0, 0), observation(1, 0, 0)).expect("anchor").commit();
-        assert!(matches!(
-            estimator.preview(
-                observation(1, 48_000, NANOSECONDS_PER_SECOND),
-                observation(1, 60_000, NANOSECONDS_PER_SECOND)
-            ),
-            Err(ClockRateEstimatorError::RatioOutsideBounds { .. })
-        ));
+        let Err(error) = estimator.preview(
+            observation(1, 48_000, NANOSECONDS_PER_SECOND),
+            observation(1, 60_000, NANOSECONDS_PER_SECOND),
+        ) else {
+            panic!("ratio must be outside bounds");
+        };
+        assert_eq!(
+            error,
+            ClockRateEstimatorError::RatioOutsideBounds {
+                actual: 1.25,
+                minimum: 0.99,
+                maximum: 1.01,
+                input_frames: 48_000,
+                input_nanoseconds: NANOSECONDS_PER_SECOND,
+                output_frames: 60_000,
+                output_nanoseconds: NANOSECONDS_PER_SECOND,
+            }
+        );
         assert_eq!(estimator.ratio(), None);
     }
 }

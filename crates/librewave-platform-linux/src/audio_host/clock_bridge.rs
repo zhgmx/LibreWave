@@ -1840,8 +1840,12 @@ impl PlaybackEgress {
         })?;
         let committed_ratio = self.estimator.ratio();
         let mut candidate_ratio = committed_ratio;
+        // A prepared PCM has no playback clock. The first status after
+        // snd_pcm_start includes startup delay, so use it as the estimator
+        // anchor only after hardware movement is observed. Measure the rate
+        // from later running-clock observations.
         let graph_observation_step = if state != BridgeState::PlaybackFilterDelay
-            && hardware_progress != HardwareProgress::Repeated
+            && hardware_progress == HardwareProgress::Advanced
         {
             self.graph_observation_reader.peek().ok()
         } else {

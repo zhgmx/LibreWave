@@ -4,6 +4,7 @@
 //! starting it; the ordinary [`super::LinuxAudioHost`] remains fail closed.
 
 use super::alsa::{RealAlsaFacade, SelectedPcmCard};
+use super::clock_bridge::observation::{CopySlotReader, copy_slot};
 use super::clock_bridge::{
     BridgeState, ClockBridgeControl, ClockBridgeParts, GraphClockProcessor, PlaybackEgress,
 };
@@ -154,8 +155,16 @@ impl AudioAttemptPolicy {
             .map_err(|error| attempt_error("policy", error))?;
         let delta = ClockDeltaBounds::try_new(1, 1_000_000_000, 1, 60_000_000_000)
             .map_err(|error| attempt_error("policy", error))?;
-        let estimator = ClockRateEstimatorConfig::new(delta, delta, 2_000_000_000, bounds);
-        let direction = |channels, output| {
+        let capture_estimator = ClockRateEstimatorConfig::new(delta, delta, 2_000_000_000, bounds);
+        // A short playback status span includes PCM start and USB packet
+        // scheduling delay. Require a running-clock interval long enough to
+        // distinguish that transient from a real rate mismatch.
+        let playback_delta =
+            ClockDeltaBounds::try_new(32_768, 1_000_000_000, 640_000_000, 60_000_000_000)
+                .map_err(|error| attempt_error("policy", error))?;
+        let playback_estimator =
+            ClockRateEstimatorConfig::new(playback_delta, playback_delta, 2_000_000_000, bounds);
+        let direction = |channels, output, estimator| {
             let matcher = RateMatcherConfig::try_new(output, channels, bounds)
                 .map_err(|error| attempt_error("policy", error))?;
             let controller = RateMatchControllerConfig::try_new(
@@ -168,8 +177,8 @@ impl AudioAttemptPolicy {
         let bridge = super::ClockBridgeConfig::try_new(
             epoch,
             MAX_QUANTUM,
-            direction(1, MAX_QUANTUM)?,
-            direction(2, 256)?,
+            direction(1, MAX_QUANTUM, capture_estimator)?,
+            direction(2, 256, playback_estimator)?,
         )
         .map_err(|error| attempt_error("policy", error))?;
         let worker =
@@ -201,6 +210,7 @@ pub struct ComposedAudioHost {
     pending_graph: Option<GraphClockProcessor>,
     pending_playback: Option<PlaybackEgress>,
     graph: Option<Box<dyn GraphRuntime>>,
+    graph_fault_reader: Option<CopySlotReader<super::clock_bridge::BridgeError>>,
     control: Option<ClockBridgeControl>,
     #[allow(dead_code, reason = "retained for daemon meter snapshot integration")]
     meters: Option<MeterReader>,
@@ -258,6 +268,7 @@ impl ComposedAudioHost {
             pending_graph: None,
             pending_playback: None,
             graph: None,
+            graph_fault_reader: None,
             control: None,
             meters: None,
             capture_frames: 0,
@@ -299,6 +310,11 @@ impl ComposedAudioHost {
         let graph = self.graph.as_mut().ok_or_else(|| attempt_error(phase, "graph is absent"))?;
         graph.iterate(POLL_INTERVAL);
         if let Some(reason) = graph.fault_reason() {
+            let reason = self
+                .graph_fault_reader
+                .as_mut()
+                .and_then(|reader| reader.try_take().ok())
+                .map_or(reason.clone(), |error| format!("{reason}; bridge: {error:?}"));
             return Err(attempt_error(phase, reason));
         }
         let state = self
@@ -544,7 +560,10 @@ impl AudioHost for ComposedAudioHost {
             .pending_graph
             .take()
             .ok_or_else(|| attempt_error("graph publication", "bridge processor is absent"))?;
-        let processor = ClockBridgeGraphProcessor::new(self.policy.bridge.attempt_epoch(), graph);
+        let (fault_reporter, fault_reader) = copy_slot();
+        self.graph_fault_reader = Some(fault_reader);
+        let processor = ClockBridgeGraphProcessor::new(self.policy.bridge.attempt_epoch(), graph)
+            .report_faults(fault_reporter);
         self.graph = Some(self.graph_factory.activate(
             &self.policy.remote_name,
             &plans,
@@ -673,6 +692,7 @@ impl AudioHost for ComposedAudioHost {
             first.get_or_insert(attempt_error("bridge teardown", error));
         }
         self.pending_graph = None;
+        self.graph_fault_reader = None;
         self.pending_playback = None;
         self.selected = None;
         self.meters = None;
@@ -889,7 +909,10 @@ pub(in crate::audio_host) mod tests {
         }
         fn status(&mut self) -> Result<PcmStatusSnapshot, PcmIoError> {
             assert!(matches!(self.mode, CaptureMode::Nominal), "playback must not run");
-            std::thread::sleep(Duration::from_micros(5_333));
+            // The private PipeWire driver can run ahead of wall time. Keep
+            // this fake consumer ahead of its FIFO while its status samples
+            // retain the exact 256-frame, 48 kHz synthetic clock.
+            std::thread::sleep(Duration::from_millis(2));
             self.status_count += 1;
             let time = self.base_time + self.status_count * 256 * 1_000_000_000 / 48_000;
             Ok(PcmStatusSnapshot {

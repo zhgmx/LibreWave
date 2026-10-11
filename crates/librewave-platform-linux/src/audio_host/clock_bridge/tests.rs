@@ -1139,6 +1139,58 @@ fn filter_delay_and_estimator_priming_use_nominal_without_controller_history() {
     );
     assert_eq!(submitter.calls, 0, "filter-delay output must not be submitted");
     assert_eq!(parts.control.state(), BridgeState::PlaybackEstimatorPriming);
+
+    assert_playback_estimator_waits_for_running_clock(
+        &mut parts,
+        &mut positions,
+        &mut output,
+        &mut submitter,
+    );
+}
+
+fn assert_playback_estimator_waits_for_running_clock(
+    parts: &mut ClockBridgeParts,
+    positions: &mut Positions,
+    output: &mut OutputStorage,
+    submitter: &mut ExactSubmitter,
+) {
+    publish_capture(parts, positions, SIMULATION_DELAY_QUANTUM, 0.25);
+    process_graph(
+        parts,
+        positions,
+        SIMULATION_DELAY_QUANTUM,
+        GraphSystemInput::unconnected(),
+        output,
+    );
+    process_playback(parts, positions, submitter, SIMULATION_DELAY_PLAYBACK_PERIOD);
+    assert_eq!(parts.playback.estimator.ratio(), None);
+
+    // The first moving status includes PCM start latency. Using the
+    // prepared status as an anchor would falsely report a slow device.
+    positions.playback_time += 2_000_000;
+    publish_capture(parts, positions, SIMULATION_DELAY_QUANTUM, 0.25);
+    process_graph(
+        parts,
+        positions,
+        SIMULATION_DELAY_QUANTUM,
+        GraphSystemInput::unconnected(),
+        output,
+    );
+    process_playback(parts, positions, submitter, SIMULATION_DELAY_PLAYBACK_PERIOD);
+    assert_eq!(parts.playback.estimator.ratio(), None);
+    assert_eq!(parts.control.state(), BridgeState::PlaybackEstimatorPriming);
+
+    publish_capture(parts, positions, SIMULATION_DELAY_QUANTUM, 0.25);
+    process_graph(
+        parts,
+        positions,
+        SIMULATION_DELAY_QUANTUM,
+        GraphSystemInput::unconnected(),
+        output,
+    );
+    process_playback(parts, positions, submitter, SIMULATION_DELAY_PLAYBACK_PERIOD);
+    assert!(parts.playback.estimator.ratio().is_some());
+    assert_eq!(parts.control.state(), BridgeState::PlaybackStabilizing);
 }
 
 #[test]
