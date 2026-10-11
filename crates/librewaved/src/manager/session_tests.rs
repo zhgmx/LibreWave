@@ -144,7 +144,18 @@ fn new_default_choices_survive_restoration_and_selection_requires_readiness() {
     Fixture::request(&mut daemon, Command::RestoreDesktopDefaults).expect("restore");
     assert_eq!(fixture.value.borrow().configured_sink.as_deref(), Some("new-user-output"));
     assert_eq!(fixture.value.borrow().configured_source, None);
-    Fixture::request(&mut daemon, Command::CompleteDesktopRestore).expect("complete");
+    assert_eq!(
+        fixture.store().load().expect("confirmed restoration baseline").defaults,
+        Some(fixture.value.borrow().clone())
+    );
+    let mut restarted = fixture.daemon();
+    fixture.value.borrow_mut().configured_sink = Some("librewave.system".into());
+    fixture.value.borrow_mut().configured_source = Some("librewave.microphone".into());
+    Fixture::request(&mut restarted, Command::RestoreDesktopDefaults)
+        .expect("restore replayed policy state");
+    assert_eq!(fixture.value.borrow().configured_sink.as_deref(), Some("new-user-output"));
+    assert_eq!(fixture.value.borrow().configured_source, None);
+    Fixture::request(&mut restarted, Command::CompleteDesktopRestore).expect("complete");
 }
 
 #[test]

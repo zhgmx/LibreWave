@@ -21,6 +21,7 @@ struct Host {
     events: Vec<String>,
     clock: Instant,
     stale_nodes: bool,
+    replay_defaults: Option<DesktopDefaults>,
 }
 impl Host {
     fn new() -> Self {
@@ -28,6 +29,7 @@ impl Host {
             active: false,
             clock: Instant::now(),
             stale_nodes: false,
+            replay_defaults: None,
             baseline: None,
             audio: false,
             defaults: DesktopDefaults {
@@ -77,7 +79,12 @@ impl RuntimeHost for Host {
                 self.active = false;
                 self.audio = false;
             }
-            _ => {}
+            SessionOperation::RestartWirePlumber => {
+                if let Some(defaults) = self.replay_defaults.take() {
+                    self.defaults = defaults;
+                }
+            }
+            SessionOperation::ReloadUnits => {}
         }
         Ok(())
     }
@@ -194,6 +201,7 @@ impl RuntimeHost for Host {
                 }
                 self.defaults.effective_sink = self.defaults.configured_sink.clone();
                 self.defaults.effective_source = self.defaults.configured_source.clone();
+                self.baseline = Some(self.defaults.clone());
                 Ok(Response::DesktopDefaults { defaults: self.defaults.clone() })
             }
             Command::CompleteDesktopRestore => {
@@ -257,6 +265,22 @@ fn start_stop_owns_exact_files_and_preserves_unrelated_configuration() {
     let count = host.events.len();
     stop(&paths, &mut host).unwrap();
     assert_eq!(host.events.len(), count);
+}
+
+#[test]
+fn stop_restores_owned_defaults_replayed_by_restarted_policy() {
+    let (_fixture, paths, fragment) = fixture();
+    let mut host = Host::new();
+    let prior = host.defaults.clone();
+    start(&paths, Some(&fragment), &mut host).unwrap();
+    host.replay_defaults = Some(host.defaults.clone());
+    host.defaults.configured_source = Some("later-user-choice".into());
+    host.defaults.effective_source = Some("later-user-choice".into());
+    stop(&paths, &mut host).unwrap();
+    restored(&paths, &fragment, &host);
+    assert_eq!(host.defaults.configured_sink, prior.configured_sink);
+    assert_eq!(host.defaults.configured_source.as_deref(), Some("later-user-choice"));
+    assert!(!host.active);
 }
 
 #[test]

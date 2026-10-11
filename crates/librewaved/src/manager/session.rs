@@ -103,6 +103,16 @@ impl Daemon {
                 .read()
                 .map_err(|error| internal_error(format!("cannot read desktop defaults: {error}")))?
         };
+        if self.audio_session.defaults.is_some() {
+            let mut baseline = defaults.clone();
+            baseline.effective_sink = None;
+            baseline.effective_source = None;
+            let mut session = self.audio_session.clone();
+            session.defaults = Some(baseline);
+            // Retain the confirmed user selections if WirePlumber replays an
+            // earlier owned default during the policy restart.
+            self.save_audio_session(session)?;
+        }
         Ok(Response::DesktopDefaults { defaults })
     }
     pub(super) fn complete_desktop_restore(&mut self) -> Result<Response, IpcError> {

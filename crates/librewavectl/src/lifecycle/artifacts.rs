@@ -109,7 +109,12 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
                     atomic_write(&owned.path, unit_content.as_bytes(), 0o644)?;
                 }
                 OwnedKind::File if owned.path == manifest.udev_policy_path => {
-                    self.udev.install_and_refresh(&owned.path, udev_content.as_bytes())?;
+                    // Preflight proved ownership and the exact unchanged
+                    // snapshot. Reuse the approved rule on an upgrade; final
+                    // verification still requires the owned live ACL grant.
+                    if self.udev.read(&owned.path)?.as_deref() != Some(udev_content.as_bytes()) {
+                        self.udev.install_and_refresh(&owned.path, udev_content.as_bytes())?;
+                    }
                 }
                 OwnedKind::File => {
                     return Err(io::Error::new(

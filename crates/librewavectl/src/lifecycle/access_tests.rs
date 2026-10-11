@@ -105,6 +105,7 @@ fn access_baseline_is_durable_preserved_across_upgrade_and_restored_on_removal()
     assert_eq!(lifecycle.read_manifest().unwrap().unwrap().usb_access[0].original_acl, ORIGINAL);
     install(&fixture, &mut lifecycle, "second");
     assert_eq!(lifecycle.udev.captures.get(), 1);
+    assert_eq!(lifecycle.udev.rule.events, vec!["install", "refresh"]);
     assert_eq!(lifecycle.read_manifest().unwrap().unwrap().usb_access[0].original_acl, ORIGINAL);
     assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed);
     assert_eq!(lifecycle.udev.acl.borrow().as_str(), ORIGINAL);

@@ -116,6 +116,8 @@ The udev refresh matches USB vendor `0fd9` and product `0070`. It does not trigg
 
 Setup records the original numeric ACL for each connected Wave:3 node before it installs the access rule. The manifest also records the boot ID, USB topology, node inode, and filesystem identity. It contains no device serial. An upgrade retains the original baseline. Setup refuses an ACL that `uaccess` would change for another user or widen for another group.
 
+An upgrade reuses an unchanged owned access rule and verified grant. It does not install or refresh that rule again. A new installation or a missing owned rule still requires the privileged operation.
+
 Removal of the udev rule alone can leave its ACL on a connected node. Uninstall therefore restores the recorded ACL after it removes and refreshes the rule. Restoration accepts only the exact recorded connection and an unchanged owned grant. It pins that node while it restores the original ACL and verifies the result. An interrupted restoration retains the manifest, journal, and binaries so uninstall can resume.
 
 A changed ACL is preserved. A node connected after setup, after reconnect, or after a reboot has no original baseline unless the recorded node identity still matches. Uninstall refuses to guess its permissions. Keep the installation records and review that exact connection before cleanup. Reconnect and login permission recovery remain acceptance gates.
@@ -145,6 +147,8 @@ The generated unit quotes executable paths and pins the installation's configura
 The runtime journal records every owned file and whether the daemon service was already active. Repeated starts reuse that record. A repeated start without `--suspend-config` uses the recorded file. Setup and uninstall refuse to run until the ownership record is cleared. One process lock serializes all lifecycle operations.
 
 A failed start runs the same restoration path as stop. Stop cancels durable audio recovery, releases the audio resources, and waits for all LibreWave nodes to disappear. Cleanup failure retains the policy and backup. After successful cleanup, the daemon restores each configured default only while it still selects LibreWave. A later user selection is preserved. The lifecycle restores the exact fragment, removes its policy, restarts WirePlumber, and verifies the defaults. The daemon retains the baseline until this verification is complete. The lifecycle stops a service that it launched and removes its journal and backup.
+
+The daemon records the confirmed restoration selections before the policy restart. If WirePlumber reloads an earlier LibreWave selection, the daemon restores that selection again. A later user choice remains in place.
 
 If restoration fails, keep the journal and backup and retry `librewavectl stop`. A modified file is preserved. The error names the conflicting artifact or failed operation. Do not delete the journal to bypass that check. An interrupted final service stop resumes without starting a new daemon or restarting WirePlumber again.
 

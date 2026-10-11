@@ -393,16 +393,11 @@ fn stop_inner(
         )?;
     }
     verify_restorable_files(paths, &record)?;
-    let expected_defaults = if record.defaults_captured {
-        let Response::DesktopDefaults { defaults } =
-            host.request(Command::RestoreDesktopDefaults)?
-        else {
-            return Err(unexpected());
-        };
-        Some(defaults)
-    } else {
-        None
-    };
+    if record.defaults_captured {
+        request_kind(host, Command::RestoreDesktopDefaults, |reply| {
+            matches!(reply, Response::DesktopDefaults { .. })
+        })?;
+    }
     if checked_exists(&paths.wireplumber())? {
         if !policy_matches(paths)? {
             return Err(io::Error::other("policy changed before removal; preserved"));
@@ -426,6 +421,17 @@ fn stop_inner(
     if record.policy_pending {
         host.service(SessionOperation::RestartWirePlumber)?;
         wait_services(host)?;
+        if !record.defaults_captured {
+            return Err(invalid("policy ownership has no captured defaults"));
+        }
+        // The restarted policy can replay its earlier configured selections.
+        // Restore only still-owned selections against the daemon's confirmed
+        // restoration baseline, preserving any later user choice.
+        let Response::DesktopDefaults { defaults: expected } =
+            host.request(Command::RestoreDesktopDefaults)?
+        else {
+            return Err(unexpected());
+        };
         wait(
             host,
             |host| {
@@ -434,9 +440,6 @@ fn stop_inner(
                 else {
                     return Err(unexpected());
                 };
-                let expected = expected_defaults
-                    .as_ref()
-                    .ok_or_else(|| invalid("policy ownership has no captured defaults"))?;
                 Ok(defaults.configured_sink == expected.configured_sink
                     && defaults.configured_source == expected.configured_source
                     && defaults.effective_sink.as_deref() != Some("librewave.system")
