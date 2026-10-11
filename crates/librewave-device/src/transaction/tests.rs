@@ -685,3 +685,32 @@ fn timeout_and_disconnect_failures_preserve_both_errors_and_require_reprobe() {
         assert_eq!(transport.events.len(), event_count);
     }
 }
+
+#[test]
+fn changing_knob_target_writes_only_its_byte_and_keeps_fractional_physical_gain() {
+    let mut original = baseline();
+    original[0..2].copy_from_slice(&4_726i16.to_le_bytes());
+    original[12] = VolumeSelect::Mic as u8;
+    let mut changed = original;
+    changed[12] = VolumeSelect::Headphone as u8;
+    let mut transport = FakeTransport::with_probe(ApiVersion::new(5, 4), original);
+    let mut session = transport.admit(3);
+    let expected = *session.config();
+    transport.read(original);
+    transport.writes.push_back(Ok(16));
+    transport.read(changed);
+    assert_eq!(
+        session.transact_control(
+            &mut transport,
+            expected,
+            Wave3ControlChange::VolumeSelect(VolumeSelect::Headphone)
+        ),
+        TransactionOutcome::Applied { config: *session.config() }
+    );
+    assert_eq!(
+        session.controls().expect("decoded preserved controls").microphone_gain.raw_q8_8(),
+        4_726
+    );
+    assert!(matches!(&transport.events[1], Event::Write { payload, .. } if payload == &changed));
+    assert_eq!(transport.events.len(), 3);
+}

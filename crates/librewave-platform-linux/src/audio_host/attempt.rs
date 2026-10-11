@@ -70,7 +70,7 @@ impl AdmissionGate for ReadOnlyAdmission {
     fn admit(&mut self, candidate: &UsbDeviceCandidate) -> Result<(), LinuxAudioError> {
         crate::probe_wave3_usb(candidate)
             .map(|_| ())
-            .map_err(|error| attempt_error("read-only device admission", error))
+            .map_err(|error| LinuxAudioError::DeviceAdmission(crate::admission_error(error)))
     }
 }
 
@@ -782,12 +782,12 @@ pub(in crate::audio_host) mod tests {
         }
     }
 
-    struct DenyingAdmission(Calls);
+    struct DenyingAdmission(Calls, librewave_core::AdmissionError);
 
     impl AdmissionGate for DenyingAdmission {
         fn admit(&mut self, _candidate: &UsbDeviceCandidate) -> Result<(), LinuxAudioError> {
             record(&self.0, "read-only admission rejected");
-            Err(attempt_error("read-only device admission", "unknown schema"))
+            Err(LinuxAudioError::DeviceAdmission(self.1.clone()))
         }
     }
 
@@ -1125,26 +1125,38 @@ pub(in crate::audio_host) mod tests {
     }
 
     #[test]
-    fn unknown_schema_stops_before_any_alsa_open() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let policy =
-            AudioAttemptPolicy::conservative(ClockAttemptEpoch::try_new(5).expect("epoch"))
-                .expect("policy");
-        let physical = policy.physical;
-        let mut host = ComposedAudioHost::with_adapters(
-            policy,
-            MixerProfile::default(),
-            Box::new(FakePipeWire(Arc::clone(&calls))),
-            Box::new(FakeAlsa { calls: Arc::clone(&calls), physical, mode: CaptureMode::Nominal }),
-            Box::new(FailingGraph(Arc::clone(&calls))),
-            Box::new(DenyingAdmission(Arc::clone(&calls))),
-        );
-        let mut lifecycle = crate::audio_lifecycle::AudioLifecycle::new();
-        assert!(lifecycle.start(&mut host, Some(&candidate())).is_err());
-        assert_eq!(
-            *calls.lock().expect("calls"),
-            ["verify hidden", "read-only admission rejected", "disconnect PipeWire",]
-        );
+    fn admission_failure_keeps_its_category_and_stops_before_any_alsa_open() {
+        for error in [
+            librewave_core::AdmissionError::UnsupportedApi {
+                api: librewave_core::ApiVersion::new(5, 2),
+            },
+            librewave_core::AdmissionError::PermissionDenied,
+        ] {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let policy =
+                AudioAttemptPolicy::conservative(ClockAttemptEpoch::try_new(5).expect("epoch"))
+                    .expect("policy");
+            let physical = policy.physical;
+            let mut host = ComposedAudioHost::with_adapters(
+                policy,
+                MixerProfile::default(),
+                Box::new(FakePipeWire(Arc::clone(&calls))),
+                Box::new(FakeAlsa {
+                    calls: Arc::clone(&calls),
+                    physical,
+                    mode: CaptureMode::Nominal,
+                }),
+                Box::new(FailingGraph(Arc::clone(&calls))),
+                Box::new(DenyingAdmission(Arc::clone(&calls), error.clone())),
+            );
+            let mut lifecycle = crate::audio_lifecycle::AudioLifecycle::new();
+            assert!(matches!(lifecycle.start(&mut host, Some(&candidate())),
+            Err(crate::audio_lifecycle::LifecycleError::Host { source: LinuxAudioError::DeviceAdmission(observed), .. }) if observed == error));
+            assert_eq!(
+                *calls.lock().expect("calls"),
+                ["verify hidden", "read-only admission rejected", "disconnect PipeWire",]
+            );
+        }
     }
 
     #[test]

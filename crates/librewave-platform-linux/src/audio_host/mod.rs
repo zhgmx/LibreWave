@@ -171,6 +171,8 @@ impl Default for AudioResourceState {
 /// A classified Linux audio host failure.
 #[derive(Debug, Eq, PartialEq)]
 pub enum LinuxAudioError {
+    /// A reviewed read-only USB admission probe failed.
+    DeviceAdmission(librewave_core::AdmissionError),
     /// The admitted candidate did not identify exactly one ALSA card.
     AmbiguousAlsaCard,
     /// The candidate had no stable ALSA card identifier.
@@ -212,6 +214,7 @@ pub enum LinuxAudioError {
 impl fmt::Display for LinuxAudioError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DeviceAdmission(error) => write!(formatter, "device admission failed: {error}"),
             Self::AmbiguousAlsaCard => {
                 formatter.write_str("the admitted USB device does not identify one ALSA card")
             }

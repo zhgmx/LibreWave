@@ -475,6 +475,10 @@ pub enum Command {
     SetWave3Control { id: DeviceId, expected_generation: DeviceGeneration, control: Wave3Control },
     /// Return the complete current portable mixer snapshot.
     GetMixer,
+    /// Enable the experimental audio owner in this daemon session.
+    StartExperimentalAudio,
+    /// Cancel audio recovery and release the daemon-owned audio resources.
+    StopAudio,
     /// Atomically replace one complete monitor or stream route.
     SetMixerRoute {
         expected_generation: MixerGeneration,

@@ -413,6 +413,14 @@ impl std::error::Error for MixerProfileError {}
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum MixerInactiveReason {
     AudioHostEngineNotConnected,
+    Starting,
+    NoSingleDevice,
+    HostServicesUnavailable,
+    DeviceAccessDenied,
+    DeviceAdmissionFailed,
+    PhysicalNodesExposed,
+    AudioAttemptFailed,
+    CleanupPending,
 }
 
 impl fmt::Display for MixerInactiveReason {
@@ -420,6 +428,23 @@ impl fmt::Display for MixerInactiveReason {
         match self {
             Self::AudioHostEngineNotConnected => {
                 formatter.write_str("audio host and mixer engine are not connected")
+            }
+            Self::Starting => formatter.write_str("experimental audio startup is pending"),
+            Self::NoSingleDevice => formatter.write_str("connect exactly one supported device"),
+            Self::HostServicesUnavailable => {
+                formatter.write_str("PipeWire and WirePlumber must both be available")
+            }
+            Self::DeviceAccessDenied => formatter.write_str(
+                "USB access denied; check the exact Wave:3 access rule with librewavectl doctor",
+            ),
+            Self::DeviceAdmissionFailed => formatter.write_str("read-only device admission failed"),
+            Self::PhysicalNodesExposed => formatter
+                .write_str("the physical Wave card is still owned by the desktop audio service"),
+            Self::AudioAttemptFailed => {
+                formatter.write_str("audio startup or progress failed; recovery is pending")
+            }
+            Self::CleanupPending => {
+                formatter.write_str("audio cleanup failed; ownership remains retained")
             }
         }
     }
@@ -461,7 +486,11 @@ impl MixerSnapshot {
 
     #[must_use]
     pub fn inactive(profile: MixerProfile) -> Self {
-        let reason = MixerInactiveReason::AudioHostEngineNotConnected;
+        Self::inactive_for(profile, MixerInactiveReason::AudioHostEngineNotConnected)
+    }
+
+    #[must_use]
+    pub fn inactive_for(profile: MixerProfile, reason: MixerInactiveReason) -> Self {
         Self {
             profile,
             runtime: MixerRuntimeState::Inactive { reason },

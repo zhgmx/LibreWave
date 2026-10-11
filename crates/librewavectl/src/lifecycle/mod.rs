@@ -43,28 +43,7 @@ pub fn run<O: Write, E: Write>(
     match command {
         Some("setup") => {
             let options = Options::parse(&arguments[2..], CommandKind::Setup)?;
-            let binaries = current_binaries(options.daemon_path.as_deref())?;
-            let identity = current_identity(&options, &binaries)?;
-            writeln!(
-                output,
-                "LibreWave will install the current CLI, read-only daemon, user unit, and exact Wave:3 access rule."
-            )?;
-            writeln!(
-                output,
-                "Audio ownership will remain blocked. LibreWave will not install a WirePlumber card-disable rule or start the daemon."
-            )?;
-            if !options.yes && !confirm("Continue with setup? [y/N] ")? {
-                writeln!(output, "Setup canceled.")?;
-                return Ok(0);
-            }
-            let manifest = lifecycle.setup(&InstallRequest {
-                identity,
-                cli_source: &binaries.cli,
-                daemon_source: &binaries.daemon,
-            })?;
-            writeln!(output, "Installed build {}.", manifest.identity.stable_key())?;
-            writeln!(output, "Run `librewavectl doctor` to inspect the installation.")?;
-            Ok(0)
+            run_setup(&options, &mut lifecycle, output)
         }
         Some("doctor") => {
             let options = Options::parse(&arguments[2..], CommandKind::Doctor)?;
@@ -123,6 +102,56 @@ pub fn run<O: Write, E: Write>(
     }
 }
 
+fn run_setup(
+    options: &Options,
+    lifecycle: &mut Lifecycle<ProductionUdev, ProductionUnitInspector, ProductionProcessInspector>,
+    output: &mut impl Write,
+) -> io::Result<i32> {
+    write_setup_plan(output, &lifecycle.paths)?;
+    if options.setup_mode == SetupMode::Plan {
+        return Ok(0);
+    }
+    let binaries = current_binaries(options.daemon_path.as_deref())?;
+    let identity = current_identity(options, &binaries)?;
+    writeln!(
+        output,
+        "LibreWave will install the current CLI, read-only daemon, user unit, and exact Wave:3 access rule."
+    )?;
+    writeln!(
+        output,
+        "Audio ownership will remain blocked. LibreWave will not install a WirePlumber card-disable rule or start the daemon."
+    )?;
+    if !options.yes && !confirm("Continue with setup? [y/N] ")? {
+        writeln!(output, "Setup canceled.")?;
+        return Ok(0);
+    }
+    let manifest = lifecycle.setup(&InstallRequest {
+        identity,
+        cli_source: &binaries.cli,
+        daemon_source: &binaries.daemon,
+    })?;
+    writeln!(output, "Installed build {}.", manifest.identity.stable_key())?;
+    writeln!(output, "Run `librewavectl doctor` to inspect the installation.")?;
+    Ok(0)
+}
+
+fn write_setup_plan(output: &mut impl Write, paths: &InstallPaths) -> io::Result<()> {
+    writeln!(output, "Setup plan (no changes applied):")?;
+    writeln!(output, "  Executable links: {}", paths.bin_root.display())?;
+    writeln!(output, "  Inactive user unit: {}", paths.unit().display())?;
+    writeln!(output, "  Privileged access rule: {}", paths.udev_rule.display())?;
+    write!(
+        output,
+        "  {}",
+        librewave_platform_linux::audio_policy::Wave3AudioPolicy::new().render_udev()
+    )?;
+    writeln!(
+        output,
+        "  Reload udev rules and refresh only USB devices with vendor 0fd9 and product 0070."
+    )?;
+    writeln!(output, "  Do not start the daemon or change WirePlumber configuration.")
+}
+
 fn write_command_help(output: &mut impl Write, command: CommandKind) -> io::Result<()> {
     match command {
         CommandKind::Setup => {
@@ -131,6 +160,10 @@ fn write_command_help(output: &mut impl Write, command: CommandKind) -> io::Resu
             writeln!(output, "Install the current CLI and read-only daemon.")?;
             writeln!(output)?;
             writeln!(output, "Options:")?;
+            writeln!(
+                output,
+                "  --plan                     Show the exact access and installation plan without changes"
+            )?;
             writeln!(
                 output,
                 "  --source-root <PATH>       Source checkout used for build identity"
@@ -183,7 +216,14 @@ fn confirm(prompt: &str) -> io::Result<bool> {
     Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES"))
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SetupMode {
+    Apply,
+    Plan,
+}
+
 struct Options {
+    setup_mode: SetupMode,
     yes: bool,
     purge: bool,
     expect_current: bool,
@@ -203,6 +243,7 @@ enum CommandKind {
 impl Options {
     fn parse(arguments: &[String], command: CommandKind) -> io::Result<Self> {
         let mut options = Self {
+            setup_mode: SetupMode::Apply,
             yes: false,
             purge: false,
             expect_current: false,
@@ -214,6 +255,7 @@ impl Options {
         let mut index = 0;
         while index < arguments.len() {
             match arguments[index].as_str() {
+                "--plan" if command == CommandKind::Setup => options.setup_mode = SetupMode::Plan,
                 "--yes" if matches!(command, CommandKind::Setup | CommandKind::Uninstall) => {
                     options.yes = true;
                 }
@@ -254,7 +296,12 @@ impl Options {
         if command == CommandKind::Doctor && has_context && !options.expect_current {
             return Err(invalid("build context options require `doctor --expect-current`"));
         }
-        if command == CommandKind::Setup || options.expect_current {
+        if options.setup_mode == SetupMode::Plan && options.yes {
+            return Err(invalid("--plan cannot be combined with --yes"));
+        }
+        if (command == CommandKind::Setup && options.setup_mode == SetupMode::Apply)
+            || options.expect_current
+        {
             if options.source_root.is_none() {
                 options.source_root = Some(std::env::current_dir()?);
             }

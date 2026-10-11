@@ -97,18 +97,14 @@ pub fn run(socket_path: impl Into<PathBuf>) -> std::io::Result<()> {
     if std::env::var_os("LIBREWAVE_EXPERIMENTAL_AUDIO").as_deref()
         == Some(std::ffi::OsStr::new("1"))
     {
-        daemon.enable_experimental_audio();
-        let daemon = std::cell::RefCell::new(daemon);
-        return librewave_platform_linux::ipc::serve_with_tick(
-            &socket_path,
-            |command| daemon.borrow_mut().handle(command, librewave_core::Origin::Client),
-            || daemon.borrow_mut().audio_tick(),
-            |error| eprintln!("librewaved: connection error: {error}"),
-        );
+        daemon.enable_experimental_audio().map_err(std::io::Error::other)?;
     }
-    librewave_platform_linux::ipc::serve(
+    let daemon = std::cell::RefCell::new(daemon);
+    librewave_platform_linux::ipc::serve_with_tick(
         &socket_path,
-        |command| daemon.handle(command, librewave_core::Origin::Client),
+        |command| daemon.borrow_mut().handle(command, librewave_core::Origin::Client),
+        || daemon.borrow_mut().audio_tick(),
+        || daemon.borrow_mut().audio_maintenance_tick(),
         |error| eprintln!("librewaved: connection error: {error}"),
     )
 }

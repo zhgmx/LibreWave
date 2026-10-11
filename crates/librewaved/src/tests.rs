@@ -1276,9 +1276,9 @@ fn reconnect_disconnect_drops_connection_and_reports_disconnected() {
     assert!(!disconnected.daemon.connections.contains_key(&DeviceId(1)));
 }
 
-struct DiscoveryFixture {
+pub(crate) struct DiscoveryFixture {
     root: std::path::PathBuf,
-    paths: librewave_platform_linux::DiscoveryPaths,
+    pub(crate) paths: librewave_platform_linux::DiscoveryPaths,
 }
 
 impl Drop for DiscoveryFixture {
@@ -1287,7 +1287,7 @@ impl Drop for DiscoveryFixture {
     }
 }
 
-fn discovery_fixture() -> DiscoveryFixture {
+pub(crate) fn discovery_fixture() -> DiscoveryFixture {
     let nonce =
         SystemTime::now().duration_since(UNIX_EPOCH).expect("clock before epoch").as_nanos();
     let root = std::env::temp_dir().join(format!("librewave-daemon-fixture-{nonce}"));
@@ -1553,4 +1553,80 @@ fn exhausted_hardware_generation_stops_before_persistence_and_usb() {
     assert_eq!(error.kind, IpcErrorKind::DeviceGenerationExhausted);
     assert!(h.calls.borrow().is_empty());
     assert_eq!(*h.saves.borrow(), 0);
+}
+
+#[test]
+fn raw_gain_readback_and_reconnect_never_become_unmanaged_desired_state() {
+    let mut before = wave3_config();
+    before.input_gain.raw = 4_726; // Physical readback: 18.4609375 dB, between authorable steps.
+    let mut after = before.clone();
+    after.input_gain.raw = 4_096; // Observed after reconnect: 16 dB.
+    after.volume_select = librewave_core::VolumeSelection::Headphone;
+    let mut test = harness(DesiredState::default(), before.clone(), vec![], vec![]);
+    assert_eq!(inspect(&mut test.daemon).admission.config(), Some(&before));
+    test.refreshes.borrow_mut().push_back(ConnectionRefreshOutcome::Changed(after.clone()));
+    assert_eq!(inspect(&mut test.daemon).admission.config(), Some(&after));
+    assert!(test.calls.borrow().is_empty());
+    assert_eq!(*test.saves.borrow(), 0);
+    assert_eq!(*test.store_state.borrow(), DesiredState::default());
+
+    // A new daemon/connection adopts the new baseline, without restoring an observation.
+    let mut reopened = harness(test.store_state.borrow().clone(), after.clone(), vec![], vec![]);
+    assert_eq!(inspect(&mut reopened.daemon).admission.config(), Some(&after));
+    assert!(reopened.calls.borrow().is_empty());
+    assert_eq!(*reopened.saves.borrow(), 0);
+}
+
+#[test]
+fn restoring_only_knob_mode_preserves_raw_unmanaged_gain() {
+    let mut before = wave3_config();
+    before.input_gain.raw = 4_726;
+    let mut after = before.clone();
+    after.volume_select = librewave_core::VolumeSelection::Headphone;
+    let control = Wave3Control::KnobTarget(librewave_core::VolumeSelection::Headphone);
+    let mut desired = DesiredState::default();
+    desired.stage("1-8.3".to_owned(), control).expect("valid fake-device operation");
+    desired.promote("1-8.3").expect("valid fake-device operation");
+    let mut test =
+        harness(desired, before, vec![ConnectionOutcome::Applied(after.clone())], vec![]);
+    assert_eq!(inspect(&mut test.daemon).admission.config(), Some(&after));
+    assert_eq!(&*test.calls.borrow(), &[control]);
+    assert_eq!(
+        test.store_state
+            .borrow()
+            .get("1-8.3")
+            .expect("valid fake-device operation")
+            .managed
+            .input_gain,
+        None
+    );
+}
+
+#[test]
+fn audio_commands_preserve_profiles_and_repeated_start_is_idempotent() {
+    let mut daemon = Daemon::from_snapshot(Snapshot::empty());
+    let profile = daemon.snapshot().mixer.profile.clone();
+    let response = daemon
+        .handle(Command::StartExperimentalAudio, librewave_core::Origin::Client)
+        .expect("valid fake-device operation");
+    assert!(matches!(response, Response::AudioStarting { .. }));
+    let generation = daemon.snapshot().generation;
+    daemon
+        .handle(Command::StartExperimentalAudio, librewave_core::Origin::Client)
+        .expect("valid fake-device operation");
+    assert_eq!(daemon.snapshot().generation, generation);
+    // In-frame maintenance must not construct a real host.
+    daemon.audio_maintenance_tick();
+    let response = daemon
+        .handle(Command::StopAudio, librewave_core::Origin::Client)
+        .expect("valid fake-device operation");
+    assert!(matches!(response, Response::AudioStopped { .. }));
+    assert!(!daemon.audio.as_ref().expect("retained attempt counter").needs_tick());
+    assert_eq!(daemon.snapshot().mixer.profile, profile);
+    let generation = daemon.snapshot().generation;
+    daemon
+        .handle(Command::StopAudio, librewave_core::Origin::Client)
+        .expect("valid fake-device operation");
+    daemon.audio_tick();
+    assert_eq!(daemon.snapshot().generation, generation);
 }

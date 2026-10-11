@@ -269,21 +269,24 @@ where
     write_frame(&mut stream, &frame, timeout, tick)
 }
 
-/// Serves local IPC and a bounded control-side audio tick on one owner thread.
-/// Frame transfers have absolute deadlines and run the tick between I/O
-/// attempts. Partial traffic cannot extend a frame deadline.
+/// Serves IPC with separate control and in-frame maintenance ticks.
+///
+/// The control tick may start an audio attempt. The maintenance tick must
+/// preserve active watchdogs without starting a blocking admission sequence.
 ///
 /// # Errors
 ///
 /// Returns a socket bind or accept error.
-pub fn serve_with_tick<F, T, R>(
+pub fn serve_with_tick<F, C, T, R>(
     socket_path: &Path,
     mut handler: F,
-    mut tick: T,
+    mut control_tick: C,
+    mut maintenance_tick: T,
     mut report_connection_error: R,
 ) -> io::Result<()>
 where
     F: FnMut(Command) -> Result<Response, IpcError>,
+    C: FnMut(),
     T: FnMut(),
     R: FnMut(io::Error),
 {
@@ -291,7 +294,7 @@ where
     listener.listener.set_nonblocking(true)?;
     let policy = PeerCredentialPolicy::current_user();
     loop {
-        tick();
+        control_tick();
         match listener.listener.accept() {
             Ok((stream, _)) => {
                 if let Err(error) = handle_connection_with_tick(
@@ -299,7 +302,7 @@ where
                     policy,
                     Duration::from_millis(250),
                     &mut handler,
-                    &mut tick,
+                    &mut maintenance_tick,
                 ) {
                     report_connection_error(error);
                 }
@@ -309,37 +312,6 @@ where
                 std::thread::sleep(Duration::from_millis(5));
             }
             Err(error) => return Err(error),
-        }
-    }
-}
-
-/// Serves the private user-session socket until an unrecoverable accept error occurs.
-///
-/// Per-connection errors are reported through `report_connection_error` and do not stop the
-/// daemon. An interrupted accept is retried explicitly.
-///
-/// # Errors
-///
-/// Returns an error when the socket cannot be bound or an unrecoverable accept error occurs.
-pub fn serve<F, R>(
-    socket_path: &Path,
-    mut handler: F,
-    mut report_connection_error: R,
-) -> io::Result<()>
-where
-    F: FnMut(Command) -> Result<Response, IpcError>,
-    R: FnMut(io::Error),
-{
-    let listener = bind_private_socket(socket_path)?;
-    let policy = PeerCredentialPolicy::current_user();
-    loop {
-        let (stream, _) = match listener.listener.accept() {
-            Ok(connection) => connection,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        };
-        if let Err(error) = handle_connection(stream, policy, &mut handler) {
-            report_connection_error(error);
         }
     }
 }

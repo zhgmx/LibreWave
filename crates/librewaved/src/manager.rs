@@ -208,19 +208,56 @@ impl Daemon {
 
     /// Enables the explicit audio candidate in this daemon only. The normal
     /// daemon constructor and setup path leave it disabled.
-    pub fn enable_experimental_audio(&mut self) {
-        self.audio = Some(AudioSupervisor::new());
+    ///
+    /// # Errors
+    ///
+    /// Returns an error while a canceled attempt still owns resources.
+    pub fn enable_experimental_audio(&mut self) -> Result<(), IpcError> {
+        if let Some(audio) = self.audio.as_mut() {
+            audio.enable().map_err(|()| audio_cleanup_error())?;
+        } else {
+            self.audio = Some(AudioSupervisor::new());
+        }
         self.next_audio_inventory = Instant::now();
+        self.update_mixer_runtime(librewave_core::Origin::Client);
+        Ok(())
+    }
+
+    fn stop_audio(&mut self, origin: librewave_core::Origin) -> Result<(), IpcError> {
+        let result = self.audio.as_mut().map_or(Ok(()), AudioSupervisor::stop);
+        self.update_mixer_runtime(origin);
+        result.map_err(|()| audio_cleanup_error())
+    }
+
+    fn update_mixer_runtime(&mut self, origin: librewave_core::Origin) {
+        let mut snapshot = self.snapshot().clone();
+        let profile = snapshot.mixer.profile.clone();
+        snapshot.mixer = match self.audio.as_ref().map(AudioSupervisor::runtime) {
+            Some(MixerRuntimeState::Active) => MixerSnapshot::active(profile),
+            Some(MixerRuntimeState::Inactive { reason }) => {
+                MixerSnapshot::inactive_for(profile, reason)
+            }
+            None => MixerSnapshot::inactive(profile),
+        };
+        ignore_reconciliation_event(self.state.replace(snapshot, origin));
     }
 
     /// Advances the opt-in audio owner on the daemon control thread.
     pub fn audio_tick(&mut self) {
-        if self.audio.is_none() {
+        self.tick_audio(true);
+    }
+
+    pub(crate) fn audio_maintenance_tick(&mut self) {
+        self.tick_audio(false);
+    }
+
+    fn tick_audio(&mut self, allow_start: bool) {
+        if self.audio.as_ref().is_none_or(|audio| !audio.needs_tick()) {
             return;
         }
         self.poll_services();
         let now = Instant::now();
-        if now >= self.next_audio_inventory {
+        if allow_start && now >= self.next_audio_inventory {
             ignore_reconciliation_event(self.refresh_inventory(librewave_core::Origin::Recovery));
             self.next_audio_inventory = now + Duration::from_secs(1);
         }
@@ -242,20 +279,9 @@ impl Daemon {
             &wireplumber,
             &self.audio_invocations,
             &profile,
+            allow_start,
         );
-        let active = supervisor.is_active();
-        let was_active = matches!(self.snapshot().mixer.runtime, MixerRuntimeState::Active);
-        if active != was_active {
-            let mut snapshot = self.snapshot().clone();
-            snapshot.mixer = if active {
-                MixerSnapshot::active(profile)
-            } else {
-                MixerSnapshot::inactive(profile)
-            };
-            ignore_reconciliation_event(
-                self.state.replace(snapshot, librewave_core::Origin::Recovery),
-            );
-        }
+        self.update_mixer_runtime(librewave_core::Origin::Recovery);
     }
 
     /// Executes one client command through the daemon's single state path.
@@ -292,6 +318,14 @@ impl Daemon {
                 Ok(Response::ControlChanged { device })
             }
             Command::GetMixer => Ok(Response::Mixer { mixer: self.snapshot().mixer.clone() }),
+            Command::StartExperimentalAudio => {
+                self.enable_experimental_audio()?;
+                Ok(Response::AudioStarting { mixer: self.snapshot().mixer.clone() })
+            }
+            Command::StopAudio => {
+                self.stop_audio(origin)?;
+                Ok(Response::AudioStopped { mixer: self.snapshot().mixer.clone() })
+            }
             Command::SetMixerRoute { expected_generation, source, target, route } => {
                 let mixer =
                     self.set_mixer_route(expected_generation, source, target, route, origin)?;
@@ -353,9 +387,16 @@ impl Daemon {
             }
         }
         let mut snapshot = self.snapshot().clone();
-        let active = self.audio.as_mut().is_some_and(|audio| audio.stage_profile(&next));
-        snapshot.mixer =
-            if active { MixerSnapshot::active(next) } else { MixerSnapshot::inactive(next) };
+        if let Some(audio) = self.audio.as_mut() {
+            audio.stage_profile(&next);
+        }
+        snapshot.mixer = match self.audio.as_ref().map(AudioSupervisor::runtime) {
+            Some(MixerRuntimeState::Active) => MixerSnapshot::active(next),
+            Some(MixerRuntimeState::Inactive { reason }) => {
+                MixerSnapshot::inactive_for(next, reason)
+            }
+            None => MixerSnapshot::inactive(next),
+        };
         let event = self.state.replace(snapshot, origin);
         if event.is_none() {
             return Err(internal_error(
@@ -1076,6 +1117,15 @@ fn internal_error(message: String) -> IpcError {
     IpcError { kind: IpcErrorKind::Internal, message }
 }
 
+fn audio_cleanup_error() -> IpcError {
+    IpcError {
+        kind: IpcErrorKind::AudioCleanupPending,
+        message:
+            "audio cleanup is pending; do not restore desktop ownership until `audio stop` succeeds"
+                .to_owned(),
+    }
+}
+
 fn write_locked(reason: DeviceWriteLockReason) -> IpcError {
     IpcError {
         kind: IpcErrorKind::DeviceWriteLocked { reason },
@@ -1122,7 +1172,7 @@ impl DeviceIdAllocator {
 
 #[cfg(test)]
 #[path = "tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 fn generation_exhausted() -> IpcError {
     IpcError {

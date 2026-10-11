@@ -1090,3 +1090,36 @@ fn write_executable(path: &Path, content: &[u8]) {
     write_file(path, content);
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
+
+#[test]
+fn setup_plan_returns_without_privilege_unit_probes_or_installed_binaries() {
+    let mut output = Vec::new();
+    let mut errors = Vec::new();
+    // The current test executable has no matching daemon binary. Planning must
+    // not inspect binaries, invoke pkexec, or require a working session bus.
+    let exit = super::run(
+        &["librewavectl", "setup", "--plan"].map(str::to_owned),
+        &mut output,
+        &mut errors,
+    )
+    .unwrap();
+    assert_eq!(exit, 0);
+    assert!(errors.is_empty());
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("no changes applied"));
+    assert!(output.contains("/etc/udev/rules.d/70-librewave-wave3.rules"));
+    assert!(
+        output.contains(
+            &librewave_platform_linux::audio_policy::Wave3AudioPolicy::new().render_udev()
+        )
+    );
+    assert!(output.contains("refresh only USB devices with vendor 0fd9 and product 0070"));
+    assert!(
+        super::Options::parse(&["--plan", "--yes"].map(str::to_owned), super::CommandKind::Setup)
+            .is_err()
+    );
+    assert!(
+        super::Options::parse(&["--plan"].map(str::to_owned), super::CommandKind::Uninstall)
+            .is_err()
+    );
+}

@@ -42,6 +42,19 @@ where
         }
         [command] if command == "status" => request_status(socket_path, output, errors),
         [command] if command == "refresh" => request_refresh(socket_path, output, errors),
+        [audio, options @ ..] if audio == "audio" => {
+            let command = match options {
+                [start, experimental] if start == "start" && experimental == "--experimental" => {
+                    librewave_core::Command::StartExperimentalAudio
+                }
+                [stop] if stop == "stop" => librewave_core::Command::StopAudio,
+                _ => {
+                    writeln!(errors, "error: use `audio start --experimental` or `audio stop`")?;
+                    return Ok(2);
+                }
+            };
+            request_audio(socket_path, command, output, errors, request)
+        }
         [devices, list] if devices == "devices" && list == "list" => {
             request_devices(socket_path, output, errors)
         }
@@ -71,6 +84,38 @@ where
         _ => {
             writeln!(errors, "error: invalid command; run `librewavectl help`")?;
             Ok(2)
+        }
+    }
+}
+
+fn request_audio(
+    socket_path: &Path,
+    command: librewave_core::Command,
+    output: &mut impl Write,
+    errors: &mut impl Write,
+    send: impl FnOnce(&Path, librewave_core::Command) -> Result<Response, ClientError>,
+) -> io::Result<i32> {
+    match (command, send(socket_path, command)) {
+        (
+            librewave_core::Command::StartExperimentalAudio,
+            Ok(Response::AudioStarting { mixer }),
+        ) => {
+            writeln!(
+                output,
+                "Experimental audio start accepted. Check readiness with `mixer show`."
+            )?;
+            write_mixer(output, &mixer)?;
+            Ok(0)
+        }
+        (librewave_core::Command::StopAudio, Ok(Response::AudioStopped { mixer })) => {
+            writeln!(output, "Audio resources released. Automatic audio recovery is disabled.")?;
+            write_mixer(output, &mixer)?;
+            Ok(0)
+        }
+        (_, Err(error)) => write_client_error(error, errors),
+        _ => {
+            writeln!(errors, "error: daemon returned an unexpected audio lifecycle response")?;
+            Ok(1)
         }
     }
 }
@@ -592,6 +637,8 @@ fn write_help<W: Write>(output: &mut W) -> io::Result<()> {
     writeln!(output, "Commands:")?;
     writeln!(output, "  status          Show daemon, device, and audio status")?;
     writeln!(output, "  refresh         Refresh inventory and retained device state")?;
+    writeln!(output, "  audio start --experimental  Request experimental audio ownership")?;
+    writeln!(output, "  audio stop      Release audio resources and disable recovery")?;
     writeln!(output, "  devices list    List supported devices")?;
     writeln!(output, "  devices inspect <id>  Inspect one device")?;
     writeln!(
@@ -649,7 +696,7 @@ mod tests {
         write_status(&mut output, &snapshot()).expect("render status");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "Daemon: connected\nProtocol: 5\nState generation: 4\nDevices: 1\nMixer: generation 0, inactive, 2 sources\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
+            "Daemon: connected\nProtocol: 6\nState generation: 4\nDevices: 1\nMixer: generation 0, inactive, 2 sources\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
         );
     }
 
@@ -963,5 +1010,76 @@ mod tests {
         ] {
             assert!(parse_control(name, value).is_err(), "{name} {value}");
         }
+    }
+
+    #[test]
+    fn audio_start_requires_explicit_experimental_selection() {
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        let exit = run(
+            ["librewavectl", "audio", "start"].map(str::to_owned),
+            Path::new("/does-not-exist"),
+            &mut output,
+            &mut errors,
+        )
+        .expect("valid CLI test operation");
+        assert_eq!(exit, 2);
+        assert!(output.is_empty());
+        assert!(
+            String::from_utf8(errors)
+                .expect("valid CLI test operation")
+                .contains("start --experimental")
+        );
+    }
+
+    #[test]
+    fn audio_start_reports_acceptance_without_claiming_readiness() {
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        let exit = request_audio(
+            Path::new("/unused"),
+            librewave_core::Command::StartExperimentalAudio,
+            &mut output,
+            &mut errors,
+            |_, command| {
+                assert_eq!(command, librewave_core::Command::StartExperimentalAudio);
+                Ok(Response::AudioStarting {
+                    mixer: MixerSnapshot::inactive_for(
+                        librewave_core::MixerProfile::default(),
+                        librewave_core::MixerInactiveReason::Starting,
+                    ),
+                })
+            },
+        )
+        .expect("valid CLI test operation");
+        assert_eq!(exit, 0);
+        assert!(errors.is_empty());
+        let output = String::from_utf8(output).expect("valid CLI test operation");
+        assert!(output.contains("start accepted"));
+        assert!(output.contains("startup is pending"));
+    }
+
+    #[test]
+    fn failed_audio_stop_never_claims_resources_were_released() {
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        let exit = request_audio(
+            Path::new("/unused"),
+            librewave_core::Command::StopAudio,
+            &mut output,
+            &mut errors,
+            |_, _| {
+                Err(ClientError::Remote(librewave_ipc::IpcError {
+                    kind: librewave_ipc::IpcErrorKind::AudioCleanupPending,
+                    message: "cleanup pending; owner retained".to_owned(),
+                }))
+            },
+        )
+        .expect("valid CLI test operation");
+        assert_eq!(exit, 1);
+        assert!(output.is_empty());
+        assert!(
+            String::from_utf8(errors).expect("valid CLI test operation").contains("owner retained")
+        );
     }
 }

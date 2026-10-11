@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// The current local request/response protocol version.
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 /// The maximum encoded JSON payload accepted by the local protocol.
 pub const MAX_FRAME_SIZE: usize = 1024 * 1024;
 
@@ -41,6 +41,10 @@ pub enum Response {
     Mixer { mixer: MixerSnapshot },
     /// The mixer snapshot after an accepted route request.
     MixerRouteChanged { mixer: MixerSnapshot },
+    /// Audio start was accepted. Readiness is reported by the mixer snapshot.
+    AudioStarting { mixer: MixerSnapshot },
+    /// All audio resources were released and automatic recovery was disabled.
+    AudioStopped { mixer: MixerSnapshot },
 }
 
 /// A framed response sent by the daemon.
@@ -114,6 +118,8 @@ pub enum IpcErrorKind {
     MixerPersistence,
     /// The mixer profile was renamed, but directory-sync durability is ambiguous.
     MixerPersistenceAmbiguous,
+    /// Audio cleanup failed. The owner remains retained and cannot be replaced.
+    AudioCleanupPending,
 }
 
 /// An explicit error returned over the local interface.
@@ -331,8 +337,8 @@ mod tests {
     }
 
     #[test]
-    fn semantic_control_command_and_stale_error_round_trip_at_version_five() {
-        assert_eq!(PROTOCOL_VERSION, 5);
+    fn semantic_control_command_and_stale_error_round_trip_at_version_six() {
+        assert_eq!(PROTOCOL_VERSION, 6);
         let request = RequestEnvelope {
             version: PROTOCOL_VERSION,
             request_id: 4,
@@ -345,7 +351,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(request).expect("serialize semantic request"),
             json!({
-                "version": 5,
+                "version": 6,
                 "request_id": 4,
                 "command": {
                     "SetWave3Control": {
@@ -370,7 +376,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response.clone()).expect("serialize stale response"),
             json!({
-                "version": 5,
+                "version": 6,
                 "request_id": 4,
                 "result": {
                     "Err": {
@@ -387,7 +393,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response).expect("serialize control response"),
             json!({
-                "version": 5,
+                "version": 6,
                 "request_id": 4,
                 "result": {
                     "Ok": {
@@ -434,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn mixer_route_round_trip_uses_named_exact_fader_steps_at_version_five() {
+    fn mixer_route_round_trip_uses_named_exact_fader_steps_at_version_six() {
         let request = RequestEnvelope {
             version: PROTOCOL_VERSION,
             request_id: 18,
@@ -452,7 +458,7 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "version": 5,
+                "version": 6,
                 "request_id": 18,
                 "command": {
                     "SetMixerRoute": {
@@ -518,6 +524,28 @@ mod tests {
                 decode_request(&serde_json::to_vec(&payload).expect("encode invalid request"))
                     .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn audio_lifecycle_uses_version_six_and_rejects_version_five() {
+        for command in [Command::StartExperimentalAudio, Command::StopAudio] {
+            let envelope = RequestEnvelope { version: PROTOCOL_VERSION, request_id: 10, command };
+            let frame = encode_request(&envelope).expect("valid lifecycle message");
+            assert_eq!(decode_request(&frame[4..]).expect("valid lifecycle message"), envelope);
+            let old = RequestEnvelope { version: 5, ..envelope };
+            assert_eq!(
+                process_request(old, |_| panic!("old version cannot reach the owner")).result,
+                Err(IpcError::version_mismatch(5))
+            );
+        }
+        let mixer = MixerSnapshot::default();
+        for response in
+            [Response::AudioStarting { mixer: mixer.clone() }, Response::AudioStopped { mixer }]
+        {
+            let envelope = ResponseEnvelope::success(10, response);
+            let frame = encode_response(&envelope).expect("valid lifecycle message");
+            assert_eq!(decode_response(&frame[4..]).expect("valid lifecycle message"), envelope);
         }
     }
 }
