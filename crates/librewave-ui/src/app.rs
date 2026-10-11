@@ -1,3 +1,4 @@
+mod chrome;
 mod mixer;
 
 use mixer::FaderEdit;
@@ -14,8 +15,7 @@ use gpui::{
 };
 use librewave_core::{
     Command, ControlAccessState, DeviceAdmissionSnapshot, DeviceGeneration, DeviceId,
-    DeviceWriteAccess, FixedPointValue, MeterAvailability, MixerRuntimeState, Snapshot,
-    Wave3Control,
+    DeviceWriteAccess, FixedPointValue, Snapshot, Wave3Control,
 };
 use librewave_ipc::{IpcErrorKind, Response};
 use librewave_platform_linux::ipc::{Client, ClientError, configured_socket_path};
@@ -23,7 +23,6 @@ use std::time::Duration;
 
 // Neutral surfaces and semantic mix colors from the user's LibreWave mock.
 const BACKGROUND: u32 = 0x000A_0A0A;
-const SIDEBAR: u32 = 0x0011_1111;
 const PANEL: u32 = 0x0014_1414;
 const RAISED: u32 = 0x001F_1F1F;
 const BORDER: u32 = 0x0029_2929;
@@ -40,11 +39,16 @@ const STATUS_INTERVAL: Duration = Duration::from_secs(2);
 ///
 /// Panics if GPUI cannot open its initial window.
 pub fn run() {
-    gpui_platform::application().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(1080.), px(780.)), cx);
+    gpui_platform::application().with_assets(crate::assets::Assets).run(|cx: &mut App| {
+        cx.text_system().add_fonts(crate::assets::fonts()).expect("embedded Geist fonts must load");
+        let bounds = Bounds::centered(None, size(px(1240.), px(900.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(850.), px(650.))),
+            titlebar: Some(gpui::TitlebarOptions {
+                title: Some("LibreWave".into()),
+                ..Default::default()
+            }),
             app_id: Some("dev.librewave.LibreWave".to_owned()),
             ..WindowOptions::default()
         };
@@ -57,6 +61,13 @@ pub fn run() {
 enum SessionExpectation {
     Connect,
     Stopped,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SettingsView {
+    Closed,
+    Open,
+    ConnectionDetails,
 }
 
 struct Shell {
@@ -73,6 +84,7 @@ struct Shell {
     suspend_config: Option<std::path::PathBuf>,
     lifecycle_message: Option<String>,
     session_expectation: SessionExpectation,
+    settings_view: SettingsView,
 }
 
 impl Shell {
@@ -91,6 +103,7 @@ impl Shell {
             suspend_config: None,
             lifecycle_message: None,
             session_expectation: SessionExpectation::Connect,
+            settings_view: SettingsView::Closed,
         };
         shell.send(Command::GetStatus, cx);
         cx.spawn(async move |this, cx| {
@@ -291,14 +304,7 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let device = self.snapshot.as_ref().and_then(|snapshot| snapshot.devices.first()).cloned();
-        div()
-            .size_full()
-            .bg(rgb(BACKGROUND))
-            .text_color(rgb(INK))
-            .flex()
-            .child(sidebar(device.is_some()))
-            .child(self.studio_content(device.as_ref(), cx))
+        self.mixer_frame(cx)
     }
 }
 
@@ -405,72 +411,6 @@ impl Shell {
 
     fn hardware_writable(&self, access: DeviceWriteAccess) -> bool {
         matches!(access, DeviceWriteAccess::Ready) && !self.pending && !self.hardware_state_stale
-    }
-
-    fn studio_content(
-        &self,
-        device: Option<&librewave_core::DeviceSnapshot>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .id("studio-content")
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .overflow_y_scroll()
-            .p(px(28.))
-            .flex()
-            .flex_col()
-            .gap(px(20.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.))
-                            .child(div().text_2xl().child("Mixer"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(MUTED))
-                                    .child("Independent Monitor and Stream levels for each input."),
-                            ),
-                    )
-                    .child(
-                        button("refresh", if self.pending { "Working…" } else { "Refresh status" })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.send(Command::GetStatus, cx);
-                            })),
-                    ),
-            )
-            .child(service_panel(self.snapshot.as_ref()))
-            .child(self.lifecycle_controls(cx))
-            .when_some(self.connection_error.clone(), |view, error| {
-                view.child(
-                    div()
-                        .p(px(12.))
-                        .rounded(px(8.))
-                        .bg(rgb(RAISED))
-                        .text_color(rgb(WARNING))
-                        .child(error),
-                )
-            })
-            .when_some(self.action_error.clone(), |view, error| {
-                view.child(
-                    div()
-                        .p(px(12.))
-                        .rounded(px(8.))
-                        .bg(rgb(RAISED))
-                        .text_color(rgb(WARNING))
-                        .child(error),
-                )
-            })
-            .child(self.mixer_channels(cx))
-            .child(self.device_panel(device, cx))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -637,84 +577,6 @@ impl Shell {
     }
 }
 
-fn sidebar(device_available: bool) -> impl IntoElement {
-    div()
-        .w(px(210.))
-        .h_full()
-        .flex_none()
-        .bg(rgb(SIDEBAR))
-        .border_r_1()
-        .border_color(rgb(BORDER))
-        .p(px(22.))
-        .flex()
-        .flex_col()
-        .gap(px(20.))
-        .child(div().text_xl().child("LibreWave"))
-        .child(section_label("WORKSPACE"))
-        .child(
-            div()
-                .p(px(11.))
-                .rounded(px(8.))
-                .bg(rgb(RAISED))
-                .text_color(rgb(ACCENT))
-                .text_sm()
-                .child("Mixer"),
-        )
-        .child(section_label("HARDWARE"))
-        .child(div().text_sm().child(if device_available { "Wave:3" } else { "No Wave:3" }))
-        .child(div().flex_1())
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(MUTED))
-                .child("Hardware levels stay separate from desktop volume."),
-        )
-}
-
-fn service_panel(snapshot: Option<&Snapshot>) -> impl IntoElement {
-    let (headline, badge, color) = match snapshot.map(|state| state.mixer.runtime) {
-        Some(MixerRuntimeState::Active) => {
-            ("Audio host and mixer engine connected", "ACTIVE", ACCENT)
-        }
-        Some(MixerRuntimeState::Inactive { .. }) => {
-            ("Audio host and mixer engine are not connected", "INACTIVE", WARNING)
-        }
-        None => ("Connect librewaved to see device state", "OFFLINE", WARNING),
-    };
-    let services = snapshot.map_or_else(
-        || "The daemon is unavailable".to_owned(),
-        |state| {
-            let meters = match state.mixer.meters {
-                MeterAvailability::Unavailable { .. } => "meters unavailable",
-                MeterAvailability::Unpublished => "meters not published over IPC",
-            };
-            format!(
-                "PipeWire {}  ·  WirePlumber {}  ·  {meters}",
-                state.audio.pipewire.status_word(),
-                state.audio.wireplumber.status_word(),
-            )
-        },
-    );
-    div()
-        .p(px(14.))
-        .rounded(px(9.))
-        .border_1()
-        .border_color(rgb(BORDER))
-        .bg(rgb(PANEL))
-        .flex()
-        .items_center()
-        .justify_between()
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(3.))
-                .child(div().text_sm().child(headline))
-                .child(div().text_xs().text_color(rgb(MUTED)).child(services)),
-        )
-        .child(status_badge(badge, color))
-}
-
 fn section_label(label: &'static str) -> impl IntoElement {
     div().text_xs().text_color(rgb(MUTED)).child(label)
 }
@@ -870,6 +732,7 @@ mod tests {
             suspend_config: None,
             lifecycle_message: None,
             session_expectation: SessionExpectation::Connect,
+            settings_view: SettingsView::Closed,
         }
     }
 

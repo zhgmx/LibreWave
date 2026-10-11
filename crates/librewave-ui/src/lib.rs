@@ -4,4 +4,7 @@
 mod app;
 
 #[cfg(feature = "gpui")]
+mod assets;
+
+#[cfg(feature = "gpui")]
 pub use app::run;
