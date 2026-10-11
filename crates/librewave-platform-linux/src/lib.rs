@@ -29,6 +29,7 @@ pub mod audio_lifecycle;
 pub mod audio_policy;
 mod discovery;
 mod services;
+pub use services::{HostServiceObservation, ServiceProbe, failed_observation};
 mod usb;
 
 pub use usb::{

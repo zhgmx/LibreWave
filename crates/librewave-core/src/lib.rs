@@ -398,6 +398,8 @@ impl ServiceState {
 /// A host-service failure that is safe to expose to clients.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ServiceFailureReason {
+    /// No completed status observation is available yet.
+    NotProbed,
     NotInstalled,
     PermissionDenied,
     NotRunning,
@@ -407,6 +409,7 @@ pub enum ServiceFailureReason {
 impl fmt::Display for ServiceFailureReason {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let text = match self {
+            Self::NotProbed => "not probed",
             Self::NotInstalled => "not installed",
             Self::PermissionDenied => "permission denied",
             Self::NotRunning => "not running",

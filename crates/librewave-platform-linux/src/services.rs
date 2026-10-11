@@ -4,23 +4,116 @@ use super::{HostAudioServices, HostServiceInvocations, ServiceAvailability, Serv
 use std::fmt;
 use std::io;
 use std::process::Command;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::thread::JoinHandle;
+mod command;
 
-pub(super) fn probe_services() -> HostAudioServices {
-    HostAudioServices { pipewire: probe_pipewire(), wireplumber: probe_wireplumber() }
+/// One complete read-only service observation, including restart identities.
+#[derive(Debug)]
+pub struct HostServiceObservation {
+    pub services: HostAudioServices,
+    pub invocations: HostServiceInvocations,
 }
 
-pub(super) fn probe_invocations() -> HostServiceInvocations {
-    HostServiceInvocations {
-        pipewire: probe_invocation("pipewire.service"),
-        wireplumber: probe_invocation("wireplumber.service"),
+/// Runs at most one bounded service observation off the daemon owner thread.
+#[derive(Default)]
+pub struct ServiceProbe {
+    job: Option<JoinHandle<HostServiceObservation>>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl ServiceProbe {
+    /// Starts an observation if the previous job has been collected.
+    ///
+    /// # Errors
+    /// Returns an error if the operating system cannot start the worker.
+    pub fn request(&mut self) -> io::Result<()> {
+        if self.job.is_some() {
+            return Ok(());
+        }
+        self.start(|cancel| HostServiceObservation {
+            services: probe_services_with(&cancel),
+            invocations: probe_invocations_with(&cancel),
+        })
+    }
+
+    fn start(
+        &mut self,
+        work: impl FnOnce(Arc<AtomicBool>) -> HostServiceObservation + Send + 'static,
+    ) -> io::Result<()> {
+        let cancel = Arc::clone(&self.cancel);
+        self.job = Some(
+            std::thread::Builder::new()
+                .name("librewave-services".to_owned())
+                .spawn(move || work(cancel))?,
+        );
+        Ok(())
+    }
+
+    /// Collects a finished observation without waiting for a running probe.
+    pub fn poll(&mut self) -> Option<HostServiceObservation> {
+        if !self.job.as_ref()?.is_finished() {
+            return None;
+        }
+        self.job.take().map(|job| job.join().unwrap_or_else(|_| failed_observation()))
     }
 }
 
-fn probe_invocation(unit: &str) -> Option<String> {
-    let output = Command::new("systemctl")
-        .args(["--user", "show", "--property=InvocationID", "--value", unit])
-        .output()
-        .ok()?;
+impl Drop for ServiceProbe {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
+        if let Some(job) = self.job.take() {
+            let _ = job.join();
+        }
+    }
+}
+
+/// Returns an explicit failed observation when a probe worker cannot run.
+#[must_use]
+pub fn failed_observation() -> HostServiceObservation {
+    HostServiceObservation {
+        services: HostAudioServices {
+            pipewire: ServiceAvailability::Unavailable(ServiceFailure::ProbeFailed),
+            wireplumber: ServiceAvailability::Unavailable(ServiceFailure::ProbeFailed),
+        },
+        invocations: HostServiceInvocations::default(),
+    }
+}
+
+pub(super) fn probe_services() -> HostAudioServices {
+    probe_services_with(&AtomicBool::new(false))
+}
+
+pub(super) fn probe_invocations() -> HostServiceInvocations {
+    probe_invocations_with(&AtomicBool::new(false))
+}
+
+fn probe_services_with(cancel: &AtomicBool) -> HostAudioServices {
+    HostAudioServices { pipewire: probe_pipewire(cancel), wireplumber: probe_wireplumber(cancel) }
+}
+
+fn probe_invocations_with(cancel: &AtomicBool) -> HostServiceInvocations {
+    HostServiceInvocations {
+        pipewire: probe_invocation("pipewire.service", cancel),
+        wireplumber: probe_invocation("wireplumber.service", cancel),
+    }
+}
+
+fn probe_invocation(unit: &str, cancel: &AtomicBool) -> Option<String> {
+    let output = command::run(
+        Command::new("systemctl").args([
+            "--user",
+            "show",
+            "--property=InvocationID",
+            "--value",
+            unit,
+        ]),
+        cancel,
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -33,15 +126,18 @@ fn parse_invocation(bytes: &[u8]) -> Option<String> {
         .then(|| value.to_ascii_lowercase())
 }
 
-fn probe_pipewire() -> ServiceAvailability {
-    match Command::new("pw-cli").args(["info", "0"]).output() {
+fn probe_pipewire(cancel: &AtomicBool) -> ServiceAvailability {
+    match command::run(Command::new("pw-cli").args(["info", "0"]), cancel) {
         Ok(output) => classify_probe(output.status.success(), &output.stdout, &output.stderr),
         Err(error) => classify_spawn_error(&error),
     }
 }
 
-fn probe_wireplumber() -> ServiceAvailability {
-    match Command::new("systemctl").args(["--user", "is-active", "wireplumber.service"]).output() {
+fn probe_wireplumber(cancel: &AtomicBool) -> ServiceAvailability {
+    match command::run(
+        Command::new("systemctl").args(["--user", "is-active", "wireplumber.service"]),
+        cancel,
+    ) {
         Ok(output) => {
             classify_wireplumber_probe(output.status.success(), &output.stdout, &output.stderr)
         }
@@ -106,6 +202,34 @@ impl fmt::Display for ServiceFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_service_worker_never_blocks_polling() {
+        let (release, wait) = std::sync::mpsc::channel();
+        let mut probe = ServiceProbe::default();
+        probe
+            .start(move |_| {
+                wait.recv().expect("release worker");
+                failed_observation()
+            })
+            .expect("start");
+        for _ in 0..100 {
+            assert!(probe.poll().is_none());
+        }
+        release.send(()).expect("release");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(observed) = probe.poll() {
+                assert_eq!(
+                    observed.services.pipewire,
+                    ServiceAvailability::Unavailable(ServiceFailure::ProbeFailed)
+                );
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "worker completion");
+            std::thread::yield_now();
+        }
+    }
 
     const FIXTURE_PIPEWIRE_FAILURE: &str =
         include_str!("../tests/fixtures/services/pipewire-not-running.txt");

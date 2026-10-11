@@ -11,18 +11,18 @@ use librewave_core::{
     AudioCardSnapshot, AudioSnapshot, DeviceAdmissionSnapshot, DeviceConnection, DeviceId,
     DeviceSnapshot, ServiceFailureReason, ServiceState, Snapshot,
 };
-use librewave_platform_linux::{HostAudioInventory, ServiceAvailability, UsbDeviceCandidate};
+use librewave_platform_linux::{DiscoveryReport, ServiceAvailability, UsbDeviceCandidate};
 pub use manager::Daemon;
 use manager::DeviceIdAllocator;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-fn snapshot_from_inventory(
+fn snapshot_from_discovery(
     allocator: &mut DeviceIdAllocator,
-    inventory: HostAudioInventory,
+    discovery: DiscoveryReport,
+    audio: AudioSnapshot,
 ) -> (Snapshot, BTreeMap<DeviceId, UsbDeviceCandidate>) {
-    let mut devices: Vec<_> = inventory
-        .discovery
+    let mut devices: Vec<_> = discovery
         .devices
         .into_iter()
         .map(|device| {
@@ -57,10 +57,7 @@ fn snapshot_from_inventory(
         Snapshot {
             generation: 0,
             devices: snapshots,
-            audio: AudioSnapshot {
-                pipewire: service_state(inventory.services.pipewire),
-                wireplumber: service_state(inventory.services.wireplumber),
-            },
+            audio,
             mixer: librewave_core::MixerSnapshot::default(),
         },
         candidates,

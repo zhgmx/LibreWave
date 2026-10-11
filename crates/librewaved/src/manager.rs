@@ -3,7 +3,7 @@ use crate::persistence::{
     DesiredState, DesiredStateStore, DesiredWave3Controls, FileDesiredStateStore,
     FileMixerStateStore, MixerStateStore,
 };
-use crate::{PersistenceError, audio::AudioSupervisor, control, snapshot_from_inventory};
+use crate::{PersistenceError, audio::AudioSupervisor, control, snapshot_from_discovery};
 use librewave_core::{
     AdmissionError, Command, DeviceAdmissionSnapshot, DeviceConnection, DeviceGeneration, DeviceId,
     DeviceSnapshot, DeviceWriteAccess, DeviceWriteLockReason, Event, MixRoute, MixTarget,
@@ -11,9 +11,11 @@ use librewave_core::{
     Wave3ConfigSnapshot, Wave3Control,
 };
 use librewave_ipc::{IpcError, IpcErrorKind, Response};
+#[cfg(test)]
+use librewave_platform_linux::HostAudioInventory;
 use librewave_platform_linux::{
-    HostAudioInventory, HostServiceInvocations, LinuxInventory, UsbDeviceCandidate, UsbTopology,
-    Wave3UsbConnection, admission_error,
+    HostServiceInvocations, LinuxInventory, UsbDeviceCandidate, UsbTopology, Wave3UsbConnection,
+    admission_error,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -38,6 +40,8 @@ pub struct Daemon {
     audio: Option<AudioSupervisor>,
     next_audio_inventory: Instant,
     audio_invocations: HostServiceInvocations,
+    service_probe: Option<librewave_platform_linux::ServiceProbe>,
+    next_service_probe: Instant,
 }
 
 type ConnectionFactory =
@@ -93,6 +97,14 @@ impl Daemon {
         let mut state = State::default();
         let mut snapshot = state.snapshot().clone();
         snapshot.mixer = MixerSnapshot::inactive(mixer);
+        snapshot.audio = librewave_core::AudioSnapshot {
+            pipewire: librewave_core::ServiceState::Unavailable {
+                reason: librewave_core::ServiceFailureReason::NotProbed,
+            },
+            wireplumber: librewave_core::ServiceState::Unavailable {
+                reason: librewave_core::ServiceFailureReason::NotProbed,
+            },
+        };
         ignore_reconciliation_event(state.replace(snapshot, librewave_core::Origin::Recovery));
         Ok(Self {
             inventory,
@@ -110,6 +122,8 @@ impl Daemon {
             audio: None,
             next_audio_inventory: Instant::now(),
             audio_invocations: HostServiceInvocations::default(),
+            service_probe: Some(librewave_platform_linux::ServiceProbe::default()),
+            next_service_probe: Instant::now(),
         })
     }
 
@@ -136,6 +150,8 @@ impl Daemon {
             audio: None,
             next_audio_inventory: Instant::now(),
             audio_invocations: HostServiceInvocations::default(),
+            service_probe: None,
+            next_service_probe: Instant::now(),
         }
     }
 
@@ -172,14 +188,16 @@ impl Daemon {
         inventory: LinuxInventory,
         paths: librewave_platform_linux::DiscoveryPaths,
     ) -> Self {
-        Self::with_components(
+        let mut daemon = Self::with_components(
             inventory,
             paths,
             Box::new(MemoryStore::default()),
             Box::new(MemoryMixerStore::default()),
             |_| Err(AdmissionError::Disconnected),
         )
-        .expect("memory store loads")
+        .expect("memory store loads");
+        daemon.service_probe = None;
+        daemon
     }
 
     /// Returns the current immutable snapshot.
@@ -200,10 +218,10 @@ impl Daemon {
         if self.audio.is_none() {
             return;
         }
+        self.poll_services();
         let now = Instant::now();
         if now >= self.next_audio_inventory {
             ignore_reconciliation_event(self.refresh_inventory(librewave_core::Origin::Recovery));
-            self.audio_invocations = self.inventory.service_invocations();
             self.next_audio_inventory = now + Duration::from_secs(1);
         }
         let candidate = if self.candidates.len() == 1 {
@@ -860,8 +878,11 @@ impl Daemon {
     }
 
     fn refresh_inventory(&mut self, origin: librewave_core::Origin) -> Option<Event> {
+        self.poll_services();
+        let discovery = self.inventory.discover(&self.paths);
+        let audio = self.snapshot().audio.clone();
         let (mut snapshot, candidates) =
-            self.snapshot_from_inventory(self.inventory.inspect(&self.paths));
+            snapshot_from_discovery(&mut self.allocator, discovery, audio);
         snapshot.mixer = self.snapshot().mixer.clone();
         for device in &mut snapshot.devices {
             if let Some(previous) =
@@ -875,11 +896,45 @@ impl Daemon {
         self.state.replace(snapshot, origin)
     }
 
+    #[cfg(test)]
     fn snapshot_from_inventory(
         &mut self,
         inventory: HostAudioInventory,
     ) -> (Snapshot, BTreeMap<DeviceId, UsbDeviceCandidate>) {
-        snapshot_from_inventory(&mut self.allocator, inventory)
+        snapshot_from_discovery(
+            &mut self.allocator,
+            inventory.discovery,
+            librewave_core::AudioSnapshot {
+                pipewire: crate::service_state(inventory.services.pipewire),
+                wireplumber: crate::service_state(inventory.services.wireplumber),
+            },
+        )
+    }
+
+    fn poll_services(&mut self) {
+        let Some(probe) = self.service_probe.as_mut() else {
+            return;
+        };
+        let mut observation = probe.poll();
+        let now = Instant::now();
+        if now >= self.next_service_probe {
+            self.next_service_probe = now + Duration::from_secs(1);
+            if let Err(error) = probe.request() {
+                eprintln!("librewaved: service probe could not start: {error}");
+                observation = Some(librewave_platform_linux::failed_observation());
+            }
+        }
+        if let Some(observation) = observation {
+            self.audio_invocations = observation.invocations;
+            let mut snapshot = self.snapshot().clone();
+            snapshot.audio = librewave_core::AudioSnapshot {
+                pipewire: crate::service_state(observation.services.pipewire),
+                wireplumber: crate::service_state(observation.services.wireplumber),
+            };
+            ignore_reconciliation_event(
+                self.state.replace(snapshot, librewave_core::Origin::Recovery),
+            );
+        }
     }
 }
 
