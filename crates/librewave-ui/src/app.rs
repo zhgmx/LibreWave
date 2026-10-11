@@ -7,7 +7,7 @@ use librewave_core::{
     DeviceWriteAccess, FaderGain, FixedPointValue, MeterAvailability, MixRoute, MixTarget,
     MixerGeneration, MixerRuntimeState, Snapshot, SourceId, Wave3Control,
 };
-use librewave_ipc::Response;
+use librewave_ipc::{IpcErrorKind, Response};
 use librewave_platform_linux::ipc::{Client, ClientError, configured_socket_path};
 use std::time::Duration;
 
@@ -49,6 +49,7 @@ struct Shell {
     request_epoch: u64,
     action_error: Option<String>,
     connection_error: Option<String>,
+    hardware_state_stale: bool,
 }
 
 impl Shell {
@@ -60,6 +61,7 @@ impl Shell {
             request_epoch: 0,
             action_error: None,
             connection_error: None,
+            hardware_state_stale: false,
         };
         shell.send(Command::GetStatus, cx);
         cx.spawn(async move |this, cx| {
@@ -89,9 +91,15 @@ impl Shell {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.pending = false;
-                match result {
-                    Ok(response) => this.apply_response(command, response),
+                let refresh_hardware = match result {
+                    Ok(response) => {
+                        this.apply_response(command, response);
+                        false
+                    }
                     Err(error) => this.apply_error(&error),
+                };
+                if refresh_hardware {
+                    this.poll_status(cx);
                 }
                 cx.notify();
             });
@@ -130,6 +138,7 @@ impl Shell {
             Ok(Response::Status { snapshot }) => {
                 self.snapshot = Some(snapshot);
                 self.connection_error = None;
+                self.hardware_state_stale = false;
             }
             Ok(_) => {
                 self.snapshot = None;
@@ -151,6 +160,7 @@ impl Shell {
             (Command::GetStatus, Response::Status { snapshot })
             | (Command::Refresh, Response::Refreshed { snapshot }) => {
                 self.snapshot = Some(snapshot);
+                self.hardware_state_stale = false;
             }
             (Command::InspectDevice { .. }, Response::DeviceInspection { device })
             | (Command::SetWave3Control { .. }, Response::ControlChanged { device }) => {
@@ -160,6 +170,7 @@ impl Shell {
                 {
                     *current = device;
                 }
+                self.hardware_state_stale = false;
             }
             (Command::GetMixer, Response::Mixer { mixer })
             | (Command::SetMixerRoute { .. }, Response::MixerRouteChanged { mixer }) => {
@@ -175,14 +186,28 @@ impl Shell {
         self.connection_error = None;
     }
 
-    fn apply_error(&mut self, error: &ClientError) {
-        if let ClientError::Remote(_) = error {
+    fn apply_error(&mut self, error: &ClientError) -> bool {
+        if let ClientError::Remote(remote) = error {
             self.action_error = Some(error.to_string());
+            if matches!(
+                remote.kind,
+                IpcErrorKind::StaleDeviceGeneration { .. }
+                    | IpcErrorKind::StaleDeviceBaseline
+                    | IpcErrorKind::DeviceDisconnected { .. }
+                    | IpcErrorKind::DeviceWriteLocked { .. }
+                    | IpcErrorKind::PersistenceAmbiguous
+                    | IpcErrorKind::TransactionFailed
+            ) {
+                self.hardware_state_stale = true;
+                return true;
+            }
         } else {
             self.snapshot = None;
             self.action_error = None;
             self.connection_error = Some(error.to_string());
+            self.hardware_state_stale = false;
         }
+        false
     }
 }
 
@@ -200,6 +225,10 @@ impl Render for Shell {
 }
 
 impl Shell {
+    fn hardware_writable(&self, access: DeviceWriteAccess) -> bool {
+        matches!(access, DeviceWriteAccess::Ready) && !self.pending && !self.hardware_state_stale
+    }
+
     fn studio_content(
         &self,
         device: Option<&librewave_core::DeviceSnapshot>,
@@ -334,7 +363,7 @@ impl Shell {
                 write_access,
                 config: Some(config),
             } => {
-                let writable = matches!(write_access, DeviceWriteAccess::Ready) && !self.pending;
+                let writable = self.hardware_writable(*write_access);
                 panel = panel
                     .child(
                         div()
@@ -835,6 +864,7 @@ fn stepped(
 mod tests {
     use super::*;
     use librewave_core::{MixerProfile, MixerSnapshot, SYSTEM_SOURCE_ID};
+    use librewave_ipc::IpcError;
     use std::path::PathBuf;
 
     fn shell_with(snapshot: Snapshot) -> Shell {
@@ -845,6 +875,7 @@ mod tests {
             request_epoch: 0,
             action_error: None,
             connection_error: None,
+            hardware_state_stale: false,
         }
     }
 
@@ -938,6 +969,35 @@ mod tests {
         assert!(shell.apply_poll_result(1, Ok(Response::Status { snapshot: Snapshot::empty() }),));
         assert!(shell.snapshot.is_some());
         assert!(shell.connection_error.is_none());
+    }
+
+    #[test]
+    fn stale_hardware_error_blocks_old_controls_until_fresh_status() {
+        let mut shell = shell_with(Snapshot::empty());
+        assert!(shell.hardware_writable(DeviceWriteAccess::Ready));
+        assert!(shell.apply_error(&ClientError::Remote(IpcError {
+            kind: IpcErrorKind::StaleDeviceGeneration {
+                expected: DeviceGeneration(1),
+                actual: DeviceGeneration(2),
+            },
+            message: "device generation is stale".to_owned(),
+        })));
+        assert!(shell.hardware_state_stale);
+        assert!(!shell.hardware_writable(DeviceWriteAccess::Ready));
+        assert!(shell.action_error.is_some());
+
+        shell.poll_in_flight = true;
+        assert!(shell.apply_poll_result(0, Ok(Response::Status { snapshot: Snapshot::empty() }),));
+        assert!(!shell.hardware_state_stale);
+        assert!(shell.hardware_writable(DeviceWriteAccess::Ready));
+        assert!(shell.action_error.is_some());
+
+        assert!(shell.apply_error(&ClientError::Remote(IpcError {
+            kind: IpcErrorKind::DeviceDisconnected { id: DeviceId(1) },
+            message: "device disconnected".to_owned(),
+        })));
+        assert!(shell.hardware_state_stale);
+        assert!(!shell.hardware_writable(DeviceWriteAccess::Ready));
     }
 
     #[test]
