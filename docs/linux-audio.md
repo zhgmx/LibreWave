@@ -111,6 +111,12 @@ LIBREWAVE_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux audio_ho
 LIBREWAVE_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux audio_host::pipewire_graph::tests::integration::private_existing_physical_node_blocks_ownership -- --ignored --exact --test-threads=1
 ```
 
+The desktop mapping test uses the active user PipeWire session and WirePlumber. Run it separately:
+
+```text
+LIBREWAVE_DESKTOP_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux audio_host::pipewire_graph::tests::integration::desktop_pipewire_keeps_all_filter_buffers_mapped -- --ignored --exact --test-threads=1
+```
+
 The default test suite does not start a daemon and does not silently skip this gate. CI does not run the gate yet because the current runner contract does not install the PipeWire daemon tools. Add it when CI supplies a fixed PipeWire runtime image and runs the command as a separate serial job.
 
 ## Portable mixer contract
