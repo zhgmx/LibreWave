@@ -154,6 +154,11 @@ pub struct ClockBridgeConfig {
 }
 
 impl ClockBridgeConfig {
+    #[must_use]
+    pub const fn attempt_epoch(self) -> ClockAttemptEpoch {
+        self.attempt_epoch
+    }
+
     /// Checks the two direction policies against the graph resource ceiling.
     ///
     /// # Errors

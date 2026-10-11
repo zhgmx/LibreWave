@@ -20,6 +20,7 @@ use std::fmt;
     reason = "Stage 2 exercises these adapters under fakes; Stage 3 will compose them"
 )]
 mod alsa;
+mod attempt;
 mod clock_bridge;
 #[allow(dead_code, reason = "the production graph does not yet own the clock bridge")]
 mod graph_bridge;
@@ -32,6 +33,7 @@ mod pipewire_graph;
 #[cfg_attr(not(test), allow(dead_code))]
 mod worker;
 
+pub use attempt::{AudioAttemptPolicy, ComposedAudioHost};
 pub use clock_bridge::{
     BridgeBuildError, BridgeClockDomain, BridgeControlError, BridgeError, BridgeState,
     CaptureClockObservation, CaptureIngress, CapturePublishReport, CaptureReadBoundary,
@@ -202,6 +204,8 @@ pub enum LinuxAudioError {
     EndpointStreamTransportUnavailable,
     /// One or more owned resources could not be closed.
     TeardownFailed,
+    /// An owned audio attempt failed at a named startup or progress boundary.
+    AudioAttempt { phase: &'static str, reason: String },
 }
 
 impl fmt::Display for LinuxAudioError {
@@ -252,6 +256,7 @@ impl fmt::Display for LinuxAudioError {
                 formatter.write_str("the endpoint stream transport is unavailable")
             }
             Self::TeardownFailed => formatter.write_str("one or more audio resources stayed open"),
+            Self::AudioAttempt { phase, reason } => write!(formatter, "audio {phase}: {reason}"),
         }
     }
 }

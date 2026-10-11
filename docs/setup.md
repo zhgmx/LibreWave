@@ -107,7 +107,7 @@ Setup then:
 
 A failure before the manifest switch restores the previous paths byte for byte. A failure after the switch leaves a journal so the next setup can finish exact cleanup.
 
-Setup does not install or reload the WirePlumber card-disable rule. It does not enable the unit, start the daemon, open ALSA, or publish PipeWire objects. The direct host now owns and cleans up ALSA resources in code, but the portable endpoint engine does not exist and the live recovery tests have not run. Setup cannot take ownership of the physical Wave card.
+Setup does not install or reload the WirePlumber card-disable rule. It does not enable the unit, start the daemon, open ALSA, or publish PipeWire objects. The opt-in audio host composes the endpoint engine and physical workers in code, but live ownership and recovery tests have not run. Setup cannot take ownership of the physical Wave card.
 
 The udev refresh matches USB vendor `0fd9` and product `0070`. It does not trigger another USB product, a device interface, or firmware mode. If the privileged install or refresh operation fails, setup fails and does not claim that access is current. Rollback or journal recovery preserves or restores the prior rule state.
 

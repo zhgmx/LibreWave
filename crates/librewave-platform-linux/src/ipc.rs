@@ -210,15 +210,27 @@ pub fn peer_credentials(stream: &UnixStream) -> io::Result<PeerCredentials> {
 ///
 /// Returns an I/O error when the frame cannot be read or the response cannot be written.
 pub fn handle_connection<F>(
-    mut stream: UnixStream,
+    stream: UnixStream,
     policy: PeerCredentialPolicy,
     handler: F,
 ) -> io::Result<()>
 where
     F: FnOnce(Command) -> Result<Response, IpcError>,
 {
-    stream.set_read_timeout(Some(CONNECTION_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONNECTION_TIMEOUT))?;
+    handle_connection_with_timeout(stream, policy, CONNECTION_TIMEOUT, handler)
+}
+
+fn handle_connection_with_timeout<F>(
+    mut stream: UnixStream,
+    policy: PeerCredentialPolicy,
+    timeout: Duration,
+    handler: F,
+) -> io::Result<()>
+where
+    F: FnOnce(Command) -> Result<Response, IpcError>,
+{
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
     peer_credentials(&stream).and_then(|credentials| {
         policy
             .check(credentials)
@@ -240,6 +252,49 @@ where
     let response = process_request(request, handler);
     let frame = encode_response(&response).map_err(|error| codec_io_error(&error))?;
     write_frame(&mut stream, &frame)
+}
+
+/// Serves local IPC and a bounded control-side audio tick on one owner thread.
+/// The shorter connection timeout prevents a stalled client from hiding an
+/// audio progress fault for the ordinary connection timeout.
+///
+/// # Errors
+///
+/// Returns a socket bind or accept error.
+pub fn serve_with_tick<F, T, R>(
+    socket_path: &Path,
+    mut handler: F,
+    mut tick: T,
+    mut report_connection_error: R,
+) -> io::Result<()>
+where
+    F: FnMut(Command) -> Result<Response, IpcError>,
+    T: FnMut(),
+    R: FnMut(io::Error),
+{
+    let listener = bind_private_socket(socket_path)?;
+    listener.listener.set_nonblocking(true)?;
+    let policy = PeerCredentialPolicy::current_user();
+    loop {
+        tick();
+        match listener.listener.accept() {
+            Ok((stream, _)) => {
+                if let Err(error) = handle_connection_with_timeout(
+                    stream,
+                    policy,
+                    Duration::from_millis(250),
+                    &mut handler,
+                ) {
+                    report_connection_error(error);
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Serves the private user-session socket until an unrecoverable accept error occurs.

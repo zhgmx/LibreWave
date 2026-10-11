@@ -13,12 +13,12 @@ mod status;
 #[cfg(test)]
 mod tests;
 
+pub(super) use capture::CaptureWorker;
 #[cfg(test)]
-pub(super) use capture::{CaptureWorker, CaptureWorkerProgress, CaptureWorkerTerminal};
+pub(super) use capture::{CaptureWorkerProgress, CaptureWorkerTerminal};
+pub(super) use playback::{ParkedPlaybackWorker, PlaybackWorker};
 #[cfg(test)]
-pub(super) use playback::{
-    ParkedPlaybackWorker, PlaybackWorker, PlaybackWorkerBoundary, PlaybackWorkerTerminal,
-};
+pub(super) use playback::{PlaybackWorkerBoundary, PlaybackWorkerTerminal};
 #[cfg(test)]
 pub(super) use status::PcmExpectedState;
 pub(super) use status::{

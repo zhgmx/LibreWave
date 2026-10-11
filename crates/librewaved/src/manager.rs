@@ -3,20 +3,21 @@ use crate::persistence::{
     DesiredState, DesiredStateStore, DesiredWave3Controls, FileDesiredStateStore,
     FileMixerStateStore, MixerStateStore,
 };
-use crate::{PersistenceError, control, snapshot_from_inventory};
+use crate::{PersistenceError, audio::AudioSupervisor, control, snapshot_from_inventory};
 use librewave_core::{
     AdmissionError, Command, DeviceAdmissionSnapshot, DeviceConnection, DeviceGeneration, DeviceId,
     DeviceSnapshot, DeviceWriteAccess, DeviceWriteLockReason, Event, MixRoute, MixTarget,
-    MixerGeneration, MixerProfile, MixerSnapshot, Snapshot, SourceId, State, Wave3ConfigSnapshot,
-    Wave3Control,
+    MixerGeneration, MixerProfile, MixerRuntimeState, MixerSnapshot, Snapshot, SourceId, State,
+    Wave3ConfigSnapshot, Wave3Control,
 };
 use librewave_ipc::{IpcError, IpcErrorKind, Response};
 use librewave_platform_linux::{
-    HostAudioInventory, LinuxInventory, UsbDeviceCandidate, UsbTopology, Wave3UsbConnection,
-    admission_error,
+    HostAudioInventory, HostServiceInvocations, LinuxInventory, UsbDeviceCandidate, UsbTopology,
+    Wave3UsbConnection, admission_error,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 /// Names an intentionally discarded state event at the current no-subscriber boundary.
 fn ignore_reconciliation_event(_event: Option<Event>) {}
@@ -33,6 +34,9 @@ pub struct Daemon {
     store: Box<dyn DesiredStateStore>,
     mixer_store: Box<dyn MixerStateStore>,
     allocator: DeviceIdAllocator,
+    audio: Option<AudioSupervisor>,
+    next_audio_inventory: Instant,
+    audio_invocations: HostServiceInvocations,
 }
 
 type ConnectionFactory =
@@ -101,6 +105,9 @@ impl Daemon {
             store,
             mixer_store,
             allocator: DeviceIdAllocator::default(),
+            audio: None,
+            next_audio_inventory: Instant::now(),
+            audio_invocations: HostServiceInvocations::default(),
         })
     }
 
@@ -123,6 +130,9 @@ impl Daemon {
             store: Box::new(MemoryStore::default()),
             mixer_store: Box::new(MemoryMixerStore { profile: mixer_profile }),
             allocator,
+            audio: None,
+            next_audio_inventory: Instant::now(),
+            audio_invocations: HostServiceInvocations::default(),
         }
     }
 
@@ -173,6 +183,58 @@ impl Daemon {
     #[must_use]
     pub const fn snapshot(&self) -> &Snapshot {
         self.state.snapshot()
+    }
+
+    /// Enables the explicit audio candidate in this daemon only. The normal
+    /// daemon constructor and setup path leave it disabled.
+    pub fn enable_experimental_audio(&mut self) {
+        self.audio = Some(AudioSupervisor::new());
+        self.next_audio_inventory = Instant::now();
+    }
+
+    /// Advances the opt-in audio owner on the daemon control thread.
+    pub fn audio_tick(&mut self) {
+        if self.audio.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        if now >= self.next_audio_inventory {
+            ignore_reconciliation_event(self.refresh_inventory(librewave_core::Origin::Recovery));
+            self.audio_invocations = self.inventory.service_invocations();
+            self.next_audio_inventory = now + Duration::from_secs(1);
+        }
+        let candidate = if self.candidates.len() == 1 {
+            self.candidates.values().next().cloned()
+        } else {
+            None
+        };
+        let audio = &self.snapshot().audio;
+        let pipewire = audio.pipewire.clone();
+        let wireplumber = audio.wireplumber.clone();
+        let profile = self.snapshot().mixer.profile.clone();
+        let Some(supervisor) = self.audio.as_mut() else {
+            return;
+        };
+        supervisor.tick(
+            candidate.as_ref(),
+            &pipewire,
+            &wireplumber,
+            &self.audio_invocations,
+            &profile,
+        );
+        let active = supervisor.is_active();
+        let was_active = matches!(self.snapshot().mixer.runtime, MixerRuntimeState::Active);
+        if active != was_active {
+            let mut snapshot = self.snapshot().clone();
+            snapshot.mixer = if active {
+                MixerSnapshot::active(profile)
+            } else {
+                MixerSnapshot::inactive(profile)
+            };
+            ignore_reconciliation_event(
+                self.state.replace(snapshot, librewave_core::Origin::Recovery),
+            );
+        }
     }
 
     /// Executes one client command through the daemon's single state path.
@@ -270,7 +332,9 @@ impl Daemon {
             }
         }
         let mut snapshot = self.snapshot().clone();
-        snapshot.mixer = MixerSnapshot::inactive(next);
+        let active = self.audio.as_mut().is_some_and(|audio| audio.stage_profile(&next));
+        snapshot.mixer =
+            if active { MixerSnapshot::active(next) } else { MixerSnapshot::inactive(next) };
         let event = self.state.replace(snapshot, origin);
         if event.is_none() {
             return Err(internal_error(

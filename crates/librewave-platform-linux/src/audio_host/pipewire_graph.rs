@@ -1351,5 +1351,24 @@ context.modules = [
             }
             run_forced_quantum_fault(4);
         }
+
+        #[test]
+        #[ignore = "requires LIBREWAVE_PIPEWIRE_INTEGRATION=1 and PipeWire runtime tools"]
+        fn private_composed_audio_attempt() {
+            assert_eq!(
+                std::env::var("LIBREWAVE_PIPEWIRE_INTEGRATION").as_deref(),
+                Ok("1"),
+                "set LIBREWAVE_PIPEWIRE_INTEGRATION=1 for the private audio attempt",
+            );
+            let server = PrivatePipeWire::start(256, 5);
+            crate::audio_host::attempt::tests::private_composed_attempt(REMOTE);
+            let nodes = server
+                .command("pw-cli")
+                .args(["-r", REMOTE, "ls", "Node"])
+                .output()
+                .expect("list nodes after composed teardown");
+            assert!(nodes.status.success());
+            assert!(!String::from_utf8_lossy(&nodes.stdout).contains("librewave."));
+        }
     }
 }

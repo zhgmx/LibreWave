@@ -1,6 +1,6 @@
 # Linux audio integration
 
-Status: Stage 2 implements direction-specific ALSA capture and playback workers and composes them with the independent-clock bridge under deterministic fakes. The separate PipeWire graph seam also remains offline. The production host inspects PipeWire, then returns `GraphNotReady` before it selects or opens an ALSA PCM. No Stage 2 path opens live audio hardware.
+Status: The daemon now has an explicit, opt-in audio attempt that composes the ALSA workers, independent-clock bridge, and PipeWire graph. The normal daemon path remains disabled and the default `LinuxAudioHost` still returns `GraphNotReady` before it opens ALSA. A private PipeWire test runs the composed path with fake PCMs. No live Wave:3 audio ownership or latency claim has passed hardware validation.
 
 ## Reference system
 
@@ -60,7 +60,7 @@ flowchart TD
 
 The daemon must not open playback when capture is inactive or has produced no frames. A failed step tears down objects from that attempt and reports a named degraded state. Recovery after hotplug or a PipeWire or WirePlumber restart uses the same sequence.
 
-The lifecycle state machine enforces capture progress before playback preparation through one host trait. In Stage 2, the production host stops after PipeWire graph inspection because the production graph does not yet own the bridge. It does not select or open an ALSA PCM. Fake composition covers the remaining order without accessing live audio resources.
+The lifecycle state machine enforces capture progress before playback preparation through one host trait. The default host still stops after PipeWire inspection. The opt-in `ComposedAudioHost` first runs the read-only Wave:3 API and schema admission probe. It then selects the exact ALSA card, starts capture, and waits for confirmed frames before it opens playback. It constructs and activates the graph after playback is prepared. The playback worker starts its PCM only after a complete Monitor Mix period is queued. Startup errors tear down the current attempt.
 
 The capture worker owns one capture PCM and one `CaptureIngress`. It allocates its packed period buffer before the thread starts. Each completed read enters one capture boundary. The boundary advances the checked application ledger by the number of returned frames and stays in flight through status sampling and publication. The worker then gets one safe status snapshot for timestamp, availability, and signed delay. It reads the raw PCM state separately because `alsa` 0.12.1 does not provide a checked state value through `Status`. ALSA can advance between those two calls, so the fault gate has a small sampling skew. The worker publishes exactly the returned prefix after all checks pass. If the short priming gate starts first, the worker retains the prefix and retries the same boundary. It does not read or account for those frames again.
 
@@ -87,11 +87,11 @@ The physical Wave capture and playback PCMs are not desktop endpoints. LibreWave
 
 The host connects to the user's existing PipeWire instance and completes a registry round trip. It checks the admitted candidate's exact ALSA card number. A Device global must have the Wave:3 vendor and product values, and its `api.alsa.card` value must identify that card. A Node global matches through the card component of `api.alsa.path`. Node globals do not need vendor or product properties. Startup fails while any matching Device or Node global remains visible.
 
-Endpoint plans come only from `librewave-core`. The production adapter returns `EndpointStreamTransportUnavailable` before it opens ALSA or creates an endpoint, and it records the matching `GraphNotReady` reason. It does not publish silence or report the graph as ready. The offline graph seam is not a production publication path. Under fakes, the ALSA workers produce the typed observations for both physical directions and compose with the portable bridge. The production host does not yet own that composition.
+Endpoint plans come only from `librewave-core`. The default production adapter returns `EndpointStreamTransportUnavailable` before it opens ALSA or creates an endpoint, and it records the matching `GraphNotReady` reason. The opt-in composed host uses the same endpoint allowlist and one graph callback. It reports the graph ready only after both workers park, the bridge activates, and both workers resume. This path is disabled by default.
 
-## Offline PipeWire graph seam
+## PipeWire graph seam
 
-The crate contains a private five-node graph seam. It exists to verify PipeWire scheduling and ownership. The seam has no call path from the production host.
+The crate contains a five-node graph seam. The opt-in composed host owns it during one audio attempt. The default host does not construct it.
 
 The System `Audio/Sink` node is the PipeWire driver. Its permanent monitor links keep the graph active when no application renders to System. Microphone, Monitor Mix, and Stream Mix are `Audio/Source` nodes. A fifth node owns the mixer callback and eight planar F32 ports. That node has no `Audio/Sink` or `Audio/Source` media class. The client creates all five nodes and all eight permanent links while the filter is inactive, validates the observed graph, and activates the filter once. It does not create a hidden driver, timer, server configuration, lingering object, or helper endpoint.
 
@@ -107,6 +107,7 @@ Run the integration gate only on a host with the PipeWire development files, `pi
 
 ```text
 LIBREWAVE_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux audio_host::pipewire_graph::tests::integration::private_pipewire_graph -- --ignored --exact --test-threads=1
+LIBREWAVE_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux audio_host::pipewire_graph::tests::integration::private_composed_audio_attempt -- --ignored --exact --test-threads=1
 ```
 
 The default test suite does not start a daemon and does not silently skip this gate. CI does not run the gate yet because the current runner contract does not install the PipeWire daemon tools. Add it when CI supplies a fixed PipeWire runtime image and runs the command as a separate serial job.
@@ -149,7 +150,7 @@ The startup states are `Allocated`, `CapturePriming`, `CaptureFilterDelay`, `Cap
 
 The matcher ratio is exactly 1.0 only in the named filter-delay and estimator-priming states. The applicable controller does not preview or commit in those states. An estimator can commit explicit priming observations, but it does not invent a measured ratio. If a dependency delay ends inside a graph quantum or playback period, the bridge discards that complete boundary. It does not trim a boundary. Complete playback boundaries remain startup work in `PlaybackStabilizing` until both FIFO guards and observed hardware progress permit `Primed`. No delay discard occurs in `Primed` or `Active`.
 
-`Primed` means that offline startup checks are complete. It does not mean that a production endpoint or PCM path is ready. Both fake workers park at this state without starting another boundary, but they keep sole ownership of their PCM and bridge endpoint. The graph callback emits silence during `Primed` and `PrimingCheck`. It advances and validates the graph clock so the first `Active` boundary sees a continuous position. The callback also emits silence while the attempt is quiescing. After the control owner changes the bridge to `Active`, it resumes both worker threads. A stop request also wakes a parked worker. A fault moves the attempt to `Faulted`. Teardown moves it to `Quiescing`, waits for the capture, graph, and playback owners to leave their boundaries, then moves it to `Stopped`.
+`Primed` means that bridge startup checks are complete. It does not alone mean that a production endpoint or PCM path is ready. Both workers park at this state without starting another boundary, but they keep sole ownership of their PCM and bridge endpoint. The graph callback emits silence during `Primed` and `PrimingCheck`. It advances and validates the graph clock so the first `Active` boundary sees a continuous position. The callback also emits silence while the attempt is quiescing. After the control owner changes the bridge to `Active`, it resumes both worker threads. A stop request also wakes a parked worker. A fault moves the attempt to `Faulted`. Teardown moves it to `Quiescing`, waits for the capture, graph, and playback owners to leave their boundaries, then moves it to `Stopped`.
 
 An unconnected System endpoint has semantic silence. A connected System endpoint must supply two complete, finite graph-time buffers. Missing active System data is a fault. Missing capture or playback bridge data is also a fault. Other terminal faults include FIFO overflow, unsupported or adjusted physical format, invalid quantum or period, packed sample errors, position overflow or discontinuity, estimator or controller failure, ASRC failure, submission failure, incomplete submission, and teardown before quiescence. The active path has no sample drop, sample insertion, fixed-ratio fallback, or unbounded queue.
 
@@ -157,7 +158,9 @@ Construction allocates and warms both rate matchers, audio scratch, FIFOs, obser
 
 Tests choose FIFO capacities, guard values, estimator spans, controller gains, and ratio bounds as named simulation values. These values are not product policy. One checked frame-ledger and controller simulation covers 24 simulated hours in both drift directions. A shorter test runs real mono and stereo sinc ASRC with independent positive and negative drift. The frame ledger tests arithmetic and control stability only. It does not validate sinc sample quality. Other tests cover every graph quantum from 64 through 1024 frames, including non-multiple values, packed S24_3LE conversion, sample order, startup delay, clock faults, transaction commit rules, zero realtime allocation or deallocation, and quiescent teardown. Worker fakes also cover partial reads and writes, bounded transient retries, wait timeouts, signed delay, timestamp conversion, terminal ALSA states, explicit playback start order, deterministic parking and resume, stream drop, and RAII handle release.
 
-The workers and bridge compose only under fakes. They are not called by daemon startup or the PipeWire graph seam. They do not install policy, publish a host node, or access live hardware in the default test suite. Production work must compose the existing owners with the PipeWire callback and add control-side startup and progress watchdogs. The production resource state remains `GraphNotReady`.
+The opt-in host composes both workers, the bridge, and the PipeWire callback. Its control-side startup gates have an eight-second deadline. After activation, capture, playback, and graph progress each have a one-second watchdog. A stopped worker, bridge fault, callback fault, missing physical-node hiding rule, changed device, or changed host-service invocation tears down the attempt. Cleanup failure blocks a replacement. The daemon retries a clean failure after two seconds. The default test suite still opens no live ALSA or desktop PipeWire object.
+
+The named provisional policy uses a 1,024-frame capture period with an 8,192-frame buffer, a 256-frame playback period with a 2,048-frame buffer, and a fixed 256-frame graph quantum. Each bridge FIFO has 16,384 frames, an 8,192-frame target, and a 4,096-frame startup guard. The rate ratio range is 0.98 through 1.02. ALSA waits use 10 milliseconds and four transient retries. These values favor startup headroom. They are not measured latency settings. `LIBREWAVE_EXPERIMENTAL_AUDIO=1` selects this host for that daemon process. Normal startup and setup do not set the flag.
 
 ## Mixer control plane
 
@@ -169,7 +172,7 @@ The current product profile has two logical sources. Source 1 is Microphone, and
 
 For a changed route, the daemon writes the complete desired profile to a temporary file, syncs it, renames it, and syncs the profile directory. It updates retained state only after all these steps succeed. If the directory sync fails after the rename, the command reports durability ambiguity and retained state does not advance. The destination can already contain the next complete profile. A retry with the retained generation writes the same next profile and converges the file and snapshot. On startup, the daemon strictly loads whichever complete file is present.
 
-The mixer snapshot reports that the audio host and mixer engine are not connected. Meter values are unavailable. These controls are durable desired state only. They do not start ALSA, create PipeWire objects, enable the daemon service, or make the Linux audio graph ready.
+The normal mixer snapshot reports that the audio host and mixer engine are not connected. Its meter values are unavailable. In the opt-in path, the snapshot becomes active only after the lifecycle reaches `Ready`; a later fault changes it back to inactive. Mixer commands save desired state and stage a complete profile at a graph boundary when that attempt is active. They do not enable the daemon service or activate the opt-in path.
 
 ## Volume ownership
 

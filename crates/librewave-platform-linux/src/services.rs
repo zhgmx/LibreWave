@@ -1,12 +1,36 @@
 //! Read-only `PipeWire` and `WirePlumber` status probes.
 
-use super::{HostAudioServices, ServiceAvailability, ServiceFailure};
+use super::{HostAudioServices, HostServiceInvocations, ServiceAvailability, ServiceFailure};
 use std::fmt;
 use std::io;
 use std::process::Command;
 
 pub(super) fn probe_services() -> HostAudioServices {
     HostAudioServices { pipewire: probe_pipewire(), wireplumber: probe_wireplumber() }
+}
+
+pub(super) fn probe_invocations() -> HostServiceInvocations {
+    HostServiceInvocations {
+        pipewire: probe_invocation("pipewire.service"),
+        wireplumber: probe_invocation("wireplumber.service"),
+    }
+}
+
+fn probe_invocation(unit: &str) -> Option<String> {
+    let output = Command::new("systemctl")
+        .args(["--user", "show", "--property=InvocationID", "--value", unit])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_invocation(&output.stdout)
+}
+
+fn parse_invocation(bytes: &[u8]) -> Option<String> {
+    let value = std::str::from_utf8(bytes).ok()?.trim();
+    (value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| value.to_ascii_lowercase())
 }
 
 fn probe_pipewire() -> ServiceAvailability {
@@ -115,5 +139,16 @@ mod tests {
             classify_wireplumber_probe(true, FIXTURE_WIREPLUMBER_ACTIVE.as_bytes(), b""),
             ServiceAvailability::Available
         );
+    }
+
+    #[test]
+    fn invocation_probe_accepts_only_a_complete_hex_token() {
+        assert_eq!(
+            parse_invocation(b"0123456789abcdef0123456789ABCDEF\n"),
+            Some("0123456789abcdef0123456789abcdef".to_owned())
+        );
+        for invalid in [b"".as_slice(), b"0\n", b"0123456789abcdef0123456789abcdeg\n"] {
+            assert_eq!(parse_invocation(invalid), None);
+        }
     }
 }

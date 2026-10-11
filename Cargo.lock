@@ -3252,6 +3252,7 @@ dependencies = [
  "libc",
  "librewave-core",
  "librewave-device",
+ "librewave-engine",
  "librewave-ipc",
  "librewave-platform-linux",
  "librewave-protocol",

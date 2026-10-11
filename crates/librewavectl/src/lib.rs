@@ -406,9 +406,13 @@ fn write_status<W: Write>(output: &mut W, snapshot: &Snapshot) -> io::Result<()>
     writeln!(output, "Protocol: {}", librewave_ipc::PROTOCOL_VERSION)?;
     writeln!(output, "State generation: {}", snapshot.generation)?;
     writeln!(output, "Devices: {}", snapshot.devices.len())?;
+    let runtime = match snapshot.mixer.runtime {
+        MixerRuntimeState::Inactive { .. } => "inactive",
+        MixerRuntimeState::Active => "active",
+    };
     writeln!(
         output,
-        "Mixer: generation {}, inactive, {} sources",
+        "Mixer: generation {}, {runtime}, {} sources",
         snapshot.mixer.generation(),
         snapshot.mixer.profile.sources.len()
     )?;
@@ -422,10 +426,14 @@ fn write_mixer<W: Write>(output: &mut W, mixer: &MixerSnapshot) -> io::Result<()
         MixerRuntimeState::Inactive { reason } => {
             writeln!(output, "Runtime: inactive ({reason})")?;
         }
+        MixerRuntimeState::Active => writeln!(output, "Runtime: active")?,
     }
     match mixer.meters {
         MeterAvailability::Unavailable { reason } => {
             writeln!(output, "Meters: unavailable ({reason})")?;
+        }
+        MeterAvailability::Unpublished => {
+            writeln!(output, "Meters: unavailable (not published over IPC)")?;
         }
     }
     writeln!(output, "Microphone source: {}", mixer.profile.microphone_source)?;
@@ -648,6 +656,23 @@ mod tests {
             String::from_utf8(output).expect("UTF-8"),
             "Daemon: connected\nProtocol: 4\nState generation: 4\nDevices: 1\nMixer: generation 0, inactive, 2 sources\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
         );
+    }
+
+    #[test]
+    fn active_status_and_mixer_output_match_the_connected_runtime() {
+        let mut status = snapshot();
+        status.mixer = librewave_core::MixerSnapshot::active(status.mixer.profile);
+        let mut output = Vec::new();
+        write_status(&mut output, &status).expect("render active status");
+        assert!(
+            String::from_utf8(output)
+                .expect("UTF-8")
+                .contains("Mixer: generation 0, active, 2 sources")
+        );
+        let mut mixer = Vec::new();
+        write_mixer(&mut mixer, &status.mixer).expect("render active mixer");
+        let mixer = String::from_utf8(mixer).expect("UTF-8");
+        assert!(mixer.contains("Runtime: active\nMeters: unavailable (not published over IPC)\n"));
     }
 
     #[test]

@@ -227,6 +227,14 @@ pub struct HostAudioServices {
     pub wireplumber: ServiceAvailability,
 }
 
+/// User-service invocation identities used only to detect restarts.
+/// They contain no device identity or serial number.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HostServiceInvocations {
+    pub pipewire: Option<String>,
+    pub wireplumber: Option<String>,
+}
+
 /// Combined read-only inventory for the Linux host.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostAudioInventory {
@@ -265,6 +273,12 @@ impl LinuxInventory {
     #[must_use]
     pub fn services(&self) -> HostAudioServices {
         services::probe_services()
+    }
+
+    /// Reads the two service invocation identities without changing either service.
+    #[must_use]
+    pub fn service_invocations(&self) -> HostServiceInvocations {
+        services::probe_invocations()
     }
 
     /// Reads the complete host inventory without hardware or session writes.
