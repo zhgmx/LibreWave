@@ -380,6 +380,10 @@ struct CallbackState<P> {
     failed: AtomicBool,
     callbacks_in_flight: AtomicU32,
     process_cycles: AtomicU64,
+    startup_incomplete_cycles: AtomicU64,
+    startup_missing_mask: AtomicU32,
+    startup_quantum: AtomicU32,
+    startup_driver: AtomicU32,
     filter_state: AtomicI32,
     has_streamed: AtomicBool,
     stopping: AtomicBool,
@@ -394,6 +398,10 @@ impl<P> CallbackState<P> {
 
 pub(super) struct FilterDiagnostics {
     pub(super) process_cycles: u64,
+    pub(super) startup_incomplete_cycles: u64,
+    pub(super) startup_missing_mask: u32,
+    pub(super) startup_quantum: u32,
+    pub(super) startup_driver: u32,
     pub(super) filter_state: i32,
     pub(super) failed: bool,
     pub(super) faults: [Option<FaultRecord>; FAULT_CAPACITY],
@@ -432,6 +440,10 @@ impl<P: GraphProcessor> FilterHandle<P> {
             failed: AtomicBool::new(false),
             callbacks_in_flight: AtomicU32::new(0),
             process_cycles: AtomicU64::new(0),
+            startup_incomplete_cycles: AtomicU64::new(0),
+            startup_missing_mask: AtomicU32::new(0),
+            startup_quantum: AtomicU32::new(0),
+            startup_driver: AtomicU32::new(0),
             filter_state: AtomicI32::new(0),
             has_streamed: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
@@ -510,6 +522,13 @@ impl<P: GraphProcessor> FilterHandle<P> {
         let (faults, dropped_faults) = self.callbacks.faults.snapshot();
         FilterDiagnostics {
             process_cycles: self.callbacks.process_cycles.load(Ordering::Relaxed),
+            startup_incomplete_cycles: self
+                .callbacks
+                .startup_incomplete_cycles
+                .load(Ordering::Relaxed),
+            startup_missing_mask: self.callbacks.startup_missing_mask.load(Ordering::Relaxed),
+            startup_quantum: self.callbacks.startup_quantum.load(Ordering::Relaxed),
+            startup_driver: self.callbacks.startup_driver.load(Ordering::Relaxed),
             filter_state: self.callbacks.filter_state.load(Ordering::Acquire),
             failed: self.callbacks.failed.load(Ordering::Acquire),
             faults,
@@ -692,6 +711,10 @@ fn process_cycle<P: GraphProcessor>(
     // mapped outputs after validating their ranges so an incomplete startup
     // cycle cannot publish stale samples. Later missing ports are faults.
     if missing_mask != 0 && callbacks.process_cycles.load(Ordering::Relaxed) == 0 {
+        callbacks.startup_missing_mask.store(missing_mask, Ordering::Relaxed);
+        callbacks.startup_quantum.store(quantum, Ordering::Relaxed);
+        callbacks.startup_driver.store(driver_id, Ordering::Relaxed);
+        callbacks.startup_incomplete_cycles.fetch_add(1, Ordering::Relaxed);
         if buffers.is_null() {
             return fail(ProcessFault::MissingBuffer, 0);
         }
@@ -1167,6 +1190,10 @@ mod tests {
             failed: AtomicBool::new(false),
             callbacks_in_flight: AtomicU32::new(0),
             process_cycles: AtomicU64::new(0),
+            startup_incomplete_cycles: AtomicU64::new(0),
+            startup_missing_mask: AtomicU32::new(0),
+            startup_quantum: AtomicU32::new(0),
+            startup_driver: AtomicU32::new(0),
             filter_state: AtomicI32::new(FILTER_STATE_STREAMING),
             has_streamed: AtomicBool::new(true),
             stopping: AtomicBool::new(false),

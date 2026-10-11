@@ -40,6 +40,9 @@ trait GraphRuntime {
     fn iterate(&mut self, timeout: Duration);
     fn cycles(&self) -> u64;
     fn fault_reason(&self) -> Option<String>;
+    fn startup_note(&self) -> Option<String> {
+        None
+    }
     fn teardown(&mut self) -> Result<(), LinuxAudioError>;
 }
 
@@ -99,6 +102,18 @@ impl GraphRuntime for RealGraphRuntime {
             diagnostics.faults.into_iter().flatten().next().map_or_else(
                 || "PipeWire callback faulted without a record".to_owned(),
                 |record| format!("PipeWire callback fault: {record:?}"),
+            )
+        })
+    }
+    fn startup_note(&self) -> Option<String> {
+        let diagnostics = self.0.diagnostics();
+        (diagnostics.process_cycles == 0 && diagnostics.startup_incomplete_cycles != 0).then(|| {
+            format!(
+                "{} incomplete graph cycles; last missing mask {:#x}, quantum {}, driver {}",
+                diagnostics.startup_incomplete_cycles,
+                diagnostics.startup_missing_mask,
+                diagnostics.startup_quantum,
+                diagnostics.startup_driver,
             )
         })
     }
@@ -292,7 +307,36 @@ impl ComposedAudioHost {
             .ok_or_else(|| attempt_error(phase, "bridge control is absent"))?
             .state();
         if state == BridgeState::Faulted {
-            return Err(attempt_error(phase, "clock bridge faulted"));
+            let startup =
+                graph.startup_note().unwrap_or_else(|| "startup mapping unavailable".to_owned());
+            // A worker publishes its terminal cause before it marks the
+            // bridge faulted. A bridge boundary can fault just before the
+            // worker exits, so allow one bounded control-side observation.
+            let deadline = Instant::now() + POLL_INTERVAL;
+            loop {
+                if let Some(terminal) = self.capture.as_mut().and_then(CaptureWorker::try_terminal)
+                {
+                    return Err(attempt_error(
+                        phase,
+                        format!("capture worker: {terminal:?}; {startup}"),
+                    ));
+                }
+                if let Some(terminal) =
+                    self.playback.as_mut().and_then(PlaybackWorker::try_terminal)
+                {
+                    return Err(attempt_error(
+                        phase,
+                        format!("playback worker: {terminal:?}; {startup}"),
+                    ));
+                }
+                if Instant::now() >= deadline {
+                    return Err(attempt_error(
+                        phase,
+                        format!("clock bridge faulted without worker cause; {startup}"),
+                    ));
+                }
+                std::thread::yield_now();
+            }
         }
         if self.capture.as_ref().is_some_and(CaptureWorker::is_finished) {
             return Err(attempt_error(phase, "capture worker stopped"));

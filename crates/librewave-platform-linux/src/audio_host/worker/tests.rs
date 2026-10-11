@@ -684,7 +684,7 @@ fn capture_worker_classifies_pcm_terminal_failures() {
             statuses: VecDeque::new(),
             calls: calls(),
         };
-        let worker = CaptureWorker::start(
+        let mut worker = CaptureWorker::start(
             Box::new(fake),
             parts.capture_ingress,
             capture_geometry(),
@@ -692,6 +692,7 @@ fn capture_worker_classifies_pcm_terminal_failures() {
         )
         .expect("capture worker");
         wait_for_capture_finish(&worker);
+        assert_eq!(worker.try_terminal(), Some(expected));
         assert_eq!(worker.park_and_join().expect("capture worker join").terminal, expected);
         assert_eq!(parts.control.state(), BridgeState::Faulted);
     }
@@ -809,7 +810,7 @@ fn playback_worker_stops_normally_when_teardown_refuses_a_new_boundary() {
     let parked =
         ParkedPlaybackWorker::new(Box::new(fake), playback, fixture.playback_geometry, policy(2))
             .expect("parked playback worker");
-    let worker =
+    let mut worker =
         parked.activate_thread_after_monitor_mix_queued().expect("playback thread activation");
     wait_for_playback_phase(&worker, WorkerPhase::PrimedParked);
     control.activate().expect("activate quiescent bridge");
@@ -820,6 +821,8 @@ fn playback_worker_stops_normally_when_teardown_refuses_a_new_boundary() {
     assert_eq!(control.state(), BridgeState::Quiescing);
     release_tx.send(()).expect("release playback status");
     wait_for_playback_finish(&worker);
+
+    assert_eq!(worker.try_terminal(), Some(PlaybackWorkerTerminal::Stopped));
 
     let shutdown = worker.park_and_join().expect("playback worker join");
     assert_eq!(shutdown.terminal, PlaybackWorkerTerminal::Stopped);

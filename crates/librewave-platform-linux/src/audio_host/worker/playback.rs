@@ -73,10 +73,12 @@ impl ParkedPlaybackWorker {
         }
         let signals = Arc::clone(&self.submitter.signals);
         let (boundary_publisher, boundaries) = copy_slot();
+        let (mut terminal_publisher, terminal) = copy_slot();
         let join = thread::Builder::new()
             .name("librewave-alsa-playback".to_owned())
             .spawn(move || {
                 let terminal = self.run(boundary_publisher);
+                let _ = terminal_publisher.try_publish(terminal);
                 self.submitter.signals.set_phase(WorkerPhase::Terminal);
                 if terminal != PlaybackWorkerTerminal::Stopped {
                     self.egress.worker_fault();
@@ -84,7 +86,7 @@ impl ParkedPlaybackWorker {
                 PlaybackThreadExit { egress: self.egress, submitter: self.submitter, terminal }
             })
             .map_err(|_| WorkerStartError::ThreadSpawn)?;
-        Ok(PlaybackWorker { signals, boundaries, join })
+        Ok(PlaybackWorker { signals, boundaries, terminal, join })
     }
 
     pub(in crate::audio_host) fn park_and_drop_stream(mut self) -> ParkedPlaybackWorkerShutdown {
@@ -182,12 +184,17 @@ pub(in crate::audio_host) struct ParkedPlaybackWorkerShutdown {
 pub(in crate::audio_host) struct PlaybackWorker {
     signals: Arc<WorkerSignals>,
     boundaries: CopySlotReader<PlaybackWorkerBoundary>,
+    terminal: CopySlotReader<PlaybackWorkerTerminal>,
     join: JoinHandle<PlaybackThreadExit>,
 }
 
 impl PlaybackWorker {
     pub(in crate::audio_host) fn try_boundary(&mut self) -> Option<PlaybackWorkerBoundary> {
         self.boundaries.try_take().ok()
+    }
+
+    pub(in crate::audio_host) fn try_terminal(&mut self) -> Option<PlaybackWorkerTerminal> {
+        self.terminal.try_take().ok()
     }
 
     pub(in crate::audio_host) fn phase(&self) -> WorkerPhase {

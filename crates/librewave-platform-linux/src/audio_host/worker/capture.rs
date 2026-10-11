@@ -38,6 +38,7 @@ pub(in crate::audio_host) enum CaptureWorkerTerminal {
 pub(in crate::audio_host) struct CaptureWorker {
     signals: Arc<WorkerSignals>,
     progress: CopySlotReader<CaptureWorkerProgress>,
+    terminal: CopySlotReader<CaptureWorkerTerminal>,
     join: JoinHandle<CaptureThreadExit>,
 }
 
@@ -65,6 +66,7 @@ impl CaptureWorker {
         let signals = Arc::new(WorkerSignals::new(ingress.worker_attempt_epoch()));
         let worker_signals = Arc::clone(&signals);
         let (progress_publisher, progress) = copy_slot();
+        let (terminal_publisher, terminal) = copy_slot();
         let capture_loop = CaptureLoop {
             pcm,
             ingress,
@@ -74,16 +76,21 @@ impl CaptureWorker {
             policy,
             signals: worker_signals,
             progress_publisher,
+            terminal_publisher,
         };
         let join = thread::Builder::new()
             .name("librewave-alsa-capture".to_owned())
             .spawn(move || capture_loop.run())
             .map_err(|_| WorkerStartError::ThreadSpawn)?;
-        Ok(Self { signals, progress, join })
+        Ok(Self { signals, progress, terminal, join })
     }
 
     pub(in crate::audio_host) fn try_progress(&mut self) -> Option<CaptureWorkerProgress> {
         self.progress.try_take().ok()
+    }
+
+    pub(in crate::audio_host) fn try_terminal(&mut self) -> Option<CaptureWorkerTerminal> {
+        self.terminal.try_take().ok()
     }
 
     pub(in crate::audio_host) fn phase(&self) -> WorkerPhase {
@@ -150,6 +157,7 @@ struct CaptureLoop {
     policy: WorkerIoPolicy,
     signals: Arc<WorkerSignals>,
     progress_publisher: CopySlotPublisher<CaptureWorkerProgress>,
+    terminal_publisher: CopySlotPublisher<CaptureWorkerTerminal>,
 }
 
 impl CaptureLoop {
@@ -161,6 +169,9 @@ impl CaptureLoop {
             }
             Err(terminal) => terminal,
         };
+        // Publish the cause before the bridge fault becomes visible to the
+        // control thread. This one-shot slot cannot be full.
+        let _ = self.terminal_publisher.try_publish(terminal);
         self.signals.set_phase(WorkerPhase::Terminal);
         if terminal != CaptureWorkerTerminal::Stopped {
             self.ingress.worker_fault();
