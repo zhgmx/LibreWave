@@ -175,7 +175,21 @@ impl MetadataClient {
             })
             .register();
         roundtrip(&core, &loop_)?;
+        // The service can be running before WirePlumber publishes its
+        // metadata after a restart. Keep the registry listener alive while
+        // waiting for that exact object; do not substitute empty defaults.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while found.borrow().is_empty() && Instant::now() < deadline {
+            loop_.loop_().iterate(Duration::from_millis(5));
+        }
+        roundtrip(&core, &loop_)?;
         let objects = found.borrow();
+        if objects.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "desktop default metadata did not appear within its restart deadline",
+            ));
+        }
         let [object] = objects.as_slice() else {
             return Err(io::Error::other("one desktop defaults metadata object is required"));
         };

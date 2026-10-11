@@ -535,7 +535,9 @@ fn wait_ready(host: &mut impl RuntimeHost) -> io::Result<()> {
                 MixerRuntimeState::Active => Ok(true),
                 MixerRuntimeState::Inactive {
                     reason:
-                        MixerInactiveReason::Starting | MixerInactiveReason::HostServicesUnavailable,
+                        MixerInactiveReason::Starting
+                        | MixerInactiveReason::HostServicesUnavailable
+                        | MixerInactiveReason::AudioAttemptFailed,
                 } => Ok(false),
                 MixerRuntimeState::Inactive { reason } => Err(io::Error::other(format!(
                     "audio is not ready: {reason}; suspend the exact conflicting fragment if desktop ownership remains active"

@@ -1221,6 +1221,25 @@ context.modules = [
         }
 
         #[test]
+        #[ignore = "requires LIBREWAVE_PIPEWIRE_INTEGRATION=1; uses a private policy session without USB, ALSA, or desktop services"]
+        fn private_desktop_defaults_wait_for_the_policy_session() {
+            use crate::desktop_defaults::{DesktopDefaultStore, PipeWireDesktopDefaults};
+            assert_eq!(std::env::var("LIBREWAVE_PIPEWIRE_INTEGRATION").as_deref(), Ok("1"));
+            let server = PrivatePipeWire::start(256, 8);
+            std::thread::scope(|scope| {
+                let policy = scope.spawn(|| {
+                    std::thread::sleep(Duration::from_millis(150));
+                    server.start_wireplumber()
+                });
+                let mut store = PipeWireDesktopDefaults;
+                let defaults = store.read().expect("wait for policy metadata publication");
+                assert_eq!(defaults, librewave_core::DesktopDefaults::default());
+                let _policy = policy.join().expect("policy helper completed");
+                assert!(store.read().is_ok());
+            });
+        }
+
+        #[test]
         #[ignore = "requires LIBREWAVE_PIPEWIRE_INTEGRATION=1; uses a private metadata server without USB, ALSA, or desktop services"]
         fn private_desktop_defaults_are_selected_and_restored() {
             use crate::desktop_defaults::{DesktopDefaultStore, PipeWireDesktopDefaults};

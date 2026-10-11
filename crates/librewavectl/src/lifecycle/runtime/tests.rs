@@ -17,6 +17,7 @@ struct Host {
     access_fails: bool,
     partial_selection: bool,
     reason: Option<MixerInactiveReason>,
+    recovery_reads: usize,
     events: Vec<String>,
     clock: Instant,
     stale_nodes: bool,
@@ -41,6 +42,7 @@ impl Host {
             access_fails: false,
             partial_selection: false,
             reason: None,
+            recovery_reads: 0,
             events: Vec::new(),
         }
     }
@@ -100,6 +102,13 @@ impl RuntimeHost for Host {
                 _ => "Other",
             }
         ))?;
+        if command == Command::GetMixer && self.recovery_reads != 0 {
+            self.recovery_reads -= 1;
+            if self.recovery_reads == 0 {
+                self.reason = None;
+                self.audio = true;
+            }
+        }
         let mixer = if self.audio {
             MixerSnapshot::active(librewave_core::MixerProfile::default())
         } else if let Some(reason) = self.reason {
@@ -248,6 +257,28 @@ fn start_stop_owns_exact_files_and_preserves_unrelated_configuration() {
     let count = host.events.len();
     stop(&paths, &mut host).unwrap();
     assert_eq!(host.events.len(), count);
+}
+
+#[test]
+fn readiness_waits_for_supervised_retry_and_keeps_failure_bounded() {
+    let mut host = Host::new();
+    host.active = true;
+    host.reason = Some(MixerInactiveReason::AudioAttemptFailed);
+    host.recovery_reads = 3;
+    let before = host.now();
+    wait_ready(&mut host).unwrap();
+    assert!(host.audio);
+    assert_eq!(host.now().duration_since(before), Duration::from_secs(2));
+
+    host.audio = false;
+    host.reason = Some(MixerInactiveReason::AudioAttemptFailed);
+    assert_eq!(wait_ready(&mut host).unwrap_err().kind(), io::ErrorKind::TimedOut);
+    assert!(!host.audio);
+
+    host.reason = Some(MixerInactiveReason::CleanupPending);
+    let before = host.now();
+    assert!(wait_ready(&mut host).is_err());
+    assert_eq!(host.now(), before);
 }
 
 #[test]
