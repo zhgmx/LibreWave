@@ -1,341 +1,401 @@
 use gpui::{
-    App, Bounds, Context, FontWeight, Window, WindowBounds, WindowOptions, div, prelude::*, px,
+    App, Bounds, Context, Div, Stateful, Window, WindowBounds, WindowOptions, div, prelude::*, px,
     rgb, size,
 };
+use librewave_core::{
+    Command, DeviceAdmissionSnapshot, DeviceGeneration, DeviceId, DeviceWriteAccess,
+    FixedPointValue, Snapshot, Wave3Control,
+};
+use librewave_ipc::Response;
+use librewave_platform_linux::ipc::{Client, default_socket_path};
 
 const BACKGROUND: u32 = 0x000D_0F11;
 const PANEL: u32 = 0x0014_171A;
-const PANEL_RAISED: u32 = 0x001A_1E22;
-const BORDER: u32 = 0x0026_2B30;
+const RAISED: u32 = 0x001A_1E22;
 const INK: u32 = 0x00F4_F5F6;
 const MUTED: u32 = 0x0099_A1AA;
-const SUBTLE: u32 = 0x006E_767F;
-const ACCENT: u32 = 0x0068_D5C0;
-const CAUTION: u32 = 0x00E9_B872;
+const WARNING: u32 = 0x00E9_B872;
 
-/// Open the optional desktop application shell.
+/// Opens the optional desktop client.
 ///
 /// # Panics
 ///
 /// Panics if GPUI cannot open its initial window.
 pub fn run() {
     gpui_platform::application().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
+        let bounds = Bounds::centered(None, size(px(740.), px(680.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(960.), px(640.))),
+            window_min_size: Some(size(px(600.), px(540.))),
             app_id: Some("dev.librewave.LibreWave".to_owned()),
             ..WindowOptions::default()
         };
-
-        cx.open_window(options, |_, cx| cx.new(|_| Shell))
+        cx.open_window(options, |_, cx| cx.new(Shell::new))
             .expect("failed to open the LibreWave application window");
     });
 }
 
-struct Shell;
+struct Shell {
+    snapshot: Option<Snapshot>,
+    pending: bool,
+    error: Option<String>,
+}
+
+impl Shell {
+    fn new(cx: &mut Context<Self>) -> Self {
+        let mut shell = Self { snapshot: None, pending: false, error: None };
+        shell.send(Command::GetStatus, cx);
+        shell
+    }
+
+    fn send(&mut self, command: Command, cx: &mut Context<Self>) {
+        if self.pending {
+            return;
+        }
+        self.pending = true;
+        self.error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { Client::new(default_socket_path()).request(command) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.pending = false;
+                match result {
+                    Ok(Response::Status { snapshot } | Response::Refreshed { snapshot }) => {
+                        this.snapshot = Some(snapshot);
+                    }
+                    Ok(
+                        Response::DeviceInspection { device } | Response::ControlChanged { device },
+                    ) => {
+                        if let Some(snapshot) = &mut this.snapshot
+                            && let Some(current) =
+                                snapshot.devices.iter_mut().find(|current| current.id == device.id)
+                        {
+                            *current = device;
+                        }
+                    }
+                    Ok(_) => {
+                        this.error = Some("The daemon returned an unexpected response.".to_owned());
+                    }
+                    Err(error) => this.error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
 
 impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let device = self.snapshot.as_ref().and_then(|snapshot| snapshot.devices.first()).cloned();
+        let services = self.snapshot.as_ref().map(|snapshot| {
+            format!(
+                "PipeWire: {}  ·  WirePlumber: {}  ·  Mixer: inactive",
+                snapshot.audio.pipewire.status_word(),
+                snapshot.audio.wireplumber.status_word()
+            )
+        });
         div()
             .size_full()
             .bg(rgb(BACKGROUND))
             .text_color(rgb(INK))
+            .p(px(24.))
             .flex()
             .flex_col()
-            .child(header())
-            .child(div().flex_1().min_h_0().flex().child(sidebar()).child(workspace()))
+            .gap(px(14.))
+            .child(div().text_2xl().child("LibreWave"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(MUTED))
+                    .child(services.unwrap_or_else(|| "Connecting to librewaved…".to_owned())),
+            )
+            .child(
+                button("refresh", if self.pending { "Working…" } else { "Refresh status" })
+                    .on_click(cx.listener(|this, _, _, cx| this.send(Command::GetStatus, cx))),
+            )
+            .when_some(self.error.clone(), |view, error| {
+                view.child(
+                    div()
+                        .p(px(12.))
+                        .rounded(px(8.))
+                        .bg(rgb(RAISED))
+                        .text_color(rgb(WARNING))
+                        .child(error),
+                )
+            })
+            .child(self.device_panel(device.as_ref(), cx))
     }
 }
 
-fn header() -> impl IntoElement {
+impl Shell {
+    #[allow(clippy::too_many_lines)]
+    fn device_panel(
+        &self,
+        device: Option<&librewave_core::DeviceSnapshot>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut panel = div()
+            .flex_1()
+            .min_h_0()
+            .p(px(18.))
+            .rounded(px(10.))
+            .bg(rgb(PANEL))
+            .flex()
+            .flex_col()
+            .gap(px(10.));
+        let Some(device) = device else {
+            return panel.child(div().text_color(rgb(MUTED)).child("No Wave:3 is available."));
+        };
+        panel = panel.child(div().text_xl().child("Wave:3 hardware controls")).child(
+            div().text_sm().text_color(rgb(MUTED)).child(format!(
+                "Connection: {}  ·  Access: {}",
+                device.connection,
+                device.admission.control_access()
+            )),
+        );
+        match &device.admission {
+            DeviceAdmissionSnapshot::NotInspected => {
+                panel = panel.child(div().text_sm().text_color(rgb(MUTED)).child(
+                    "Read controls to open the daemon connection. This can restore saved hardware values.",
+                ));
+            }
+            DeviceAdmissionSnapshot::Failed { error } => {
+                panel =
+                    panel.child(div().text_sm().text_color(rgb(WARNING)).child(error.to_string()));
+            }
+            DeviceAdmissionSnapshot::Admitted { api, config: None, .. } => {
+                panel = panel.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(WARNING))
+                        .child(format!("API {api}: the configuration is unavailable.")),
+                );
+            }
+            DeviceAdmissionSnapshot::Admitted {
+                api,
+                generation,
+                write_access,
+                config: Some(config),
+            } => {
+                let writable = matches!(write_access, DeviceWriteAccess::Ready) && !self.pending;
+                panel = panel
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(MUTED))
+                            .child(format!("API {api}  ·  Generation {generation}")),
+                    )
+                    .child(level_row(
+                        "Microphone preamp",
+                        config.input_gain,
+                        0,
+                        40 * 256,
+                        Wave3Control::InputGain,
+                        device.id,
+                        *generation,
+                        writable,
+                        cx,
+                    ))
+                    .child(level_row(
+                        "Headphone hardware level",
+                        config.headphone_volume,
+                        -60 * 256,
+                        0,
+                        Wave3Control::HeadphoneLevel,
+                        device.id,
+                        *generation,
+                        writable,
+                        cx,
+                    ))
+                    .child(toggle_row(
+                        "Microphone mute",
+                        config.input_mute,
+                        Wave3Control::MicrophoneMute,
+                        device.id,
+                        *generation,
+                        writable,
+                        cx,
+                    ))
+                    .child(toggle_row(
+                        "Headphone mute",
+                        config.headphone_mute,
+                        Wave3Control::HeadphoneMute,
+                        device.id,
+                        *generation,
+                        writable,
+                        cx,
+                    ))
+                    .child(toggle_row(
+                        "Clipguard",
+                        config.clipguard_enable,
+                        Wave3Control::Clipguard,
+                        device.id,
+                        *generation,
+                        writable,
+                        cx,
+                    ))
+                    .child(toggle_row(
+                        "Low-cut filter",
+                        config.lowcut_enable,
+                        Wave3Control::LowCut,
+                        device.id,
+                        *generation,
+                        writable,
+                        cx,
+                    ))
+                    .child(toggle_row(
+                        "Gain Lock",
+                        config.gain_lock,
+                        Wave3Control::GainLock,
+                        device.id,
+                        *generation,
+                        writable,
+                        cx,
+                    ));
+            }
+        }
+        let id = device.id;
+        panel
+            .child(div().flex_1())
+            .child(div().text_xs().text_color(rgb(MUTED)).child(
+                "These are physical hardware values. Desktop and mixer volume remain separate.",
+            ))
+            .child(
+                button("inspect", if self.pending { "Working…" } else { "Read controls" })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.send(Command::InspectDevice { id }, cx);
+                    })),
+            )
+    }
+}
+
+fn button(id: &str, label: &str) -> Stateful<Div> {
     div()
-        .h(px(68.))
-        .px(px(24.))
-        .border_b_1()
-        .border_color(rgb(BORDER))
+        .id(id.to_owned())
+        .px(px(12.))
+        .py(px(8.))
+        .rounded(px(7.))
+        .bg(rgb(RAISED))
+        .hover(|style| style.bg(rgb(0x002B_3035)))
+        .cursor_pointer()
+        .text_sm()
+        .child(label.to_owned())
+}
+
+fn control_button(
+    key: &str,
+    label: &str,
+    control: Option<Wave3Control>,
+    id: DeviceId,
+    generation: DeviceGeneration,
+    writable: bool,
+    cx: &mut Context<Shell>,
+) -> Stateful<Div> {
+    let mut element = button(key, label);
+    if writable && let Some(control) = control {
+        element = element.on_click(cx.listener(move |this, _, _, cx| {
+            this.send(
+                Command::SetWave3Control { id, expected_generation: generation, control },
+                cx,
+            );
+        }));
+    } else {
+        element = element.text_color(rgb(MUTED));
+    }
+    element
+}
+
+#[allow(clippy::too_many_arguments)]
+fn level_row(
+    label: &'static str,
+    value: FixedPointValue,
+    minimum: i32,
+    maximum: i32,
+    constructor: fn(FixedPointValue) -> Wave3Control,
+    id: DeviceId,
+    generation: DeviceGeneration,
+    writable: bool,
+    cx: &mut Context<Shell>,
+) -> impl IntoElement {
+    let down = stepped(value, -128, minimum, maximum).map(constructor);
+    let up = stepped(value, 128, minimum, maximum).map(constructor);
+    div()
         .flex()
         .items_center()
         .justify_between()
+        .child(div().text_sm().child(format!("{label}: {:.1} dB", f64::from(value.raw) / 256.)))
         .child(
             div()
                 .flex()
-                .items_center()
-                .gap(px(12.))
-                .child(
-                    div()
-                        .size(px(28.))
-                        .rounded(px(8.))
-                        .bg(rgb(ACCENT))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(rgb(BACKGROUND))
-                        .font_weight(FontWeight::BOLD)
-                        .child("L"),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.))
-                        .child(div().font_weight(FontWeight::SEMIBOLD).child("LibreWave"))
-                        .child(div().text_xs().text_color(rgb(MUTED)).child("Audio mixer")),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(9.))
-                .px(px(12.))
-                .py(px(7.))
-                .rounded(px(8.))
-                .bg(rgb(PANEL))
-                .border_1()
-                .border_color(rgb(BORDER))
-                .child(div().size(px(7.)).rounded_full().bg(rgb(CAUTION)))
-                .child(div().text_sm().text_color(rgb(MUTED)).child("Device not connected")),
-        )
-}
-
-fn sidebar() -> impl IntoElement {
-    div()
-        .w(px(190.))
-        .p(px(16.))
-        .border_r_1()
-        .border_color(rgb(BORDER))
-        .flex()
-        .flex_col()
-        .gap(px(22.))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(7.))
-                .child(section_label("MIX"))
-                .child(navigation_item("Monitor mix", true))
-                .child(navigation_item("Stream mix", false)),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(7.))
-                .child(section_label("HARDWARE"))
-                .child(navigation_item("Device settings", false)),
-        )
-        .child(div().flex_1())
-        .child(
-            div()
-                .p(px(12.))
-                .rounded(px(9.))
-                .bg(rgb(PANEL))
-                .border_1()
-                .border_color(rgb(BORDER))
-                .flex()
-                .flex_col()
                 .gap(px(5.))
-                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Preview shell"))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(SUBTLE))
-                        .child("Hardware and audio controls are disabled."),
-                ),
+                .child(control_button(
+                    &format!("{label}-down"),
+                    "−",
+                    down,
+                    id,
+                    generation,
+                    writable,
+                    cx,
+                ))
+                .child(control_button(
+                    &format!("{label}-up"),
+                    "+",
+                    up,
+                    id,
+                    generation,
+                    writable,
+                    cx,
+                )),
         )
 }
 
-fn section_label(label: &'static str) -> impl IntoElement {
-    div().px(px(9.)).text_xs().text_color(rgb(SUBTLE)).child(label)
+#[allow(clippy::too_many_arguments)]
+fn toggle_row(
+    label: &'static str,
+    value: bool,
+    constructor: fn(bool) -> Wave3Control,
+    id: DeviceId,
+    generation: DeviceGeneration,
+    writable: bool,
+    cx: &mut Context<Shell>,
+) -> impl IntoElement {
+    div().flex().items_center().justify_between().child(div().text_sm().child(label)).child(
+        control_button(
+            label,
+            if value { "On" } else { "Off" },
+            Some(constructor(!value)),
+            id,
+            generation,
+            writable,
+            cx,
+        ),
+    )
 }
 
-fn navigation_item(label: &'static str, selected: bool) -> impl IntoElement {
-    div()
-        .h(px(36.))
-        .px(px(10.))
-        .rounded(px(7.))
-        .flex()
-        .items_center()
-        .gap(px(9.))
-        .when(selected, |element| element.bg(rgb(PANEL_RAISED)).text_color(rgb(INK)))
-        .when(!selected, |element| element.text_color(rgb(MUTED)))
-        .child(
-            div()
-                .size(px(5.))
-                .rounded_full()
-                .when(selected, |element| element.bg(rgb(ACCENT)))
-                .when(!selected, |element| element.bg(rgb(SUBTLE))),
-        )
-        .child(div().text_sm().child(label))
+fn stepped(
+    value: FixedPointValue,
+    delta: i32,
+    minimum: i32,
+    maximum: i32,
+) -> Option<FixedPointValue> {
+    let raw = value.raw.checked_add(delta)?;
+    (minimum..=maximum).contains(&raw).then_some(FixedPointValue { raw, ..value })
 }
 
-fn workspace() -> impl IntoElement {
-    div()
-        .flex_1()
-        .min_w_0()
-        .p(px(24.))
-        .flex()
-        .flex_col()
-        .gap(px(20.))
-        .child(
-            div()
-                .flex()
-                .items_end()
-                .justify_between()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(5.))
-                        .child(
-                            div().text_2xl().font_weight(FontWeight::SEMIBOLD).child("Monitor mix"),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(MUTED))
-                                .child("Set what you hear through the Wave headphone output."),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(SUBTLE))
-                        .child("Connect a supported Wave device to start."),
-                ),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .gap(px(16.))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .gap(px(12.))
-                        .child(channel_strip("Microphone", "Wave input"))
-                        .child(channel_strip("System", "Desktop audio"))
-                        .child(channel_strip("Voice chat", "Application input"))
-                        .child(channel_strip("Music", "Application input")),
-                )
-                .child(output_panel()),
-        )
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn channel_strip(name: &'static str, detail: &'static str) -> impl IntoElement {
-    div()
-        .flex_1()
-        .min_w(px(126.))
-        .h_full()
-        .p(px(14.))
-        .rounded(px(10.))
-        .bg(rgb(PANEL))
-        .border_1()
-        .border_color(rgb(BORDER))
-        .flex()
-        .flex_col()
-        .items_center()
-        .gap(px(5.))
-        .child(div().w_full().font_weight(FontWeight::SEMIBOLD).text_sm().child(name))
-        .child(div().w_full().text_xs().text_color(rgb(SUBTLE)).child(detail))
-        .child(
-            div()
-                .flex_1()
-                .min_h(px(220.))
-                .pt(px(24.))
-                .pb(px(18.))
-                .flex()
-                .items_center()
-                .gap(px(16.))
-                .child(
-                    div().w(px(7.)).h_full().max_h(px(280.)).rounded_full().bg(rgb(PANEL_RAISED)),
-                )
-                .child(
-                    div()
-                        .relative()
-                        .w(px(4.))
-                        .h_full()
-                        .max_h(px(280.))
-                        .rounded_full()
-                        .bg(rgb(BORDER))
-                        .child(
-                            div()
-                                .absolute()
-                                .left(px(-7.))
-                                .bottom(px(46.))
-                                .w(px(18.))
-                                .h(px(8.))
-                                .rounded(px(4.))
-                                .bg(rgb(SUBTLE)),
-                        ),
-                ),
-        )
-        .child(
-            div()
-                .w_full()
-                .py(px(8.))
-                .rounded(px(7.))
-                .bg(rgb(PANEL_RAISED))
-                .text_center()
-                .text_xs()
-                .text_color(rgb(SUBTLE))
-                .child("Unavailable"),
-        )
-}
-
-fn output_panel() -> impl IntoElement {
-    div()
-        .w(px(232.))
-        .h_full()
-        .p(px(16.))
-        .rounded(px(10.))
-        .bg(rgb(PANEL))
-        .border_1()
-        .border_color(rgb(BORDER))
-        .flex()
-        .flex_col()
-        .gap(px(14.))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .child(div().font_weight(FontWeight::SEMIBOLD).child("Outputs"))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(SUBTLE))
-                        .child("Hardware and software levels stay separate."),
-                ),
-        )
-        .child(output_row("Headphones", "Hardware level"))
-        .child(output_row("Stream mix", "Software level"))
-        .child(div().flex_1())
-        .child(
-            div()
-                .p(px(12.))
-                .rounded(px(8.))
-                .bg(rgb(PANEL_RAISED))
-                .text_xs()
-                .text_color(rgb(MUTED))
-                .child("The desktop volume control will not change microphone gain or headphone hardware level."),
-        )
-}
-
-fn output_row(name: &'static str, detail: &'static str) -> impl IntoElement {
-    div()
-        .p(px(12.))
-        .rounded(px(8.))
-        .border_1()
-        .border_color(rgb(BORDER))
-        .flex()
-        .flex_col()
-        .gap(px(5.))
-        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(name))
-        .child(div().text_xs().text_color(rgb(SUBTLE)).child(detail))
-        .child(div().mt(px(7.)).h(px(5.)).rounded_full().bg(rgb(PANEL_RAISED)))
+    #[test]
+    fn hardware_steps_stop_at_reviewed_boundaries() {
+        let gain = FixedPointValue { raw: 0, fractional_bits: 8 };
+        assert_eq!(stepped(gain, -128, 0, 40 * 256), None);
+        assert_eq!(stepped(gain, 128, 0, 40 * 256).map(|value| value.raw), Some(128));
+        let headphone = FixedPointValue { raw: -60 * 256, fractional_bits: 8 };
+        assert_eq!(stepped(headphone, -128, -60 * 256, 0), None);
+    }
 }

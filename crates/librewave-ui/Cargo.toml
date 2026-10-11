@@ -10,11 +10,14 @@ description = "Optional GPUI presentation shell for LibreWave"
 
 [features]
 default = []
-gpui = ["dep:gpui", "dep:gpui-platform"]
+gpui = ["dep:gpui", "dep:gpui-platform", "dep:librewave-core", "dep:librewave-ipc", "dep:librewave-platform-linux"]
 
 [dependencies]
 gpui = { git = "https://github.com/zed-industries/zed.git", rev = "e17dc4f9d50db73a458b64dcce50ecd4878b98a3", package = "gpui", optional = true }
 gpui-platform = { git = "https://github.com/zed-industries/zed.git", rev = "e17dc4f9d50db73a458b64dcce50ecd4878b98a3", package = "gpui_platform", optional = true, features = ["wayland", "x11"] }
+librewave-core = { path = "../librewave-core", optional = true }
+librewave-ipc = { path = "../librewave-ipc", optional = true }
+librewave-platform-linux = { path = "../librewave-platform-linux", optional = true }
 
 [lints]
 workspace = true
