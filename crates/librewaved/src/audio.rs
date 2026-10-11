@@ -81,7 +81,8 @@ impl AudioSupervisor {
             } else {
                 Ok(())
             };
-            if progress.is_err() || physical_hidden.is_err() {
+            if let Err(error) = progress.and(physical_hidden) {
+                eprintln!("librewaved: audio attempt lost: {error:?}");
                 if let Err(error) = attempt.lifecycle.teardown(&mut attempt.host) {
                     eprintln!("librewaved: audio cleanup pending: {error:?}");
                     self.retry_at = now + RETRY_INTERVAL;
