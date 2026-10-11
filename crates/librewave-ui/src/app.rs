@@ -1,5 +1,7 @@
 mod mixer;
 
+use mixer::FaderEdit;
+
 #[cfg(test)]
 use mixer::{
     fader_fraction, route_key_command, route_position_command, route_step_command,
@@ -60,6 +62,9 @@ enum SessionExpectation {
 struct Shell {
     snapshot: Option<Snapshot>,
     pending: bool,
+    in_flight_fader: Option<FaderEdit>,
+    queued_fader: Option<FaderEdit>,
+    fader_window: Option<gpui::AnyWindowHandle>,
     poll_in_flight: bool,
     request_epoch: u64,
     action_error: Option<String>,
@@ -75,6 +80,9 @@ impl Shell {
         let mut shell = Self {
             snapshot: None,
             pending: false,
+            in_flight_fader: None,
+            queued_fader: None,
+            fader_window: None,
             poll_in_flight: false,
             request_epoch: 0,
             action_error: None,
@@ -101,6 +109,8 @@ impl Shell {
         if self.pending {
             return;
         }
+        self.in_flight_fader = None;
+        self.queued_fader = None;
         self.pending = true;
         self.request_epoch = self.request_epoch.wrapping_add(1);
         self.action_error = None;
@@ -112,6 +122,7 @@ impl Shell {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.pending = false;
+                let succeeded = result.is_ok();
                 let refresh_hardware = match result {
                     Ok(response) => {
                         this.apply_response(command, response);
@@ -122,10 +133,49 @@ impl Shell {
                 if refresh_hardware {
                     this.poll_status(cx);
                 }
+                if !succeeded
+                    && this.in_flight_fader.is_some()
+                    && let Some(window) = this.fader_window
+                {
+                    // A closed window has no remaining pointer gesture.
+                    let _ = cx.update_window(window, |_, window, cx| cx.stop_active_drag(window));
+                }
+                if let Some(edit) = this.finish_fader(succeeded) {
+                    this.send_fader(edit, cx);
+                }
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    fn send_fader(&mut self, edit: FaderEdit, cx: &mut Context<Self>) {
+        if self.defer_fader(edit) {
+            cx.notify();
+            return;
+        }
+        if let Some(command) = self.snapshot.as_ref().and_then(|snapshot| edit.command(snapshot)) {
+            self.send(command, cx);
+            self.in_flight_fader = Some(edit);
+        }
+    }
+
+    fn defer_fader(&mut self, edit: FaderEdit) -> bool {
+        if !self.pending {
+            return false;
+        }
+        if self.in_flight_fader.is_some() {
+            // One pending user intent. Mouse events never create a request backlog.
+            self.queued_fader = Some(edit);
+        }
+        true
+    }
+
+    fn finish_fader(&mut self, succeeded: bool) -> Option<FaderEdit> {
+        self.in_flight_fader = None;
+        let queued = self.queued_fader.take();
+        // Never replay a drag after a stale generation, disconnect or write error.
+        succeeded.then_some(queued).flatten()
     }
 
     fn poll_status(&mut self, cx: &mut Context<Self>) {
@@ -809,6 +859,9 @@ mod tests {
         Shell {
             snapshot: Some(snapshot),
             pending: false,
+            in_flight_fader: None,
+            queued_fader: None,
+            fader_window: None,
             poll_in_flight: false,
             request_epoch: 0,
             action_error: None,
@@ -978,6 +1031,82 @@ mod tests {
         for key in ["down", "left", "home", "unknown"] {
             assert!(route_key_command(source, MixTarget::Stream, route, generation, key).is_none());
         }
+    }
+
+    #[test]
+    fn repeated_drag_motion_keeps_one_latest_intent_and_cancels_it_on_failure() {
+        let mut shell = shell_with(Snapshot::empty());
+        let before = shell.snapshot.clone();
+        let edit = FaderEdit {
+            source: SYSTEM_SOURCE_ID,
+            target: MixTarget::Stream,
+            fader: FaderGain::MIN,
+        };
+        shell.pending = true;
+        // An unrelated in-flight request does not acquire a fader backlog.
+        assert!(shell.defer_fader(edit));
+        assert!(shell.queued_fader.is_none());
+        shell.in_flight_fader = Some(edit);
+        for step in -120..=24 {
+            assert!(shell.defer_fader(FaderEdit {
+                fader: FaderGain::from_half_decibel_steps(step).expect("step"),
+                ..edit
+            }));
+        }
+        let latest = FaderEdit { fader: FaderGain::MAX, ..edit };
+        assert_eq!(shell.queued_fader, Some(latest));
+        assert_eq!(shell.snapshot, before, "pointer intent cannot replace daemon state");
+        assert_eq!(shell.finish_fader(true), Some(latest));
+        assert!(shell.queued_fader.is_none() && shell.in_flight_fader.is_none());
+        shell.in_flight_fader = Some(edit);
+        shell.defer_fader(latest);
+        assert!(shell.finish_fader(false).is_none());
+        assert!(shell.queued_fader.is_none() && shell.in_flight_fader.is_none());
+    }
+
+    #[test]
+    fn queued_drag_uses_acknowledged_generation_and_preserves_both_mix_mute_states() {
+        let mut snapshot = Snapshot::empty();
+        let edited = snapshot
+            .mixer
+            .profile
+            .with_route(SYSTEM_SOURCE_ID, MixTarget::Stream, MixRoute::new(false, FaderGain::MIN))
+            .expect("route");
+        snapshot.mixer = MixerSnapshot::inactive(edited);
+        let edit = FaderEdit {
+            source: SYSTEM_SOURCE_ID,
+            target: MixTarget::Stream,
+            fader: FaderGain::MAX,
+        };
+        let command = edit.command(&snapshot).expect("latest intent");
+        assert_eq!(
+            command,
+            Command::SetMixerRoute {
+                expected_generation: MixerGeneration(1),
+                source: SYSTEM_SOURCE_ID,
+                target: MixTarget::Stream,
+                route: MixRoute::new(false, FaderGain::MAX),
+            }
+        );
+        let applied = snapshot
+            .mixer
+            .profile
+            .with_route(SYSTEM_SOURCE_ID, MixTarget::Stream, MixRoute::new(false, FaderGain::MAX))
+            .expect("acknowledged route");
+        assert_eq!(
+            applied.source(SYSTEM_SOURCE_ID).expect("source").controls.monitor(),
+            snapshot.mixer.profile.source(SYSTEM_SOURCE_ID).expect("source").controls.monitor()
+        );
+        snapshot.mixer = MixerSnapshot::inactive(applied);
+        assert!(
+            edit.command(&snapshot).is_none(),
+            "acknowledged final position is not written twice"
+        );
+        assert!(
+            FaderEdit { source: librewave_core::SourceId::new(999), ..edit }
+                .command(&snapshot)
+                .is_none()
+        );
     }
 
     #[test]

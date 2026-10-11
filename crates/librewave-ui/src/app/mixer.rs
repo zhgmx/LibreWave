@@ -2,10 +2,45 @@ use super::{
     ACCENT, BACKGROUND, BORDER, INK, MUTED, PANEL, RAISED, STREAM, Shell, WARNING, button,
     section_label,
 };
-use gpui::{Bounds, Context, Div, MouseButton, Stateful, canvas, div, prelude::*, px, rgb};
-use librewave_core::{
-    Command, FaderGain, MixRoute, MixTarget, MixerGeneration, MixerRuntimeState, SourceId,
+use gpui::{
+    Bounds, Context, Div, DragMoveEvent, MouseButton, Stateful, canvas, div, prelude::*, px, rgb,
 };
+use librewave_core::{
+    Command, FaderGain, MixRoute, MixTarget, MixerGeneration, MixerRuntimeState, Snapshot, SourceId,
+};
+
+/// A transient pointer intent, never an authoritative or persisted mixer state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct FaderEdit {
+    pub(super) source: SourceId,
+    pub(super) target: MixTarget,
+    pub(super) fader: FaderGain,
+}
+
+impl FaderEdit {
+    pub(super) fn command(self, snapshot: &Snapshot) -> Option<Command> {
+        let controls = snapshot.mixer.profile.source(self.source)?.controls;
+        let route = match self.target {
+            MixTarget::Monitor => controls.monitor(),
+            MixTarget::Stream => controls.stream(),
+        };
+        if self.fader == route.fader() {
+            return None;
+        }
+        Some(Command::SetMixerRoute {
+            expected_generation: snapshot.mixer.generation(),
+            source: self.source,
+            target: self.target,
+            route: MixRoute::new(route.enabled(), self.fader),
+        })
+    }
+}
+
+#[derive(Clone)]
+struct FaderDrag {
+    source: SourceId,
+    target: MixTarget,
+}
 
 impl Shell {
     pub(super) fn mixer_channels(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -59,7 +94,7 @@ impl Shell {
                                     MixTarget::Monitor,
                                     controls.monitor(),
                                     snapshot.mixer.generation(),
-                                    self.pending,
+                                    self,
                                     cx,
                                 ))
                                 .child(fader_lane(
@@ -67,7 +102,7 @@ impl Shell {
                                     MixTarget::Stream,
                                     controls.stream(),
                                     snapshot.mixer.generation(),
-                                    self.pending,
+                                    self,
                                     cx,
                                 )),
                         ),
@@ -98,7 +133,7 @@ fn fader_lane(
     target: MixTarget,
     route: MixRoute,
     generation: MixerGeneration,
-    pending: bool,
+    shell: &Shell,
     cx: &mut Context<Shell>,
 ) -> impl IntoElement {
     let color = match target {
@@ -110,7 +145,23 @@ fn fader_lane(
         MixTarget::Monitor => "Monitor",
         MixTarget::Stream => "Stream",
     };
-    let track = fader_track(&key, source, target, route, generation, pending, color, cx);
+    let shown = shell
+        .queued_fader
+        .or(shell.in_flight_fader)
+        .filter(|edit| edit.source == source && edit.target == target)
+        .map_or(route.fader(), |edit| edit.fader);
+    let track = fader_track(
+        &key,
+        source,
+        target,
+        route,
+        generation,
+        shown,
+        !shell.pending || shell.in_flight_fader.is_some(),
+        color,
+        cx,
+    );
+    let pending = shell.pending;
 
     div()
         .w(px(72.))
@@ -121,7 +172,7 @@ fn fader_lane(
         .child(div().text_xs().text_color(rgb(color)).child(label))
         .child(mixer_button(
             &format!("{key}-reset"),
-            &format!("{:.1} dB", route.fader().decibels()),
+            &format!("{:.1} dB", shown.decibels()),
             route_position_command(
                 source,
                 target,
@@ -171,11 +222,12 @@ fn fader_track(
     target: MixTarget,
     route: MixRoute,
     generation: MixerGeneration,
-    pending: bool,
+    shown: FaderGain,
+    enabled: bool,
     color: u32,
     cx: &mut Context<Shell>,
 ) -> Stateful<Div> {
-    let position = fader_fraction(route.fader());
+    let position = fader_fraction(shown);
     let bounds = std::rc::Rc::new(std::cell::Cell::new(None::<Bounds<gpui::Pixels>>));
     let painted_bounds = std::rc::Rc::clone(&bounds);
     let mut track = div()
@@ -202,16 +254,31 @@ fn fader_track(
                 .w_full()
                 .h(px(10.))
                 .rounded(px(3.))
-                .bg(rgb(if pending { MUTED } else { INK })),
+                .bg(rgb(if enabled { INK } else { MUTED })),
         )
         .child(
             canvas(move |area, _, _| painted_bounds.set(Some(area)), |_, (), _, _| {})
                 .absolute()
                 .size_full(),
         );
-    if !pending {
+    if enabled {
         track = track
             .cursor_pointer()
+            .on_drag(FaderDrag { source, target }, |_, _, _, cx| cx.new(|_| gpui::Empty))
+            .on_drag_move(cx.listener(move |this, event: &DragMoveEvent<FaderDrag>, window, cx| {
+                let drag = event.drag(cx);
+                if drag.source != source || drag.target != target {
+                    return;
+                }
+                if let Some(fader) = fader_at_pixel(
+                    f32::from(event.event.position.y),
+                    f32::from(event.bounds.top()),
+                    f32::from(event.bounds.size.height),
+                ) {
+                    this.fader_window = Some(window.window_handle());
+                    this.send_fader(FaderEdit { source, target, fader }, cx);
+                }
+            }))
             .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
                 if let Some(command) =
                     route_key_command(source, target, route, generation, &event.keystroke.key)
@@ -222,26 +289,40 @@ fn fader_track(
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                    if let Some(area) = bounds.get() {
-                        let distance = f32::from(event.position.y - area.top()) - 5.;
-                        let height = f32::from(area.size.height) - 10.;
-                        if height > 0.
-                            && let Some(command) = route_position_command(
-                                source,
-                                target,
-                                route,
-                                generation,
-                                1. - distance / height,
-                            )
-                        {
-                            this.send(command, cx);
-                        }
+                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                    if let Some(area) = bounds.get()
+                        && let Some(fader) = fader_at_pixel(
+                            f32::from(event.position.y),
+                            f32::from(area.top()),
+                            f32::from(area.size.height),
+                        )
+                    {
+                        this.fader_window = Some(window.window_handle());
+                        this.send_fader(FaderEdit { source, target, fader }, cx);
                     }
                 }),
             );
     }
     track
+}
+
+fn fader_at_pixel(y: f32, top: f32, height: f32) -> Option<FaderGain> {
+    if !y.is_finite() || !top.is_finite() || !height.is_finite() || height <= 10. {
+        return None;
+    }
+    fader_from_fraction(1. - (y - top - 5.) / (height - 10.))
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn fader_from_fraction(fraction: f32) -> Option<FaderGain> {
+    if !fraction.is_finite() {
+        return None;
+    }
+    let minimum = FaderGain::MIN.half_decibel_steps();
+    let span = FaderGain::MAX.half_decibel_steps() - minimum;
+    // The clamped, rounded value is bounded by the exact fader interval.
+    let steps = (fraction.clamp(0., 1.) * f32::from(span)).round() as i16 + minimum;
+    FaderGain::from_half_decibel_steps(steps).ok()
 }
 
 pub(super) fn fader_fraction(fader: FaderGain) -> f32 {
@@ -280,14 +361,7 @@ pub(super) fn route_position_command(
     expected_generation: MixerGeneration,
     fraction: f32,
 ) -> Option<Command> {
-    if !fraction.is_finite() {
-        return None;
-    }
-    let minimum = FaderGain::MIN.half_decibel_steps();
-    let span = FaderGain::MAX.half_decibel_steps() - minimum;
-    // Clamping proves the rounded value fits the exact fader step interval.
-    let steps = (fraction.clamp(0., 1.) * f32::from(span)).round() as i16 + minimum;
-    let fader = FaderGain::from_half_decibel_steps(steps).ok()?;
+    let fader = fader_from_fraction(fraction)?;
     if fader == route.fader() {
         return None;
     }
@@ -352,4 +426,29 @@ pub(super) fn route_step_command(
         target,
         route: MixRoute::new(route.enabled(), fader),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pointer_geometry_covers_every_step_and_clamps_drag_beyond_the_track() {
+        for step in -120..=24 {
+            let fader = FaderGain::from_half_decibel_steps(step).expect("step");
+            let y = 105. + (1. - fader_fraction(fader)) * 190.;
+            assert_eq!(fader_at_pixel(y, 100., 200.), Some(fader));
+        }
+        assert_eq!(fader_at_pixel(-100., 100., 200.), Some(FaderGain::MAX));
+        assert_eq!(fader_at_pixel(1000., 100., 200.), Some(FaderGain::MIN));
+        for (y, top, height) in [
+            (f32::NAN, 0., 200.),
+            (1., f32::INFINITY, 200.),
+            (1., 0., f32::NAN),
+            (1., 0., 10.),
+            (1., 0., -1.),
+        ] {
+            assert!(fader_at_pixel(y, top, height).is_none());
+        }
+    }
 }

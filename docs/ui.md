@@ -39,10 +39,16 @@ successful write. A locked or unknown device cannot be changed. The
 microphone preamp and headphone hardware level are separate from desktop
 volume and software mixer levels.
 
-Each fader shows one source's saved level. Click its track to set the level, or
-select **+** or **−** for a 0.5 dB step. Select the displayed level to reset it to
-0 dB. **Mute** and **Unmute** apply only to that source in that mix. Setting or
+Each input has separate Monitor and Stream levels. Drag a fader or click its
+track to set the level. Select **+** or **−** for a 0.5 dB step. Select the
+displayed level to reset it to 0 dB. **Mute** and **Unmute** apply only to that source in that mix. Setting or
 resetting a level preserves its mute state.
+
+Dragging keeps one request in flight and only the latest pending pointer level.
+After the daemon acknowledges a request, the next request uses its new mixer
+generation and current mute state. A stale generation, disconnect, or command
+failure ends the gesture, cancels the pending level, and shows the error.
+Pointer previews are not saved until the daemon accepts the change.
 
 Focus a fader with the Tab key. Use the arrow keys for 0.5 dB steps, Home for
 -60 dB, End for +12 dB, and Enter for 0 dB. Each action sends one route
@@ -65,7 +71,7 @@ acceptance runs. GPUI tests check command mapping and state handling; they do
 not validate the current channel-strip view in a native Wayland or X11 window.
 Longer stability on the current startup and routing implementation also
 requires validation.
-The fader tracks support click and keyboard input. Drag interaction, linked
+The fader tracks support drag, click, and keyboard input. Linked
 faders, application-specific inputs, effects, and output selection remain work
 for later increments.
 
