@@ -3,17 +3,21 @@ use gpui::{
     rgb, size,
 };
 use librewave_core::{
-    Command, DeviceAdmissionSnapshot, DeviceGeneration, DeviceId, DeviceWriteAccess,
-    FixedPointValue, Snapshot, Wave3Control,
+    Command, ControlAccessState, DeviceAdmissionSnapshot, DeviceGeneration, DeviceId,
+    DeviceWriteAccess, FixedPointValue, Snapshot, Wave3Control,
 };
 use librewave_ipc::Response;
 use librewave_platform_linux::ipc::{Client, default_socket_path};
 
-const BACKGROUND: u32 = 0x000D_0F11;
-const PANEL: u32 = 0x0014_171A;
-const RAISED: u32 = 0x001A_1E22;
-const INK: u32 = 0x00F4_F5F6;
-const MUTED: u32 = 0x0099_A1AA;
+// Neutral planes keep status, source routing, and physical controls distinct.
+const BACKGROUND: u32 = 0x000A_0E13;
+const SIDEBAR: u32 = 0x000F_151C;
+const PANEL: u32 = 0x0013_1B23;
+const RAISED: u32 = 0x001B_2630;
+const BORDER: u32 = 0x0028_3540;
+const INK: u32 = 0x00F2_F6F8;
+const MUTED: u32 = 0x0095_A7B5;
+const ACCENT: u32 = 0x006B_DACB;
 const WARNING: u32 = 0x00E9_B872;
 
 /// Opens the optional desktop client.
@@ -23,10 +27,10 @@ const WARNING: u32 = 0x00E9_B872;
 /// Panics if GPUI cannot open its initial window.
 pub fn run() {
     gpui_platform::application().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(740.), px(680.)), cx);
+        let bounds = Bounds::centered(None, size(px(1080.), px(780.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(600.), px(540.))),
+            window_min_size: Some(size(px(850.), px(650.))),
             app_id: Some("dev.librewave.LibreWave".to_owned()),
             ..WindowOptions::default()
         };
@@ -91,32 +95,69 @@ impl Shell {
 impl Render for Shell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let device = self.snapshot.as_ref().and_then(|snapshot| snapshot.devices.first()).cloned();
-        let services = self.snapshot.as_ref().map(|snapshot| {
-            format!(
-                "PipeWire: {}  ·  WirePlumber: {}  ·  Mixer: inactive",
-                snapshot.audio.pipewire.status_word(),
-                snapshot.audio.wireplumber.status_word()
-            )
-        });
         div()
             .size_full()
             .bg(rgb(BACKGROUND))
             .text_color(rgb(INK))
-            .p(px(24.))
+            .flex()
+            .child(sidebar(device.is_some()))
+            .child(self.studio_content(device.as_ref(), cx))
+    }
+}
+
+impl Shell {
+    fn studio_content(
+        &self,
+        device: Option<&librewave_core::DeviceSnapshot>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let daemon_online = self.snapshot.is_some();
+        let services = self.snapshot.as_ref().map_or_else(
+            || "The daemon is unavailable".to_owned(),
+            |snapshot| {
+                format!(
+                    "PipeWire {}  ·  WirePlumber {}",
+                    snapshot.audio.pipewire.status_word(),
+                    snapshot.audio.wireplumber.status_word()
+                )
+            },
+        );
+        div()
+            .id("studio-content")
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_y_scroll()
+            .p(px(28.))
             .flex()
             .flex_col()
-            .gap(px(14.))
-            .child(div().text_2xl().child("LibreWave"))
+            .gap(px(20.))
             .child(
                 div()
-                    .text_sm()
-                    .text_color(rgb(MUTED))
-                    .child(services.unwrap_or_else(|| "Connecting to librewaved…".to_owned())),
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .child(div().text_2xl().child("Mixer"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(MUTED))
+                                    .child("Sources on the left. Destination mixes on the right."),
+                            ),
+                    )
+                    .child(
+                        button("refresh", if self.pending { "Working…" } else { "Refresh status" })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.send(Command::GetStatus, cx);
+                            })),
+                    ),
             )
-            .child(
-                button("refresh", if self.pending { "Working…" } else { "Refresh status" })
-                    .on_click(cx.listener(|this, _, _, cx| this.send(Command::GetStatus, cx))),
-            )
+            .child(service_panel(daemon_online, services))
             .when_some(self.error.clone(), |view, error| {
                 view.child(
                     div()
@@ -127,11 +168,10 @@ impl Render for Shell {
                         .child(error),
                 )
             })
-            .child(self.device_panel(device.as_ref(), cx))
+            .child(mixer_matrix())
+            .child(self.device_panel(device, cx))
     }
-}
 
-impl Shell {
     #[allow(clippy::too_many_lines)]
     fn device_panel(
         &self,
@@ -139,24 +179,44 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mut panel = div()
-            .flex_1()
-            .min_h_0()
-            .p(px(18.))
+            .w_full()
+            .p(px(20.))
             .rounded(px(10.))
             .bg(rgb(PANEL))
+            .border_1()
+            .border_color(rgb(BORDER))
             .flex()
             .flex_col()
-            .gap(px(10.));
+            .gap(px(12.));
         let Some(device) = device else {
-            return panel.child(div().text_color(rgb(MUTED)).child("No Wave:3 is available."));
+            return panel
+                .child(section_label("DEVICE"))
+                .child(div().text_color(rgb(MUTED)).child("No Wave:3 is available."));
         };
-        panel = panel.child(div().text_xl().child("Wave:3 hardware controls")).child(
-            div().text_sm().text_color(rgb(MUTED)).child(format!(
-                "Connection: {}  ·  Access: {}",
-                device.connection,
-                device.admission.control_access()
-            )),
-        );
+        panel = panel
+            .child(section_label("DEVICE"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_xl().child("Wave:3 hardware"))
+                    .child(status_badge(
+                        &device.admission.control_access().to_string(),
+                        if matches!(device.admission.control_access(), ControlAccessState::Writable)
+                        {
+                            ACCENT
+                        } else {
+                            WARNING
+                        },
+                    )),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(MUTED))
+                    .child(format!("Connection: {}", device.connection)),
+            );
         match &device.admission {
             DeviceAdmissionSnapshot::NotInspected => {
                 panel = panel.child(div().text_sm().text_color(rgb(MUTED)).child(
@@ -260,10 +320,13 @@ impl Shell {
         }
         let id = device.id;
         panel
-            .child(div().flex_1())
-            .child(div().text_xs().text_color(rgb(MUTED)).child(
-                "These are physical hardware values. Desktop and mixer volume remain separate.",
-            ))
+            .child(div().h(px(1.)).w_full().bg(rgb(BORDER)))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child("Physical hardware values. Desktop and mixer volume remain separate."),
+            )
             .child(
                 button("inspect", if self.pending { "Working…" } else { "Read controls" })
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -273,6 +336,153 @@ impl Shell {
     }
 }
 
+fn sidebar(device_available: bool) -> impl IntoElement {
+    div()
+        .w(px(210.))
+        .h_full()
+        .flex_none()
+        .bg(rgb(SIDEBAR))
+        .border_r_1()
+        .border_color(rgb(BORDER))
+        .p(px(22.))
+        .flex()
+        .flex_col()
+        .gap(px(20.))
+        .child(div().text_xl().child("LibreWave"))
+        .child(section_label("WORKSPACE"))
+        .child(
+            div()
+                .p(px(11.))
+                .rounded(px(8.))
+                .bg(rgb(RAISED))
+                .text_color(rgb(ACCENT))
+                .text_sm()
+                .child("Mixer"),
+        )
+        .child(section_label("HARDWARE"))
+        .child(div().text_sm().child(if device_available { "Wave:3" } else { "No Wave:3" }))
+        .child(div().flex_1())
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(MUTED))
+                .child("Hardware levels stay separate from desktop volume."),
+        )
+}
+
+fn service_panel(daemon_online: bool, services: String) -> impl IntoElement {
+    div()
+        .p(px(14.))
+        .rounded(px(9.))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(PANEL))
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.))
+                .child(div().text_sm().child(if daemon_online {
+                    "Audio engine waiting for production host"
+                } else {
+                    "Connect librewaved to see device state"
+                }))
+                .child(div().text_xs().text_color(rgb(MUTED)).child(services)),
+        )
+        .child(status_badge(if daemon_online { "INACTIVE" } else { "OFFLINE" }, WARNING))
+}
+
+fn section_label(label: &'static str) -> impl IntoElement {
+    div().text_xs().text_color(rgb(MUTED)).child(label)
+}
+
+fn status_badge(label: &str, color: u32) -> impl IntoElement {
+    div()
+        .px(px(9.))
+        .py(px(5.))
+        .rounded(px(5.))
+        .bg(rgb(RAISED))
+        .text_xs()
+        .text_color(rgb(color))
+        .child(label.to_owned())
+}
+
+fn mixer_matrix() -> impl IntoElement {
+    div()
+        .w_full()
+        .rounded(px(10.))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(PANEL))
+        .p(px(18.))
+        .flex()
+        .flex_col()
+        .gap(px(13.))
+        .child(section_label("SOURCE ROUTING"))
+        .child(
+            div()
+                .flex()
+                .gap(px(12.))
+                .child(matrix_cell("SOURCE", true))
+                .child(matrix_cell("MONITOR MIX", false))
+                .child(matrix_cell("STREAM MIX", false)),
+        )
+        .child(matrix_row("Microphone", "Wave:3 capture"))
+        .child(matrix_row("System", "Desktop audio"))
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(MUTED))
+                .child("Routing and live meters become available when the audio host is ready."),
+        )
+}
+
+fn matrix_cell(label: &'static str, source: bool) -> impl IntoElement {
+    div()
+        .flex_1()
+        .min_w_0()
+        .text_xs()
+        .text_color(rgb(if source { INK } else { MUTED }))
+        .child(label)
+}
+
+fn matrix_row(source: &'static str, detail: &'static str) -> impl IntoElement {
+    div()
+        .flex()
+        .gap(px(12.))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .p(px(11.))
+                .rounded(px(7.))
+                .bg(rgb(RAISED))
+                .flex()
+                .flex_col()
+                .gap(px(3.))
+                .child(div().text_sm().child(source))
+                .child(div().text_xs().text_color(rgb(MUTED)).child(detail)),
+        )
+        .child(matrix_unavailable())
+        .child(matrix_unavailable())
+}
+
+fn matrix_unavailable() -> impl IntoElement {
+    div()
+        .flex_1()
+        .min_w_0()
+        .p(px(11.))
+        .rounded(px(7.))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .text_xs()
+        .text_color(rgb(MUTED))
+        .child("Unavailable")
+}
+
 fn button(id: &str, label: &str) -> Stateful<Div> {
     div()
         .id(id.to_owned())
@@ -280,7 +490,9 @@ fn button(id: &str, label: &str) -> Stateful<Div> {
         .py(px(8.))
         .rounded(px(7.))
         .bg(rgb(RAISED))
-        .hover(|style| style.bg(rgb(0x002B_3035)))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .hover(|style| style.bg(rgb(0x002B_3A45)))
         .cursor_pointer()
         .text_sm()
         .child(label.to_owned())

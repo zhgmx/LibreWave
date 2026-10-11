@@ -18,6 +18,13 @@ development build does not start it automatically.
 The application shows a connection error if it cannot reach the daemon. It
 does not read the device configuration when the window opens.
 
+The main view places sources on the left and destination mixes on the right.
+This follows the horizontal matrix used by [Wave Link 3](https://www.elgato.com/us/en/s/wave-link-app).
+The older Wave Link 2 interface used channel strips. LibreWave shows its
+Microphone and System rows as unavailable until the production audio host
+provides real routes and meters. The device panel below the matrix shows only
+state received from the daemon. It does not invent meter or route values.
+
 Select **Read controls** to open the daemon's device connection and read the
 Wave:3 configuration. This command can also restore hardware values that
 LibreWave saved earlier. The application shows the admitted API version,
@@ -36,6 +43,7 @@ live meters or change software routes. Its hardware controls have not
 passed physical write validation on the reference Wave:3. Do not treat an
 offline build or test result as a live hardware test.
 
-The Linux application uses upstream Zed GPUI and `gpui_platform` at
-commit `e17dc4f9d50db73a458b64dcce50ecd4878b98a3`, with Wayland and X11
-backends. The GPUI feature remains disabled in the default workspace build.
+The Linux application uses upstream Zed GPUI and `gpui_platform` from
+Zed tag `v0.233.9`, commit `236e6ddf54e0763d0343f4d3e369d2ae00fe9670`,
+with Wayland and X11 backends. The GPUI feature remains disabled in the
+default workspace build.

@@ -63,7 +63,7 @@ Exit condition: the CLI can configure and observe the complete mixer while recov
 
 ## Milestone 6: GPUI application
 
-- Pin GPUI to Zed v1.15.0 commit `e17dc4f9d50db73a458b64dcce50ecd4878b98a3`.
+- Pin GPUI to the tested upstream Zed revision recorded in [GPUI application](ui.md).
 - Build an original, modern channel-strip interface that follows the established Wave Link mental model.
 - Keep complete command parity with `librewavectl`.
 - Test Wayland, X11, keyboard use, accessible labels, scaling, and reduced motion.
