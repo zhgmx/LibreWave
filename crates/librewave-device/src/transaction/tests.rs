@@ -1,6 +1,8 @@
 use super::*;
 use crate::probe_wave3;
-use librewave_protocol::{ApiVersion, VolumeSelect, Wave3GainDb};
+use librewave_protocol::{
+    ApiVersion, VolumeSelect, Wave3GainDb, Wave3HeadphoneDb, Wave3MonitorPercent,
+};
 use std::collections::VecDeque;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -713,4 +715,105 @@ fn changing_knob_target_writes_only_its_byte_and_keeps_fractional_physical_gain(
     );
     assert!(matches!(&transport.events[1], Event::Write { payload, .. } if payload == &changed));
     assert_eq!(transport.events.len(), 3);
+}
+
+// Expected wire bytes are authored independently of apply_control. Every
+// allowlisted semantic command must preserve the complete unrelated baseline.
+fn control_cases() -> [(Wave3ControlChange, usize, &'static [u8]); 11] {
+    [
+        (gain_change(), 0, &[0, 4]),
+        (Wave3ControlChange::MicrophoneMute(true), 4, &[1]),
+        (Wave3ControlChange::Clipguard(true), 5, &[1]),
+        (Wave3ControlChange::Lowcut(true), 6, &[1]),
+        (
+            Wave3ControlChange::HeadphoneVolume(
+                Wave3HeadphoneDb::from_raw_q8_8(-256).expect("level"),
+            ),
+            7,
+            &[0, 255],
+        ),
+        (Wave3ControlChange::HeadphoneMute(true), 9, &[1]),
+        (
+            Wave3ControlChange::DirectMonitor(
+                Wave3MonitorPercent::from_raw_q8_8(25_600).expect("balance"),
+            ),
+            10,
+            &[0, 100],
+        ),
+        (Wave3ControlChange::VolumeSelect(VolumeSelect::Mix), 12, &[3]),
+        (Wave3ControlChange::AllLedsOff(true), 13, &[1]),
+        (Wave3ControlChange::LedsFlip(true), 14, &[1]),
+        (Wave3ControlChange::GainLock(true), 15, &[1]),
+    ]
+}
+
+#[test]
+fn every_control_preserves_unrelated_bytes_and_restores_after_each_failure_class() {
+    for api in [ApiVersion::new(5, 3), ApiVersion::new(5, 4)] {
+        for (change, offset, bytes) in control_cases() {
+            // Fractional physical gain must survive all other control writes.
+            let mut original = baseline();
+            original[..2].copy_from_slice(&4_726i16.to_le_bytes());
+            let mut requested = original;
+            requested[offset..offset + bytes.len()].copy_from_slice(bytes);
+            for failure in 0..4 {
+                let mut transport = FakeTransport::with_probe(api, original);
+                let mut session = transport.admit(7);
+                let expected = *session.config();
+                transport.read(original);
+                match failure {
+                    0 => {
+                        transport.writes.push_back(Ok(16));
+                        transport.read(requested);
+                    }
+                    1 => transport.writes.extend([Ok(15), Ok(16)]),
+                    2 => transport.writes.extend([Err(TransportError::TimedOut), Ok(16)]),
+                    _ => {
+                        transport.writes.extend([Ok(16), Ok(16)]);
+                        let mut mismatch = requested;
+                        mismatch[2] ^= 1;
+                        transport.read(mismatch);
+                    }
+                }
+                if failure != 0 {
+                    transport.read(original);
+                }
+                let outcome = session.transact_control(&mut transport, expected, change);
+                if failure == 0 {
+                    assert!(
+                        matches!(outcome, TransactionOutcome::Applied { .. }),
+                        "{api:?} {change:?}: {outcome:?}"
+                    );
+                    assert_eq!(session.config().as_bytes(), &requested);
+                } else {
+                    assert!(
+                        matches!(outcome, TransactionOutcome::Failed {
+                        restoration: RestorationOutcome { write: Ok(()), verification: Ok(config) }, ..
+                    } if config == expected),
+                        "{api:?} {change:?}: {outcome:?}"
+                    );
+                    assert_eq!(session.config(), &expected);
+                }
+                let writes: Vec<_> = transport
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        Event::Write { payload, timeout, .. } => {
+                            assert_eq!(*timeout, CONTROL_TRANSFER_TIMEOUT);
+                            Some(payload.as_slice())
+                        }
+                        Event::Read { .. } => None,
+                    })
+                    .collect();
+                let expected_writes = if failure == 0 {
+                    vec![requested.as_slice()]
+                } else {
+                    vec![requested.as_slice(), original.as_slice()]
+                };
+                assert_eq!(writes, expected_writes, "{api:?} {change:?}");
+                assert_eq!(session.write_state(), Wave3WriteState::Ready);
+                assert!(transport.reads.is_empty() && transport.writes.is_empty());
+            }
+        }
+    }
 }
