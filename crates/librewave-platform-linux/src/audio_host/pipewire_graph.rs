@@ -1016,7 +1016,7 @@ mod tests {
                 fs::create_dir_all(&runtime).expect("create private PipeWire runtime directory");
                 let mut config_text = server_config(quantum);
                 if metadata {
-                    config_text.push_str("\ncontext.objects = [ { factory = metadata args = { metadata.name = defaults } } ]\n");
+                    config_text.push_str("\ncontext.objects = [ { factory = metadata args = { metadata.name = default } } ]\n");
                 }
                 fs::write(config.join("proof-server.conf"), config_text)
                     .expect("write private PipeWire server config");
@@ -1237,7 +1237,7 @@ context.modules = [
                 .command("pw-metadata")
                 .args([
                     "-n",
-                    "defaults",
+                    "default",
                     "0",
                     "default.configured.audio.source",
                     r#"{"name":"new-user-choice"}"#,

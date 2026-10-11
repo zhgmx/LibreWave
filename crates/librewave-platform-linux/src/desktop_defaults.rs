@@ -168,7 +168,7 @@ impl MetadataClient {
                     && global
                         .props
                         .as_ref()
-                        .is_some_and(|props| props.get("metadata.name") == Some("defaults"))
+                        .is_some_and(|props| props.get("metadata.name") == Some("default"))
                 {
                     globals.borrow_mut().push(global.to_owned());
                 }
