@@ -388,10 +388,10 @@ impl ComposedAudioHost {
     /// Returns the first stopped worker, callback fault, bridge fault, or
     /// progress timeout.
     pub fn poll(&mut self) -> Result<(), LinuxAudioError> {
-        if self.control.as_ref().is_none_or(|control| control.state() != BridgeState::Active) {
-            return Err(attempt_error("progress", "attempt is not active"));
+        let state = self.graph_step("progress")?;
+        if state != BridgeState::Active {
+            return Err(attempt_error("progress", format!("attempt is in {state:?}")));
         }
-        self.graph_step("progress")?;
         let now = Instant::now();
         if let Some(capture) = self.capture.as_mut()
             && let Some(progress) = capture.try_progress()

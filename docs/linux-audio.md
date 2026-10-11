@@ -87,6 +87,8 @@ The physical Wave capture and playback PCMs are not desktop endpoints. LibreWave
 
 The host connects to the user's existing `pipewire-0` instance and completes a registry round trip. It checks the admitted candidate's exact ALSA card number. A Device must have the Wave:3 vendor and product values, and its `api.alsa.card` value must identify that card. A Node matches through the card component of `api.alsa.path`. Nodes do not need vendor or product properties. The host binds registry objects and reads their complete properties; registry global properties alone do not carry the card identity on the reference desktop. Startup fails while any matching Device or Node remains visible.
 
+Each physical-object check uses a new PipeWire connection. The check binds Node and Device proxies and reads their complete properties. It releases the proxies and connection after the check. This lifetime isolates asynchronous proxy errors from later ownership checks.
+
 Endpoint plans come only from `librewave-core`. The default production adapter returns `EndpointStreamTransportUnavailable` before it opens ALSA or creates an endpoint, and it records the matching `GraphNotReady` reason. The opt-in composed host uses the same endpoint allowlist and one graph callback. It reports the graph ready only after both workers park, the bridge activates, and both workers resume. This path is disabled by default.
 
 ## PipeWire graph seam

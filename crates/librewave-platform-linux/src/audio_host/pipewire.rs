@@ -120,9 +120,12 @@ impl PipeWireFacade for RealPipeWireFacade {
         let [card] = candidate.alsa_cards.as_slice() else {
             return Err(LinuxAudioError::AmbiguousAlsaCard);
         };
-        if self.client.is_none() {
-            self.client = Some(PipeWireClient::connect()?);
-        }
+        // Each inspection binds and drops transient Node and Device proxies.
+        // Their destroy replies can arrive after the inspection roundtrip.
+        // Disconnect before the next inspection so an old proxy error cannot
+        // be mistaken for a failure of the current physical ownership check.
+        self.client = None;
+        self.client = Some(PipeWireClient::connect()?);
         let exposed = self
             .client
             .as_ref()

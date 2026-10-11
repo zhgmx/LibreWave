@@ -1562,24 +1562,26 @@ context.modules = [
                 }],
             };
             let mut facade = crate::audio_host::pipewire::RealPipeWireFacade::default();
-            assert_eq!(
-                crate::audio_host::PipeWireFacade::verify_physical_nodes_hidden(
-                    &mut facade,
-                    &candidate,
-                ),
-                Err(crate::audio_host::LinuxAudioError::PhysicalNodeExposed),
-            );
+            for _ in 0..32 {
+                assert_eq!(
+                    crate::audio_host::PipeWireFacade::verify_physical_nodes_hidden(
+                        &mut facade,
+                        &candidate,
+                    ),
+                    Err(crate::audio_host::LinuxAudioError::PhysicalNodeExposed),
+                );
+            }
             drop(physical);
             roundtrip(&main_loop, &core).expect("remove test node");
-            drop(facade);
-            let mut facade = crate::audio_host::pipewire::RealPipeWireFacade::default();
-            assert_eq!(
-                crate::audio_host::PipeWireFacade::verify_physical_nodes_hidden(
-                    &mut facade,
-                    &candidate,
-                ),
-                Ok(()),
-            );
+            for _ in 0..32 {
+                assert_eq!(
+                    crate::audio_host::PipeWireFacade::verify_physical_nodes_hidden(
+                        &mut facade,
+                        &candidate,
+                    ),
+                    Ok(()),
+                );
+            }
         }
     }
 }
