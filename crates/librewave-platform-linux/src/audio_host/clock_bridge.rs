@@ -1250,6 +1250,76 @@ impl fmt::Debug for GraphClockProcessor {
 }
 
 impl GraphClockProcessor {
+    /// Advances the graph clock while both physical workers are parked.
+    ///
+    /// `PipeWire` continues to call an active filter while the control owner
+    /// checks the final startup guards. No mixer or FIFO work is allowed at
+    /// that boundary, but its clock position must remain continuous when the
+    /// attempt becomes active.
+    pub(super) fn try_silence_boundary(
+        &mut self,
+        observation: GraphClockObservation,
+        outputs: &mut GraphOutputBuffers<'_>,
+    ) -> Result<bool, BridgeError> {
+        let _activity = ActivityGuard::enter(&self.shared.graph_in_flight);
+        let state = self.shared.state();
+        if matches!(state, BridgeState::Quiescing | BridgeState::Stopped) {
+            silence_outputs(outputs);
+            return Ok(true);
+        }
+        let state = attempt_state(&self.shared)?;
+        if !matches!(state, BridgeState::Primed | BridgeState::PrimingCheck) {
+            return Ok(false);
+        }
+        let clock = observation.clock();
+        let quantum = observation.quantum_frames();
+        if quantum == 0 || quantum > self.maximum_quantum {
+            return fault(
+                &self.shared,
+                BridgeError::InvalidQuantum { actual: quantum, maximum: self.maximum_quantum },
+            );
+        }
+        if let Some(expected) = self.fixed_quantum
+            && expected != quantum
+        {
+            return fault(
+                &self.shared,
+                BridgeError::FixedQuantumChanged { expected, actual: quantum },
+            );
+        }
+        validate_observation_epoch(&self.shared, BridgeClockDomain::PipeWireGraph, clock)
+            .map_err(|error| mark_fault(&self.shared, error))?;
+        validate_clock_progress(
+            BridgeClockDomain::PipeWireGraph,
+            self.last_observation,
+            clock,
+            true,
+        )
+        .map_err(|error| mark_fault(&self.shared, error))?;
+        if let Some(previous) = self.last_observation {
+            let expected = checked_end(
+                BridgeClockDomain::PipeWireGraph,
+                previous.frame_position().get(),
+                quantum,
+            )
+            .map_err(|error| mark_fault(&self.shared, error))?;
+            if clock.frame_position().get() != expected {
+                return fault(
+                    &self.shared,
+                    BridgeError::Discontinuity {
+                        domain: BridgeClockDomain::PipeWireGraph,
+                        expected,
+                        actual: clock.frame_position().get(),
+                    },
+                );
+            }
+        }
+        self.fixed_quantum.get_or_insert(quantum);
+        self.last_observation = Some(clock);
+        silence_outputs(outputs);
+        Ok(true)
+    }
+
     /// Processes one graph observation according to the attempt state.
     ///
     /// # Errors
@@ -1530,6 +1600,19 @@ impl GraphClockProcessor {
                 .shared
                 .transition(BridgeState::PlaybackPriming, BridgeState::PlaybackFilterDelay);
         }
+    }
+}
+
+fn silence_outputs(outputs: &mut GraphOutputBuffers<'_>) {
+    for channel in [
+        &mut outputs.microphone_left,
+        &mut outputs.microphone_right,
+        &mut outputs.monitor_left,
+        &mut outputs.monitor_right,
+        &mut outputs.stream_left,
+        &mut outputs.stream_right,
+    ] {
+        channel.fill(0.0);
     }
 }
 

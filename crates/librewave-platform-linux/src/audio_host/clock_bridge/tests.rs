@@ -592,6 +592,8 @@ pub(in crate::audio_host) struct PrimedWorkerFixture {
     pub playback_geometry: super::super::pcm::PhysicalPcmParameters,
     pub capture_time: u64,
     pub playback_time: u64,
+    pub graph_position: u64,
+    pub graph_time: u64,
 }
 
 pub(in crate::audio_host) fn primed_worker_fixture() -> PrimedWorkerFixture {
@@ -603,6 +605,8 @@ pub(in crate::audio_host) fn primed_worker_fixture() -> PrimedWorkerFixture {
         playback_geometry: simulation_playback_geometry(),
         capture_time: positions.capture_time,
         playback_time: positions.playback_time,
+        graph_position: positions.graph,
+        graph_time: positions.graph_time,
     }
 }
 
@@ -853,6 +857,65 @@ fn startup_is_state_driven_and_ready_requires_both_measured_clocks() {
         active_cycle(&mut parts, &mut positions, 0.25, &mut output, &mut submitter);
     assert_eq!(graph.delivery, GraphBoundaryDelivery::Delivered);
     assert_eq!(playback.delivery, PlaybackBoundaryDelivery::SubmittedActive);
+}
+
+#[test]
+fn parked_graph_clock_stays_continuous_without_mixer_or_fifo_work() {
+    let mut parts = simulation_parts();
+    let mut positions = prime(&mut parts);
+    let capture_fill = parts.graph.capture_consumer.available_frames().expect("capture fill");
+    let playback_fill = parts.playback.consumer.available_frames().expect("playback fill");
+    let period = SIMULATION_PLAYBACK_PERIOD;
+    let mut output = OutputStorage::new();
+    for _ in 0..3 {
+        assert!(
+            parts
+                .graph
+                .try_silence_boundary(
+                    graph_observation(positions.graph, positions.graph_time, period),
+                    &mut output.buffers(period),
+                )
+                .expect("parked graph boundary")
+        );
+        positions.graph += period as u64;
+        positions.graph_time += scaled_frame_time(period, 0);
+    }
+    assert_eq!(parts.graph.capture_consumer.available_frames(), Ok(capture_fill));
+    assert_eq!(parts.playback.consumer.available_frames(), Ok(playback_fill));
+    assert_eq!(parts.control.state(), BridgeState::Primed);
+    parts.control.activate().expect("activate after parked boundaries");
+    assert!(
+        !parts
+            .graph
+            .try_silence_boundary(
+                graph_observation(positions.graph, positions.graph_time, period),
+                &mut output.buffers(period),
+            )
+            .expect("active boundary must reach the mixer")
+    );
+    let mut submitter = ExactSubmitter::new(period);
+    let (graph, _) = active_cycle(&mut parts, &mut positions, 0.25, &mut output, &mut submitter);
+    assert_eq!(graph.delivery, GraphBoundaryDelivery::Delivered);
+}
+
+#[test]
+fn parked_graph_rejects_a_position_gap() {
+    let mut parts = simulation_parts();
+    let positions = prime(&mut parts);
+    let expected = positions.graph;
+    let mut output = OutputStorage::new();
+    assert_eq!(
+        parts.graph.try_silence_boundary(
+            graph_observation(expected + 1, positions.graph_time, SIMULATION_PLAYBACK_PERIOD,),
+            &mut output.buffers(SIMULATION_PLAYBACK_PERIOD),
+        ),
+        Err(BridgeError::Discontinuity {
+            domain: BridgeClockDomain::PipeWireGraph,
+            expected,
+            actual: expected + 1,
+        })
+    );
+    assert_eq!(parts.control.state(), BridgeState::Faulted);
 }
 
 #[test]
