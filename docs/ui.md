@@ -20,12 +20,12 @@ Select **Stop and restore** to release audio and restore desktop ownership. Clos
 
 For device and mixer development without an installation, run `cargo run -p librewaved` separately. The application checks status every two seconds and removes old status after an unexpected disconnect. It shows a new snapshot when the daemon becomes available again. Opening the window does not read hardware controls. `LIBREWAVE_SOCKET` selects a development IPC socket; installed service lifecycle controls use the normal session socket.
 
-The main view places sources on the left and destination mixes on the right.
-This follows the horizontal matrix used by [Wave Link 3](https://www.elgato.com/us/en/s/wave-link-app).
-The older Wave Link 2 interface used channel strips. LibreWave shows the
-Microphone and System routes from the daemon's desired mixer profile. The
-runtime badge shows whether the audio host and mixer engine are connected.
-The device panel below the matrix shows only state received from the daemon.
+The main view uses channel strips. Each input has paired vertical Monitor and
+Stream faders. Dark neutral surfaces keep the mint Monitor controls and blue
+Stream controls distinct. LibreWave shows the Microphone and System routes
+from the daemon's desired mixer profile. The runtime badge shows whether the
+audio host and mixer engine are connected. The device panel below the channel
+strips shows only state received from the daemon.
 The application does not invent meter values.
 
 Select **Read controls** to open the daemon's device connection and read the
@@ -39,10 +39,15 @@ successful write. A locked or unknown device cannot be changed. The
 microphone preamp and headphone hardware level are separate from desktop
 volume and software mixer levels.
 
-Each Monitor Mix and Stream Mix cell shows one source's saved on/off state and
-fader level. Select **Turn on**, **Turn off**, **+**, or **−** to send one route
-change with the current mixer generation. A fader step is 0.5 dB. The daemon
-returns the complete mixer snapshot after it saves the change. Routes can be
+Each fader shows one source's saved level. Click its track to set the level, or
+select **+** or **−** for a 0.5 dB step. Select the displayed level to reset it to
+0 dB. **Mute** and **Unmute** apply only to that source in that mix. Setting or
+resetting a level preserves its mute state.
+
+Focus a fader with the Tab key. Use the arrow keys for 0.5 dB steps, Home for
+-60 dB, End for +12 dB, and Enter for 0 dB. Each action sends one route
+change with the current mixer generation. The daemon returns the complete mixer
+snapshot after it saves the change. Routes can be
 saved while the audio host is inactive; they apply when an opt-in audio attempt
 becomes active. A stale generation error is shown until the next action, while
 status polling obtains the current profile.
@@ -54,13 +59,15 @@ a previously accepted audio intent. Experimental start reports ready audio only
 after the host owns the audio path. Live meter values are not
 published over IPC. Physical write validation is limited to the Low-cut control
 on Wave:3 API 5.4. Other hardware controls still require validation.
-The new service launch, default restoration, restart recovery, and hotplug
-lifecycle remain unverified on physical hardware. GPUI tests check state handling;
-they do not validate a native Wayland or X11 window.
+Service launch, default restoration, service restart, and removal checks have
+passed on the reference Wave:3. Reconnect, sleep, and login recovery still need
+acceptance runs. GPUI tests check command mapping and state handling; they do
+not validate the current channel-strip view in a native Wayland or X11 window.
 Longer stability on the current startup and routing implementation also
 requires validation.
-The new lifecycle needs a monitoring test that separates software microphone
-monitoring from direct device monitoring.
+The fader tracks support click and keyboard input. Drag interaction, linked
+faders, application-specific inputs, effects, and output selection remain work
+for later increments.
 
 The Linux application uses upstream Zed GPUI and `gpui_platform` from
 Zed tag `v0.233.9`, commit `236e6ddf54e0763d0343f4d3e369d2ae00fe9670`,

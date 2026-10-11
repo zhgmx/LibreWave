@@ -1,26 +1,35 @@
+mod mixer;
+
+#[cfg(test)]
+use mixer::{
+    fader_fraction, route_key_command, route_position_command, route_step_command,
+    route_toggle_command,
+};
+
 use gpui::{
     App, Bounds, Context, Div, Stateful, Window, WindowBounds, WindowOptions, div, prelude::*, px,
     rgb, size,
 };
 use librewave_core::{
     Command, ControlAccessState, DeviceAdmissionSnapshot, DeviceGeneration, DeviceId,
-    DeviceWriteAccess, FaderGain, FixedPointValue, MeterAvailability, MixRoute, MixTarget,
-    MixerGeneration, MixerRuntimeState, Snapshot, SourceId, Wave3Control,
+    DeviceWriteAccess, FixedPointValue, MeterAvailability, MixerRuntimeState, Snapshot,
+    Wave3Control,
 };
 use librewave_ipc::{IpcErrorKind, Response};
 use librewave_platform_linux::ipc::{Client, ClientError, configured_socket_path};
 use std::time::Duration;
 
-// Neutral planes keep status, source routing, and physical controls distinct.
-const BACKGROUND: u32 = 0x000A_0E13;
-const SIDEBAR: u32 = 0x000F_151C;
-const PANEL: u32 = 0x0013_1B23;
-const RAISED: u32 = 0x001B_2630;
-const BORDER: u32 = 0x0028_3540;
-const INK: u32 = 0x00F2_F6F8;
-const MUTED: u32 = 0x0095_A7B5;
-const ACCENT: u32 = 0x006B_DACB;
-const WARNING: u32 = 0x00E9_B872;
+// Neutral surfaces and semantic mix colors from the user's LibreWave mock.
+const BACKGROUND: u32 = 0x000A_0A0A;
+const SIDEBAR: u32 = 0x0011_1111;
+const PANEL: u32 = 0x0014_1414;
+const RAISED: u32 = 0x001F_1F1F;
+const BORDER: u32 = 0x0029_2929;
+const INK: u32 = 0x00ED_EDED;
+const MUTED: u32 = 0x00A1_A1A1;
+const ACCENT: u32 = 0x0082_DEB1;
+const STREAM: u32 = 0x007F_C5EB;
+const WARNING: u32 = 0x00FF_8C91;
 const STATUS_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Opens the optional desktop client.
@@ -378,7 +387,7 @@ impl Shell {
                                 div()
                                     .text_sm()
                                     .text_color(rgb(MUTED))
-                                    .child("Sources on the left. Destination mixes on the right."),
+                                    .child("Independent Monitor and Stream levels for each input."),
                             ),
                     )
                     .child(
@@ -410,7 +419,7 @@ impl Shell {
                         .child(error),
                 )
             })
-            .child(self.mixer_matrix(cx))
+            .child(self.mixer_channels(cx))
             .child(self.device_panel(device, cx))
     }
 
@@ -671,200 +680,6 @@ fn status_badge(label: &str, color: u32) -> impl IntoElement {
         .child(label.to_owned())
 }
 
-impl Shell {
-    fn mixer_matrix(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut matrix = div()
-            .w_full()
-            .rounded(px(10.))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(PANEL))
-            .p(px(18.))
-            .flex()
-            .flex_col()
-            .gap(px(13.))
-            .child(section_label("SOURCE ROUTING"))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(12.))
-                    .child(matrix_cell("SOURCE", true))
-                    .child(matrix_cell("MONITOR MIX", false))
-                    .child(matrix_cell("STREAM MIX", false)),
-            );
-        if let Some(snapshot) = &self.snapshot {
-            let generation = snapshot.mixer.generation();
-            for source in &snapshot.mixer.profile.sources {
-                let controls = source.controls;
-                let id = controls.source();
-                matrix = matrix.child(
-                    div()
-                        .flex()
-                        .gap(px(12.))
-                        .child(source_cell(&source.name, &source.role.to_string()))
-                        .child(route_cell(
-                            id,
-                            MixTarget::Monitor,
-                            controls.monitor(),
-                            generation,
-                            self.pending,
-                            cx,
-                        ))
-                        .child(route_cell(
-                            id,
-                            MixTarget::Stream,
-                            controls.stream(),
-                            generation,
-                            self.pending,
-                            cx,
-                        )),
-                );
-            }
-            let note = match snapshot.mixer.runtime {
-                MixerRuntimeState::Active => {
-                    "Saved route changes apply at the next graph boundary. Live meters are not published yet."
-                }
-                MixerRuntimeState::Inactive { .. } => {
-                    "Routes are saved now and apply when the audio host is active. Live meters are unavailable."
-                }
-            };
-            matrix = matrix.child(div().text_xs().text_color(rgb(MUTED)).child(note));
-        } else {
-            matrix = matrix.child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(MUTED))
-                    .child("Connect to the daemon to see software routes."),
-            );
-        }
-        matrix
-    }
-}
-
-fn matrix_cell(label: &'static str, source: bool) -> impl IntoElement {
-    div()
-        .flex_1()
-        .min_w_0()
-        .text_xs()
-        .text_color(rgb(if source { INK } else { MUTED }))
-        .child(label)
-}
-
-fn source_cell(source: &str, detail: &str) -> impl IntoElement {
-    div()
-        .flex_1()
-        .min_w_0()
-        .p(px(11.))
-        .rounded(px(7.))
-        .bg(rgb(RAISED))
-        .flex()
-        .flex_col()
-        .gap(px(3.))
-        .child(div().text_sm().child(source.to_owned()))
-        .child(div().text_xs().text_color(rgb(MUTED)).child(detail.to_owned()))
-}
-
-fn route_cell(
-    source: SourceId,
-    target: MixTarget,
-    route: MixRoute,
-    generation: MixerGeneration,
-    pending: bool,
-    cx: &mut Context<Shell>,
-) -> impl IntoElement {
-    let toggle = route_toggle_command(source, target, route, generation);
-    let down = route_step_command(source, target, route, generation, -1);
-    let up = route_step_command(source, target, route, generation, 1);
-    div()
-        .flex_1()
-        .min_w_0()
-        .p(px(11.))
-        .rounded(px(7.))
-        .border_1()
-        .border_color(rgb(BORDER))
-        .flex()
-        .flex_col()
-        .gap(px(5.))
-        .child(div().text_sm().child(format!(
-            "{}  ·  {:.1} dB",
-            if route.enabled() { "On" } else { "Off" },
-            route.fader().decibels(),
-        )))
-        .child(
-            div()
-                .flex()
-                .gap(px(5.))
-                .child(mixer_button(
-                    &format!("route-{}-{target}-toggle", source.get()),
-                    if route.enabled() { "Turn off" } else { "Turn on" },
-                    Some(toggle),
-                    pending,
-                    cx,
-                ))
-                .child(mixer_button(
-                    &format!("route-{}-{target}-down", source.get()),
-                    "−",
-                    down,
-                    pending,
-                    cx,
-                ))
-                .child(mixer_button(
-                    &format!("route-{}-{target}-up", source.get()),
-                    "+",
-                    up,
-                    pending,
-                    cx,
-                )),
-        )
-}
-
-fn mixer_button(
-    key: &str,
-    label: &str,
-    command: Option<Command>,
-    pending: bool,
-    cx: &mut Context<Shell>,
-) -> Stateful<Div> {
-    let mut element = button(key, label);
-    if !pending && let Some(command) = command {
-        element = element.on_click(cx.listener(move |this, _, _, cx| this.send(command, cx)));
-    } else {
-        element = element.text_color(rgb(MUTED));
-    }
-    element
-}
-
-fn route_toggle_command(
-    source: SourceId,
-    target: MixTarget,
-    route: MixRoute,
-    expected_generation: MixerGeneration,
-) -> Command {
-    Command::SetMixerRoute {
-        expected_generation,
-        source,
-        target,
-        route: MixRoute::new(!route.enabled(), route.fader()),
-    }
-}
-
-fn route_step_command(
-    source: SourceId,
-    target: MixTarget,
-    route: MixRoute,
-    expected_generation: MixerGeneration,
-    delta: i16,
-) -> Option<Command> {
-    let steps = route.fader().half_decibel_steps().checked_add(delta)?;
-    let fader = FaderGain::from_half_decibel_steps(steps).ok()?;
-    Some(Command::SetMixerRoute {
-        expected_generation,
-        source,
-        target,
-        route: MixRoute::new(route.enabled(), fader),
-    })
-}
-
 fn button(id: &str, label: &str) -> Stateful<Div> {
     div()
         .id(id.to_owned())
@@ -874,7 +689,7 @@ fn button(id: &str, label: &str) -> Stateful<Div> {
         .bg(rgb(RAISED))
         .border_1()
         .border_color(rgb(BORDER))
-        .hover(|style| style.bg(rgb(0x002B_3A45)))
+        .hover(|style| style.bg(rgb(0x0026_2626)))
         .cursor_pointer()
         .text_sm()
         .child(label.to_owned())
@@ -985,6 +800,7 @@ fn stepped(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use librewave_core::{FaderGain, MixRoute, MixTarget, MixerGeneration, MixerRuntimeState};
     use librewave_core::{MixerProfile, MixerSnapshot, SYSTEM_SOURCE_ID};
     use librewave_ipc::IpcError;
     use std::path::PathBuf;
@@ -1098,6 +914,70 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn fader_positions_round_trip_every_step_and_preserve_muted_route_identity() {
+        let source = SYSTEM_SOURCE_ID;
+        let generation = MixerGeneration(25);
+        for target in [MixTarget::Monitor, MixTarget::Stream] {
+            let old = MixRoute::new(false, FaderGain::MIN);
+            for steps in -120..=24 {
+                let fader = FaderGain::from_half_decibel_steps(steps).expect("valid step");
+                let command =
+                    route_position_command(source, target, old, generation, fader_fraction(fader));
+                if fader == old.fader() {
+                    assert!(command.is_none());
+                } else {
+                    assert_eq!(
+                        command,
+                        Some(Command::SetMixerRoute {
+                            expected_generation: generation,
+                            source,
+                            target,
+                            route: MixRoute::new(false, fader)
+                        })
+                    );
+                }
+            }
+            for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                assert!(route_position_command(source, target, old, generation, invalid).is_none());
+            }
+            assert_eq!(
+                route_position_command(source, target, old, generation, 2.),
+                Some(Command::SetMixerRoute {
+                    expected_generation: generation,
+                    source,
+                    target,
+                    route: MixRoute::new(false, FaderGain::MAX)
+                })
+            );
+            assert!(route_position_command(source, target, old, generation, -1.).is_none());
+        }
+    }
+
+    #[test]
+    fn keyboard_fader_changes_use_checked_levels_without_enabling_muted_audio() {
+        let source = SYSTEM_SOURCE_ID;
+        let generation = MixerGeneration(8);
+        let route = MixRoute::new(false, FaderGain::MIN);
+        for (key, steps) in [("up", -119), ("right", -119), ("end", 24), ("enter", 0)] {
+            assert_eq!(
+                route_key_command(source, MixTarget::Stream, route, generation, key),
+                Some(Command::SetMixerRoute {
+                    expected_generation: generation,
+                    source,
+                    target: MixTarget::Stream,
+                    route: MixRoute::new(
+                        false,
+                        FaderGain::from_half_decibel_steps(steps).expect("checked level")
+                    ),
+                })
+            );
+        }
+        for key in ["down", "left", "home", "unknown"] {
+            assert!(route_key_command(source, MixTarget::Stream, route, generation, key).is_none());
+        }
     }
 
     #[test]
