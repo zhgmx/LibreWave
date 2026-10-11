@@ -61,53 +61,61 @@ impl ManagedWave3Connection for Wave3UsbConnection {
             Err(message) => return ConnectionOutcome::Invalid(message),
         };
         let expected = *self.config();
-        match self.transact_control(expected, change) {
-            TransactionOutcome::Applied { config } => snapshot_outcome(config, true),
-            TransactionOutcome::Unchanged { config } => snapshot_outcome(config, false),
-            TransactionOutcome::Rejected {
-                error: TransactionError::StaleBaseline { actual, .. },
-            } => match wave3_config_snapshot(&actual) {
+        let outcome = self.transact_control(expected, change);
+        transaction_outcome(outcome, self.observed().ok(), self.write_state())
+    }
+}
+
+fn transaction_outcome(
+    outcome: TransactionOutcome,
+    baseline: Option<Wave3ConfigSnapshot>,
+    write_state: Wave3WriteState,
+) -> ConnectionOutcome {
+    match outcome {
+        TransactionOutcome::Applied { config } => snapshot_outcome(config, true),
+        TransactionOutcome::Unchanged { config } => snapshot_outcome(config, false),
+        TransactionOutcome::Rejected { error: TransactionError::StaleBaseline { actual, .. } } => {
+            match wave3_config_snapshot(&actual) {
                 Ok(config) => ConnectionOutcome::StaleBaseline(config),
                 Err(_) => ConnectionOutcome::Failed {
-                    observed: self.observed().ok(),
+                    observed: None,
                     restoration_unverified: true,
                     message: "stale Wave:3 baseline could not be decoded".to_owned(),
                 },
-            },
-            TransactionOutcome::Rejected { error: TransactionError::InvalidChange(error) } => {
-                ConnectionOutcome::Invalid(error.to_string())
             }
-            TransactionOutcome::Rejected { error } if disconnected(&error) => {
-                ConnectionOutcome::Disconnected
+        }
+        TransactionOutcome::Rejected { error: TransactionError::InvalidChange(error) } => {
+            ConnectionOutcome::Invalid(error.to_string())
+        }
+        TransactionOutcome::Rejected { error } if disconnected(&error) => {
+            ConnectionOutcome::Disconnected
+        }
+        TransactionOutcome::Rejected { error } => ConnectionOutcome::Failed {
+            observed: if write_state == Wave3WriteState::NeedsReprobe { None } else { baseline },
+            restoration_unverified: write_state == Wave3WriteState::NeedsReprobe,
+            message: error.to_string(),
+        },
+        TransactionOutcome::Failed { primary, restoration } => {
+            if disconnected(&primary)
+                && matches!(
+                    restoration.verification,
+                    Err(TransactionError::Transport {
+                        error: TransportError::Disconnected | TransportError::NotFound,
+                        ..
+                    })
+                )
+            {
+                return ConnectionOutcome::Disconnected;
             }
-            TransactionOutcome::Rejected { error } => ConnectionOutcome::Failed {
-                observed: self.observed().ok(),
-                restoration_unverified: self.write_state() == Wave3WriteState::NeedsReprobe,
-                message: error.to_string(),
-            },
-            TransactionOutcome::Failed { primary, restoration } => {
-                if disconnected(&primary)
-                    && matches!(
-                        restoration.verification,
-                        Err(TransactionError::Transport {
-                            error: TransportError::Disconnected | TransportError::NotFound,
-                            ..
-                        })
-                    )
-                {
-                    return ConnectionOutcome::Disconnected;
-                }
-                let restoration_unverified = restoration.verification.is_err();
-                let observed = restoration
-                    .verification
-                    .ok()
-                    .and_then(|config| wave3_config_snapshot(&config).ok())
-                    .or_else(|| self.observed().ok());
-                ConnectionOutcome::Failed {
-                    observed,
-                    restoration_unverified,
-                    message: primary.to_string(),
-                }
+            let restoration_unverified = restoration.verification.is_err();
+            let observed = restoration
+                .verification
+                .ok()
+                .and_then(|config| wave3_config_snapshot(&config).ok());
+            ConnectionOutcome::Failed {
+                restoration_unverified: restoration_unverified || observed.is_none(),
+                observed,
+                message: primary.to_string(),
             }
         }
     }
@@ -187,4 +195,51 @@ fn disconnected(error: &TransactionError) -> bool {
             ..
         }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use librewave_device::{RestorationOutcome, TransactionPhase};
+    use librewave_protocol::{Wave3Config, config_schema};
+
+    #[test]
+    fn failed_restoration_conversion_does_not_use_a_cached_baseline() {
+        let mut bytes = [0; 16];
+        bytes[12] = 1;
+        let config = Wave3Config::from_schema(
+            config_schema(ApiVersion::new(5, 4)).expect("reviewed schema"),
+            &bytes,
+        )
+        .expect("configuration");
+        let baseline = wave3_config_snapshot(&config).expect("baseline");
+        let error = TransactionError::ShortTransfer {
+            phase: TransactionPhase::RestorationReadback,
+            expected: 16,
+            actual: 0,
+        };
+        for verification in [Err(error), Ok(config)] {
+            let outcome = transaction_outcome(
+                TransactionOutcome::Failed {
+                    primary: error,
+                    restoration: RestorationOutcome { write: Ok(()), verification },
+                },
+                Some(baseline.clone()),
+                Wave3WriteState::NeedsReprobe,
+            );
+            let ConnectionOutcome::Failed { observed, restoration_unverified, .. } = outcome else {
+                panic!("expected failure");
+            };
+            assert_eq!(observed, verification.ok().map(|_| baseline.clone()));
+            assert_eq!(restoration_unverified, verification.is_err());
+        }
+        assert!(matches!(
+            transaction_outcome(
+                TransactionOutcome::Rejected { error: TransactionError::NeedsReprobe },
+                Some(baseline),
+                Wave3WriteState::NeedsReprobe,
+            ),
+            ConnectionOutcome::Failed { observed: None, restoration_unverified: true, .. }
+        ));
+    }
 }

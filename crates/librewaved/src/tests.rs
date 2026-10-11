@@ -1459,3 +1459,37 @@ fn two_device_fixture() -> (
     };
     (fixture, usb_bus, usb_a, usb_c, card7_link, card8_link)
 }
+
+#[test]
+fn unverified_restoration_and_cleanup_failure_publish_no_observed_config() {
+    for failure in [SaveAction::Before, SaveAction::After] {
+        let mut h = harness(
+            DesiredState::default(),
+            wave3_config(),
+            vec![ConnectionOutcome::Failed {
+                observed: None,
+                restoration_unverified: true,
+                message: "readback and restoration failed".to_owned(),
+            }],
+            vec![SaveAction::Ok, failure],
+        );
+        inspect(&mut h.daemon);
+        let error = h
+            .daemon
+            .handle(
+                Command::SetWave3Control {
+                    id: DeviceId(1),
+                    expected_generation: DeviceGeneration(1),
+                    control: Wave3Control::Clipguard(true),
+                },
+                librewave_core::Origin::Client,
+            )
+            .expect_err("ambiguous cleanup");
+        assert_eq!(error.kind, IpcErrorKind::PersistenceAmbiguous);
+        assert_eq!(
+            h.daemon.snapshot().devices[0].admission.config(),
+            None,
+            "failed verification must not publish the old baseline as observed hardware state"
+        );
+    }
+}

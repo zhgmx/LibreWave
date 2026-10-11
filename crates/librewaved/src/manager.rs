@@ -626,7 +626,12 @@ impl Daemon {
                 Ok(())
             }
             Err(error) => {
-                let observed = outcome_observed(outcome).or(Some(current));
+                let observed = match outcome {
+                    ConnectionOutcome::Failed { .. } | ConnectionOutcome::Disconnected => {
+                        outcome_observed(outcome)
+                    }
+                    _ => outcome_observed(outcome).or(Some(current)),
+                };
                 if matches!(outcome, ConnectionOutcome::Disconnected) {
                     self.connections.remove(&id);
                     self.update_admission(
