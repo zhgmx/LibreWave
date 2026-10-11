@@ -493,6 +493,9 @@ fn create_adapter(
         *pw::keys::MEDIA_CATEGORY => "Duplex",
         *pw::keys::MEDIA_ROLE => "Production",
         *pw::keys::NODE_VIRTUAL => "true",
+        // WirePlumber must not replace this adapter's DSP port configuration.
+        // It still exposes the Audio/Sink or Audio/Source node to clients.
+        "wireplumber.is-virtual" => "true",
         *pw::keys::NODE_GROUP => "librewave.adapters",
         "node.sync-group" => "librewave.graph",
         *pw::keys::NODE_DRIVER => if driver { "true" } else { "false" },
@@ -1364,6 +1367,81 @@ context.modules = [
                 run_fixed_quantum(quantum, cycle);
             }
             run_forced_quantum_fault(4);
+        }
+
+        #[test]
+        #[ignore = "requires LIBREWAVE_DESKTOP_PIPEWIRE_INTEGRATION=1 and the desktop PipeWire session"]
+        fn desktop_pipewire_keeps_all_filter_buffers_mapped() {
+            assert_eq!(
+                std::env::var("LIBREWAVE_DESKTOP_PIPEWIRE_INTEGRATION").as_deref(),
+                Ok("1"),
+                "set LIBREWAVE_DESKTOP_PIPEWIRE_INTEGRATION=1 for the desktop graph proof",
+            );
+            let plans = endpoint_plans(DELIBERATE_ENDPOINTS).expect("deliberate endpoints");
+            let proof = Arc::new(ProcessorProof::default());
+            let processor = EngineProcessor::new(1024, proof);
+            let quantum = NonZeroU32::new(256).expect("fixed quantum");
+            let mut graph = InactiveGraph::construct("pipewire-0", &plans, quantum, processor)
+                .expect("construct desktop graph")
+                .activate()
+                .expect("activate desktop graph");
+            let deadline = Instant::now() + Duration::from_millis(750);
+            while Instant::now() < deadline && !graph.diagnostics().failed {
+                graph.iterate(Duration::from_millis(10));
+            }
+            let diagnostics = graph.diagnostics();
+            assert!(
+                !diagnostics.failed && diagnostics.process_cycles >= 64,
+                "desktop graph: cycles={} incomplete={} mask={:#x} quantum={} driver={} faults={:?}",
+                diagnostics.process_cycles,
+                diagnostics.startup_incomplete_cycles,
+                diagnostics.startup_missing_mask,
+                diagnostics.startup_quantum,
+                diagnostics.startup_driver,
+                diagnostics.faults,
+            );
+            let status = Command::new("wpctl")
+                .args(["status", "--name"])
+                .output()
+                .expect("inspect desktop endpoints");
+            assert!(status.status.success(), "wpctl status failed");
+            let visible = String::from_utf8_lossy(&status.stdout);
+            for plan in &plans {
+                assert!(
+                    visible.contains(plan.node_name),
+                    "{} is not in wpctl status",
+                    plan.node_name
+                );
+            }
+            assert!(!visible.contains(FILTER_NODE_NAME), "internal mixer appears in wpctl status");
+            let microphone = graph.node_ids().expect("graph node ids")[1].to_string();
+            let original = Command::new("wpctl")
+                .args(["get-volume", &microphone])
+                .output()
+                .expect("read original source volume");
+            assert!(original.status.success());
+            let original = String::from_utf8_lossy(&original.stdout);
+            let original = original.split_whitespace().nth(1).expect("source volume value");
+            let volume = Command::new("wpctl")
+                .args(["set-volume", &microphone, "0.5"])
+                .status()
+                .expect("set temporary source volume");
+            assert!(volume.success(), "wpctl could not set source volume");
+            let volume = Command::new("wpctl")
+                .args(["get-volume", &microphone])
+                .output()
+                .expect("read temporary source volume");
+            assert!(volume.status.success());
+            assert!(
+                String::from_utf8_lossy(&volume.stdout).contains("0.50"),
+                "temporary source volume did not read back",
+            );
+            let restored = Command::new("wpctl")
+                .args(["set-volume", &microphone, original])
+                .status()
+                .expect("restore source volume");
+            assert!(restored.success(), "wpctl could not restore source volume");
+            graph.teardown().expect("tear down desktop graph");
         }
 
         #[test]
