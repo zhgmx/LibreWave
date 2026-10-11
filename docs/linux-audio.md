@@ -229,6 +229,8 @@ The portable ASRC bridge and the two ALSA worker directions are implemented and 
 
 Native validation must confirm PCM timestamp, availability, delay, state, partial I/O, and disconnect behavior on the reference system. `EPIPE` and `ESTRPIPE` are terminal attempt faults. Recovery must release the failed attempt and use the full capture-first startup sequence.
 
+A confirmed PipeWire core disconnect releases the local graph without waiting for a reply from the disconnected server. Filter destruction and callback quiescence remain required. A timeout without a confirmed disconnect remains a cleanup failure and blocks a replacement attempt.
+
 Do not claim Linux audio backend support until these tests pass.
 
 ## Acceptance tests

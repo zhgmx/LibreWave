@@ -219,8 +219,10 @@ impl TeardownState {
 }
 
 pub(super) struct InactiveGraph<P: GraphProcessor> {
+    _core_listener: pw::core::Listener,
     main_loop: pw::main_loop::MainLoopRc,
     core: pw::core::CoreRc,
+    peer_disconnected: Rc<Cell<bool>>,
     registry: pw::registry::RegistryRc,
     registry_listener: Option<pw::registry::Listener>,
     registry_state: Rc<RefCell<RegistryState>>,
@@ -263,6 +265,16 @@ impl<P: GraphProcessor> InactiveGraph<P> {
                 *pw::keys::REMOTE_NAME => remote_name
             }))
             .map_err(pipewire_error)?;
+        let peer_disconnected = Rc::new(Cell::new(false));
+        let disconnected = Rc::clone(&peer_disconnected);
+        let core_listener = core
+            .add_listener_local()
+            .error(move |id, _, result, _| {
+                if id == pw::core::PW_ID_CORE && result == -libc::EPIPE {
+                    disconnected.set(true);
+                }
+            })
+            .register();
         let registry = core.get_registry_rc().map_err(pipewire_error)?;
         let system_link_word = Arc::new(AtomicU64::new(0));
         let registry_state =
@@ -377,6 +389,8 @@ impl<P: GraphProcessor> InactiveGraph<P> {
         Ok(Self {
             main_loop,
             core,
+            _core_listener: core_listener,
+            peer_disconnected,
             registry,
             registry_listener: Some(registry_listener),
             registry_state,
@@ -449,7 +463,10 @@ impl<P: GraphProcessor> InactiveGraph<P> {
             return terminal;
         }
         let mut first_error = self.filter.set_active(false).err().map(GraphError::PipeWire);
-        if let Err(error) = roundtrip(&self.main_loop, &self.core) {
+        if !self.peer_disconnected.get()
+            && let Err(error) = roundtrip(&self.main_loop, &self.core)
+            && !self.peer_disconnected.get()
+        {
             first_error.get_or_insert(error);
         }
         let deadline = Instant::now() + ROUNDTRIP_TIMEOUT;
@@ -471,7 +488,13 @@ impl<P: GraphProcessor> InactiveGraph<P> {
         {
             drop(node);
         }
-        if let Err(error) = roundtrip(&self.main_loop, &self.core) {
+        // A confirmed core EPIPE makes server acknowledgement impossible.
+        // Local filter destruction and callback quiescence remain mandatory.
+        // A timeout on a connected peer still blocks replacement.
+        if !self.peer_disconnected.get()
+            && let Err(error) = roundtrip(&self.main_loop, &self.core)
+            && !self.peer_disconnected.get()
+        {
             first_error.get_or_insert(error);
         }
         self.registry_listener.take();
@@ -1719,6 +1742,76 @@ context.modules = [
                 run_fixed_quantum(quantum, cycle);
             }
             run_forced_quantum_fault(4);
+        }
+
+        #[test]
+        #[ignore = "requires LIBREWAVE_PIPEWIRE_INTEGRATION=1; stops only the private PipeWire server without USB or ALSA"]
+        fn private_graph_teardown_after_server_disconnect() {
+            assert_eq!(std::env::var("LIBREWAVE_PIPEWIRE_INTEGRATION").as_deref(), Ok("1"));
+            for dispatch_first in [true, false] {
+                let mut server = PrivatePipeWire::start(256, if dispatch_first { 12 } else { 13 });
+                let plans = endpoint_plans(DELIBERATE_ENDPOINTS).expect("endpoints");
+                let processor = EngineProcessor::new(1024, Arc::new(ProcessorProof::default()));
+                let mut graph = InactiveGraph::construct(
+                    REMOTE,
+                    &plans,
+                    NonZeroU32::new(256).expect("quantum"),
+                    AdapterPortMode::SelfConfigured,
+                    processor,
+                )
+                .expect("construct private graph")
+                .activate()
+                .expect("activate private graph");
+                run_cycles(&mut graph, 64);
+                server.child.kill().expect("stop only private server");
+                server.child.wait().expect("private server exited");
+                if dispatch_first {
+                    graph.iterate(Duration::from_millis(100));
+                }
+                graph.teardown().expect("release local graph after peer disconnected");
+                assert_eq!(graph.inner.filter.callbacks_in_flight(), 0);
+                assert_eq!(graph.inner.filter.node_id(), None);
+                graph.teardown().expect("repeat disconnected teardown");
+            }
+        }
+
+        #[test]
+        #[ignore = "requires LIBREWAVE_PIPEWIRE_INTEGRATION=1; pauses only the private PipeWire server without USB or ALSA"]
+        fn private_graph_teardown_keeps_unconfirmed_timeout_terminal() {
+            assert_eq!(std::env::var("LIBREWAVE_PIPEWIRE_INTEGRATION").as_deref(), Ok("1"));
+            let server = PrivatePipeWire::start(256, 14);
+            let plans = endpoint_plans(DELIBERATE_ENDPOINTS).expect("endpoints");
+            let processor = EngineProcessor::new(1024, Arc::new(ProcessorProof::default()));
+            let mut graph = InactiveGraph::construct(
+                REMOTE,
+                &plans,
+                NonZeroU32::new(256).expect("quantum"),
+                AdapterPortMode::SelfConfigured,
+                processor,
+            )
+            .expect("construct private graph")
+            .activate()
+            .expect("activate private graph");
+            run_cycles(&mut graph, 64);
+            let pid = server.child.id().to_string();
+            assert!(
+                Command::new("kill")
+                    .args(["-STOP", &pid])
+                    .status()
+                    .expect("pause private server")
+                    .success()
+            );
+            let result = graph.teardown();
+            assert!(
+                Command::new("kill")
+                    .args(["-CONT", &pid])
+                    .status()
+                    .expect("resume private server")
+                    .success()
+            );
+            assert_eq!(result, Err(GraphError::RoundtripTimeout));
+            assert!(!graph.inner.peer_disconnected.get());
+            assert_eq!(graph.teardown(), result);
         }
 
         #[test]
