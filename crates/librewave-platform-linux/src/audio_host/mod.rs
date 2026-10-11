@@ -21,6 +21,8 @@ use std::fmt;
 )]
 mod alsa;
 mod clock_bridge;
+#[allow(dead_code, reason = "the production graph does not yet own the clock bridge")]
+mod graph_bridge;
 mod pcm;
 mod pipewire;
 #[cfg_attr(not(test), allow(dead_code))]

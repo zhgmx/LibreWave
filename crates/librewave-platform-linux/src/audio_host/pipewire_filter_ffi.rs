@@ -32,7 +32,7 @@ struct NativeTestPeer {
 }
 
 type NativeProcessCallback =
-    unsafe extern "C" fn(*mut c_void, u32, u32, u32, u64, u32, *mut *mut f32, u32) -> c_int;
+    unsafe extern "C" fn(*mut c_void, u32, u32, u32, u64, u64, u32, *mut *mut f32, u32) -> c_int;
 type NativeStateCallback = unsafe extern "C" fn(*mut c_void, c_int, c_int);
 #[cfg(test)]
 type NativeTestProcessCallback =
@@ -229,6 +229,7 @@ pub(super) struct ProcessTiming {
     pub(super) driver_id: u32,
     pub(super) rate: u32,
     pub(super) position: u64,
+    pub(super) monotonic_nsec: u64,
     pub(super) quantum: u32,
 }
 
@@ -601,6 +602,7 @@ unsafe extern "C" fn process_callback<P: GraphProcessor>(
     rate_num: u32,
     rate_denom: u32,
     position: u64,
+    monotonic_nsec: u64,
     quantum: u32,
     buffers: *mut *mut f32,
     missing_mask: u32,
@@ -623,6 +625,7 @@ unsafe extern "C" fn process_callback<P: GraphProcessor>(
                 rate_num,
                 rate_denom,
                 position,
+                monotonic_nsec,
                 quantum,
                 buffers,
                 missing_mask,
@@ -652,6 +655,7 @@ fn process_cycle<P: GraphProcessor>(
     rate_num: u32,
     rate_denom: u32,
     position: u64,
+    monotonic_nsec: u64,
     quantum: u32,
     buffers: *mut *mut f32,
     missing_mask: u32,
@@ -660,6 +664,7 @@ fn process_cycle<P: GraphProcessor>(
         driver_id,
         rate: if rate_num == 1 { rate_denom } else { 0 },
         position,
+        monotonic_nsec,
         quantum,
     };
     let fail = |fault, expected_position| {
@@ -1174,6 +1179,7 @@ mod tests {
                 driver_id: 25,
                 rate: 48_000,
                 position: 256,
+                monotonic_nsec: 5_333_333,
                 quantum: 128,
             }),
             Ok(())
@@ -1183,6 +1189,7 @@ mod tests {
                 driver_id: 25,
                 rate: 48_000,
                 position: 384,
+                monotonic_nsec: 8_000_000,
                 quantum: 64,
             }),
             Err((ProcessFault::InvalidQuantum, 128))
@@ -1192,6 +1199,7 @@ mod tests {
                 driver_id: 25,
                 rate: 48_000,
                 position: 512,
+                monotonic_nsec: 10_666_667,
                 quantum: 128,
             }),
             Err((ProcessFault::PositionDiscontinuity, 384))

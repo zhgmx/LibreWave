@@ -104,6 +104,7 @@ static void on_process(void *data, struct spa_io_position *position)
             position->clock.rate.num,
             position->clock.rate.denom,
             position->clock.position,
+            position->clock.nsec,
             position->clock.duration,
             buffers,
             missing_mask);

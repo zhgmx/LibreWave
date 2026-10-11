@@ -14,6 +14,7 @@ typedef int (*lw_pw_process_fn)(void *data,
         uint32_t rate_num,
         uint32_t rate_denom,
         uint64_t position,
+        uint64_t monotonic_nsec,
         uint32_t duration,
         float *buffers[8],
         uint32_t missing_mask);
