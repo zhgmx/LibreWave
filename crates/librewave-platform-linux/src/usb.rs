@@ -186,7 +186,7 @@ pub fn admission_snapshot(result: Result<Wave3Session, UsbProbeError>) -> Device
         Ok(session) => match wave3_config_snapshot(session.config()) {
             Ok(config) => DeviceAdmissionSnapshot::Admitted {
                 api: session.api(),
-                generation: DeviceGeneration(0),
+                generation: DeviceGeneration::new([0; 16], 0),
                 write_access: DeviceWriteAccess::Locked {
                     reason: DeviceWriteLockReason::NoOwnedConnection,
                 },

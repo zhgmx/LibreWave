@@ -11,6 +11,17 @@
 use std::io;
 use std::path::PathBuf;
 
+/// Allocates a process epoch without using device identity or hardware I/O.
+///
+/// # Errors
+/// Returns the operating-system error if random bytes cannot be read.
+pub fn new_daemon_epoch() -> io::Result<[u8; 16]> {
+    use std::io::Read;
+    let mut epoch = [0; 16];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut epoch)?;
+    Ok(epoch)
+}
+
 pub use librewave_device::{DeviceIdentity, DeviceModel, UsbIdentity};
 
 pub mod audio_host;

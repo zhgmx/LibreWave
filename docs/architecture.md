@@ -59,7 +59,7 @@ The daemon maintains one desired state and one observed state for each managed d
 
 The UI and CLI receive immutable snapshots followed by ordered events. They do not keep an independent authoritative device model.
 
-Wave:3 hardware commands name one reviewed control and include the device generation shown by the daemon. The daemon rejects a stale generation. The transaction path also reads the complete device configuration before every write. A physical change after the snapshot therefore causes a stale-baseline failure instead of a merge.
+Wave:3 hardware commands name one reviewed control and include the device generation shown by the daemon. The generation token contains a random daemon epoch and a device revision. The CLI uses the complete `epoch:revision` token shown by inspection. The epoch has 32 lowercase hexadecimal digits. A token from an earlier daemon process is stale, even when the device revision is the same. The daemon rejects a stale generation. The transaction path also reads the complete device configuration before every write. A physical change after the snapshot therefore causes a stale-baseline failure instead of a merge.
 
 The daemon keeps one admitted Linux USB connection for each managed Wave:3. `librewavectl devices inspect <id>` reads the complete configuration again on that connection. `librewavectl refresh` sends the `Refresh` IPC command. The command first updates the host inventory. It then reads each retained connection that is ready or locked by ambiguous persistence, in logical device ID order. `GetStatus` and `ListDevices` update the host inventory but do not read a retained hardware configuration.
 

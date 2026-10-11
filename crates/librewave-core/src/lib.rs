@@ -3,7 +3,9 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+mod device_generation;
 mod mixer;
+pub use device_generation::{DeviceGeneration, DeviceGenerationError};
 
 pub use mixer::{
     FaderGain, FaderGainError, MICROPHONE_SOURCE_ID, MeterAvailability, MixRoute, MixTarget,
@@ -91,16 +93,6 @@ pub enum Origin {
 pub struct DeviceId(pub u32);
 
 impl fmt::Display for DeviceId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}", self.0)
-    }
-}
-
-/// A daemon-issued revision of one device's observed hardware baseline.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct DeviceGeneration(pub u64);
-
-impl fmt::Display for DeviceGeneration {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}", self.0)
     }

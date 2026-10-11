@@ -178,11 +178,10 @@ where
         return Ok(2);
     };
     let id = DeviceId(id);
-    let Ok(generation) = generation.parse::<u64>() else {
-        writeln!(errors, "error: device generation must be a number")?;
+    let Ok(expected_generation) = generation.parse::<DeviceGeneration>() else {
+        writeln!(errors, "error: use the device generation token shown by inspection")?;
         return Ok(2);
     };
-    let expected_generation = DeviceGeneration(generation);
     let control = match parse_control(control, value) {
         Ok(control) => control,
         Err(message) => {
@@ -650,7 +649,7 @@ mod tests {
         write_status(&mut output, &snapshot()).expect("render status");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "Daemon: connected\nProtocol: 4\nState generation: 4\nDevices: 1\nMixer: generation 0, inactive, 2 sources\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
+            "Daemon: connected\nProtocol: 5\nState generation: 4\nDevices: 1\nMixer: generation 0, inactive, 2 sources\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
         );
     }
 
@@ -705,7 +704,7 @@ mod tests {
             audio_cards: vec![],
             admission: DeviceAdmissionSnapshot::Admitted {
                 api: librewave_core::ApiVersion::new(5, 4),
-                generation: librewave_core::DeviceGeneration(1),
+                generation: librewave_core::DeviceGeneration::new([0; 16], 1),
                 write_access: librewave_core::DeviceWriteAccess::Ready,
                 config: Some(librewave_core::Wave3ConfigSnapshot {
                     input_gain: librewave_core::FixedPointValue { raw: 10_240, fractional_bits: 8 },
@@ -771,7 +770,7 @@ mod tests {
         let mut device = snapshot().devices.remove(0);
         device.admission = DeviceAdmissionSnapshot::Admitted {
             api: librewave_core::ApiVersion::new(5, 4),
-            generation: DeviceGeneration(2),
+            generation: DeviceGeneration::new([0; 16], 2),
             write_access: librewave_core::DeviceWriteAccess::Ready,
             config: Some(Wave3ConfigSnapshot {
                 input_gain: FixedPointValue { raw: 0, fractional_bits: 8 },
@@ -791,14 +790,14 @@ mod tests {
         write_device_inspection(&mut output, &device).expect("render refreshed inspection");
         let output = String::from_utf8(output).expect("UTF-8");
         assert!(output.contains("Microphone mute: on"));
-        assert!(output.contains("Device generation: 2"));
+        assert!(output.contains("Device generation: 00000000000000000000000000000000:2"));
 
         let mut errors = Vec::new();
         let exit = write_client_error(
             ClientError::Remote(librewave_ipc::IpcError {
                 kind: librewave_ipc::IpcErrorKind::StaleDeviceGeneration {
-                    expected: DeviceGeneration(1),
-                    actual: DeviceGeneration(2),
+                    expected: DeviceGeneration::new([0; 16], 1),
+                    actual: DeviceGeneration::new([0; 16], 2),
                 },
                 message: "device generation 1 is stale; current generation is 2".to_owned(),
             }),
@@ -809,6 +808,25 @@ mod tests {
         assert_eq!(
             String::from_utf8(errors).expect("UTF-8"),
             "error: device generation 1 is stale; current generation is 2\n"
+        );
+    }
+
+    #[test]
+    fn hardware_control_rejects_a_numeric_generation_before_connecting() {
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        let exit = run(
+            ["librewavectl", "devices", "set", "1", "1", "lowcut", "on"].map(str::to_owned),
+            Path::new("unused.sock"),
+            &mut output,
+            &mut errors,
+        )
+        .expect("parse command");
+        assert_eq!(exit, 2);
+        assert!(output.is_empty());
+        assert_eq!(
+            String::from_utf8(errors).expect("diagnostic"),
+            "error: use the device generation token shown by inspection\n"
         );
     }
 

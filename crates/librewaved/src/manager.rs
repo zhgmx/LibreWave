@@ -29,6 +29,7 @@ pub struct Daemon {
     candidates: BTreeMap<DeviceId, UsbDeviceCandidate>,
     connector: Box<ConnectionFactory>,
     connections: BTreeMap<DeviceId, OwnedConnection>,
+    epoch: [u8; 16],
     device_generations: BTreeMap<String, u64>,
     desired: DesiredState,
     store: Box<dyn DesiredStateStore>,
@@ -100,6 +101,7 @@ impl Daemon {
             candidates: BTreeMap::new(),
             connector: Box::new(connector),
             connections: BTreeMap::new(),
+            epoch: librewave_platform_linux::new_daemon_epoch()?,
             device_generations: BTreeMap::new(),
             desired,
             store,
@@ -125,6 +127,7 @@ impl Daemon {
             candidates: BTreeMap::new(),
             connector: Box::new(|_| Err(AdmissionError::Disconnected)),
             connections: BTreeMap::new(),
+            epoch: [0; 16],
             device_generations: BTreeMap::new(),
             desired: DesiredState::default(),
             store: Box::new(MemoryStore::default()),
@@ -396,7 +399,7 @@ impl Daemon {
             RestoreResult::Locked { config, reason } => (config, Some(reason)),
             RestoreResult::Disconnected => unreachable!("handled above"),
         };
-        let generation = self.next_device_generation(&topology);
+        let generation = self.next_device_generation(&topology)?;
         let write_access =
             locked.map_or(DeviceWriteAccess::Ready, |reason| DeviceWriteAccess::Locked { reason });
         self.update_admission(
@@ -424,7 +427,7 @@ impl Daemon {
         };
         match outcome {
             ConnectionRefreshOutcome::Changed(config) => {
-                let generation = self.next_device_generation(&topology);
+                let generation = self.next_device_generation(&topology)?;
                 let write_access = locked.map_or(DeviceWriteAccess::Ready, |reason| {
                     DeviceWriteAccess::Locked { reason }
                 });
@@ -555,6 +558,9 @@ impl Daemon {
             .get(&id)
             .map(|owned| owned.topology.clone())
             .ok_or_else(|| write_locked(DeviceWriteLockReason::NoOwnedConnection))?;
+        if self.device_generations.get(&topology) == Some(&u64::MAX) {
+            return Err(generation_exhausted());
+        }
         Ok((topology, current))
     }
 
@@ -665,7 +671,7 @@ impl Daemon {
             .ok_or_else(|| write_locked(DeviceWriteLockReason::NoOwnedConnection))?;
         match outcome {
             ConnectionOutcome::Applied(config) => {
-                let generation = self.next_device_generation(topology);
+                let generation = self.next_device_generation(topology)?;
                 self.update_admission(
                     id,
                     DeviceConnection::Connected,
@@ -698,7 +704,7 @@ impl Daemon {
             }
             ConnectionOutcome::Invalid(message) => Err(invalid_control(message)),
             ConnectionOutcome::StaleBaseline(config) => {
-                let generation = self.next_device_generation(topology);
+                let generation = self.next_device_generation(topology)?;
                 self.update_admission(
                     id,
                     DeviceConnection::Connected,
@@ -739,7 +745,7 @@ impl Daemon {
                 if let Some(owned) = self.connections.get_mut(&id) {
                     owned.locked = Some(reason);
                 }
-                let generation = self.next_device_generation(topology);
+                let generation = self.next_device_generation(topology)?;
                 self.update_admission(
                     id,
                     DeviceConnection::Connected,
@@ -771,7 +777,7 @@ impl Daemon {
         let Some(api) = api else {
             return Err(write_locked(DeviceWriteLockReason::NoOwnedConnection));
         };
-        let generation = self.next_device_generation(topology);
+        let generation = self.next_device_generation(topology)?;
         self.update_admission(
             id,
             DeviceConnection::Connected,
@@ -847,10 +853,10 @@ impl Daemon {
             .ok_or_else(|| IpcError::device_not_found(id))
     }
 
-    fn next_device_generation(&mut self, topology: &str) -> DeviceGeneration {
+    fn next_device_generation(&mut self, topology: &str) -> Result<DeviceGeneration, IpcError> {
         let generation = self.device_generations.entry(topology.to_owned()).or_default();
-        *generation = generation.saturating_add(1);
-        DeviceGeneration(*generation)
+        *generation = generation.checked_add(1).ok_or_else(generation_exhausted)?;
+        Ok(DeviceGeneration::new(self.epoch, *generation))
     }
 
     fn refresh_inventory(&mut self, origin: librewave_core::Origin) -> Option<Event> {
@@ -1062,3 +1068,10 @@ impl DeviceIdAllocator {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+fn generation_exhausted() -> IpcError {
+    IpcError {
+        kind: IpcErrorKind::DeviceGenerationExhausted,
+        message: "device generation is exhausted".to_owned(),
+    }
+}

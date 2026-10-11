@@ -995,8 +995,8 @@ mod tests {
         assert!(shell.hardware_writable(DeviceWriteAccess::Ready));
         assert!(shell.apply_error(&ClientError::Remote(IpcError {
             kind: IpcErrorKind::StaleDeviceGeneration {
-                expected: DeviceGeneration(1),
-                actual: DeviceGeneration(2),
+                expected: DeviceGeneration::new([0; 16], 1),
+                actual: DeviceGeneration::new([0; 16], 2),
             },
             message: "device generation is stale".to_owned(),
         })));

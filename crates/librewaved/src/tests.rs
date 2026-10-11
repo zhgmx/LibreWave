@@ -1,4 +1,6 @@
 use super::*;
+const FIRST_GENERATION: DeviceGeneration = DeviceGeneration::new([0; 16], 1);
+const SECOND_GENERATION: DeviceGeneration = DeviceGeneration::new([0; 16], 2);
 use crate::PersistenceError;
 use librewave_core::{AudioSnapshot, FaderGain, ServiceFailureReason, ServiceState};
 use librewave_platform_linux::ServiceAvailability;
@@ -526,7 +528,7 @@ fn listed_candidate_survives_disconnect_and_can_reconnect_without_refresh() {
     };
     let admitted = DeviceAdmissionSnapshot::Admitted {
         api: librewave_core::ApiVersion::new(5, 4),
-        generation: DeviceGeneration(1),
+        generation: DeviceGeneration::new([0; 16], 1),
         write_access: DeviceWriteAccess::Ready,
         config: Some(wave3_config()),
     };
@@ -592,13 +594,13 @@ fn command_success_and_unchanged_promote_only_the_explicit_control() {
         vec![],
     );
     let device = inspect(&mut changed_harness.daemon);
-    assert_eq!(device.admission.generation(), Some(DeviceGeneration(1)));
+    assert_eq!(device.admission.generation(), Some(DeviceGeneration::new([0; 16], 1)));
     let response = changed_harness
         .daemon
         .handle(
             Command::SetWave3Control {
                 id: DeviceId(1),
-                expected_generation: DeviceGeneration(1),
+                expected_generation: DeviceGeneration::new([0; 16], 1),
                 control: Wave3Control::Clipguard(true),
             },
             librewave_core::Origin::Client,
@@ -607,7 +609,7 @@ fn command_success_and_unchanged_promote_only_the_explicit_control() {
     let Response::ControlChanged { device } = response else {
         panic!("unexpected control response")
     };
-    assert_eq!(device.admission.generation(), Some(DeviceGeneration(2)));
+    assert_eq!(device.admission.generation(), Some(DeviceGeneration::new([0; 16], 2)));
     assert_eq!(device.admission.config(), Some(&changed));
     let state = changed_harness.store_state.borrow();
     let desired = state.get("1-8.3").expect("managed topology");
@@ -628,7 +630,7 @@ fn command_success_and_unchanged_promote_only_the_explicit_control() {
         .handle(
             Command::SetWave3Control {
                 id: DeviceId(1),
-                expected_generation: DeviceGeneration(1),
+                expected_generation: DeviceGeneration::new([0; 16], 1),
                 control: Wave3Control::MicrophoneMute(false),
             },
             librewave_core::Origin::Client,
@@ -637,7 +639,7 @@ fn command_success_and_unchanged_promote_only_the_explicit_control() {
     let Response::ControlChanged { device } = response else {
         panic!("unexpected unchanged response")
     };
-    assert_eq!(device.admission.generation(), Some(DeviceGeneration(1)));
+    assert_eq!(device.admission.generation(), Some(DeviceGeneration::new([0; 16], 1)));
 }
 
 #[test]
@@ -656,7 +658,7 @@ fn invalid_range_step_and_stale_generation_stop_before_persistence_and_usb() {
             .handle(
                 Command::SetWave3Control {
                     id: DeviceId(1),
-                    expected_generation: DeviceGeneration(1),
+                    expected_generation: DeviceGeneration::new([0; 16], 1),
                     control,
                 },
                 librewave_core::Origin::Client,
@@ -674,7 +676,7 @@ fn invalid_range_step_and_stale_generation_stop_before_persistence_and_usb() {
         .handle(
             Command::SetWave3Control {
                 id: DeviceId(1),
-                expected_generation: DeviceGeneration(0),
+                expected_generation: DeviceGeneration::new([0; 16], 0),
                 control: Wave3Control::Clipguard(true),
             },
             librewave_core::Origin::Client,
@@ -696,11 +698,11 @@ fn retained_inspection_keeps_unchanged_generations_and_accepts_device_state_with
     original.clipguard_enable = true;
     let mut harness = harness(desired, original.clone(), vec![], vec![]);
     let admitted = inspect(&mut harness.daemon);
-    assert_eq!(admitted.admission.generation(), Some(DeviceGeneration(1)));
+    assert_eq!(admitted.admission.generation(), Some(DeviceGeneration::new([0; 16], 1)));
     let state_generation = harness.daemon.snapshot().generation;
 
     let unchanged = inspect(&mut harness.daemon);
-    assert_eq!(unchanged.admission.generation(), Some(DeviceGeneration(1)));
+    assert_eq!(unchanged.admission.generation(), Some(DeviceGeneration::new([0; 16], 1)));
     assert_eq!(harness.daemon.snapshot().generation, state_generation);
 
     let mut physical = original;
@@ -708,7 +710,7 @@ fn retained_inspection_keeps_unchanged_generations_and_accepts_device_state_with
     physical.clipguard_enable = false;
     harness.refreshes.borrow_mut().push_back(ConnectionRefreshOutcome::Changed(physical.clone()));
     let refreshed = inspect(&mut harness.daemon);
-    assert_eq!(refreshed.admission.generation(), Some(DeviceGeneration(2)));
+    assert_eq!(refreshed.admission.generation(), Some(DeviceGeneration::new([0; 16], 2)));
     assert_eq!(refreshed.admission.config(), Some(&physical));
     assert!(harness.calls.borrow().is_empty());
     assert_eq!(*harness.saves.borrow(), 0);
@@ -746,7 +748,7 @@ fn refresh_command_polls_retained_connections_but_status_and_list_do_not() {
         .handle(Command::Refresh, librewave_core::Origin::Client)
         .expect("refresh retained connections");
     let Response::Refreshed { snapshot } = refreshed else { panic!("unexpected refresh response") };
-    assert_eq!(snapshot.devices[0].admission.generation(), Some(DeviceGeneration(2)));
+    assert_eq!(snapshot.devices[0].admission.generation(), Some(DeviceGeneration::new([0; 16], 2)));
     assert_eq!(snapshot.devices[0].admission.config(), Some(&physical));
     assert!(harness.refreshes.borrow().is_empty());
     assert!(harness.calls.borrow().is_empty());
@@ -761,7 +763,7 @@ fn refresh_command_polls_retained_connections_but_status_and_list_do_not() {
         panic!("unexpected unchanged refresh response")
     };
     assert_eq!(snapshot.generation, state_generation);
-    assert_eq!(snapshot.devices[0].admission.generation(), Some(DeviceGeneration(2)));
+    assert_eq!(snapshot.devices[0].admission.generation(), Some(DeviceGeneration::new([0; 16], 2)));
 }
 
 #[test]
@@ -775,7 +777,7 @@ fn retained_refresh_preserves_pending_lock_and_rejects_a_stale_client() {
     assert!(matches!(
         admitted.admission,
         DeviceAdmissionSnapshot::Admitted {
-            generation: DeviceGeneration(1),
+            generation: FIRST_GENERATION,
             write_access: DeviceWriteAccess::Locked {
                 reason: DeviceWriteLockReason::PersistenceAmbiguous
             },
@@ -800,7 +802,7 @@ fn retained_refresh_preserves_pending_lock_and_rejects_a_stale_client() {
     assert!(matches!(
         refreshed.admission,
         DeviceAdmissionSnapshot::Admitted {
-            generation: DeviceGeneration(2),
+            generation: SECOND_GENERATION,
             write_access: DeviceWriteAccess::Locked {
                 reason: DeviceWriteLockReason::PersistenceAmbiguous
             },
@@ -817,7 +819,7 @@ fn retained_refresh_preserves_pending_lock_and_rejects_a_stale_client() {
         .handle(
             Command::SetWave3Control {
                 id: DeviceId(1),
-                expected_generation: DeviceGeneration(1),
+                expected_generation: DeviceGeneration::new([0; 16], 1),
                 control: Wave3Control::MicrophoneMute(false),
             },
             librewave_core::Origin::Client,
@@ -839,7 +841,7 @@ fn retained_refresh_preserves_pending_lock_and_rejects_a_stale_client() {
         .handle(
             Command::SetWave3Control {
                 id: DeviceId(1),
-                expected_generation: DeviceGeneration(1),
+                expected_generation: DeviceGeneration::new([0; 16], 1),
                 control: Wave3Control::MicrophoneMute(false),
             },
             librewave_core::Origin::Client,
@@ -848,8 +850,8 @@ fn retained_refresh_preserves_pending_lock_and_rejects_a_stale_client() {
     assert!(matches!(
         error.kind,
         IpcErrorKind::StaleDeviceGeneration {
-            expected: DeviceGeneration(1),
-            actual: DeviceGeneration(2)
+            expected: FIRST_GENERATION,
+            actual: SECOND_GENERATION
         }
     ));
     assert!(ready.calls.borrow().is_empty());
@@ -927,7 +929,7 @@ fn persistence_failure_precedes_usb_and_disconnect_clears_pending() {
         .handle(
             Command::SetWave3Control {
                 id: DeviceId(1),
-                expected_generation: DeviceGeneration(1),
+                expected_generation: DeviceGeneration::new([0; 16], 1),
                 control: Wave3Control::Clipguard(true),
             },
             librewave_core::Origin::Client,
@@ -948,7 +950,7 @@ fn persistence_failure_precedes_usb_and_disconnect_clears_pending() {
         .handle(
             Command::SetWave3Control {
                 id: DeviceId(1),
-                expected_generation: DeviceGeneration(1),
+                expected_generation: DeviceGeneration::new([0; 16], 1),
                 control: Wave3Control::Clipguard(true),
             },
             librewave_core::Origin::Client,
@@ -1018,7 +1020,7 @@ fn reconnect_restores_sparse_controls_and_locks_after_partial_failure() {
         .handle(
             Command::SetWave3Control {
                 id: DeviceId(1),
-                expected_generation: DeviceGeneration(1),
+                expected_generation: DeviceGeneration::new([0; 16], 1),
                 control: Wave3Control::MicrophoneMute(true),
             },
             librewave_core::Origin::Client,
@@ -1090,7 +1092,7 @@ fn final_save_failure_leaves_pending_state_for_restart_lockout() {
         .handle(
             Command::SetWave3Control {
                 id: DeviceId(1),
-                expected_generation: DeviceGeneration(1),
+                expected_generation: DeviceGeneration::new([0; 16], 1),
                 control: Wave3Control::Clipguard(true),
             },
             librewave_core::Origin::Client,
@@ -1116,7 +1118,7 @@ fn final_save_failure_leaves_pending_state_for_restart_lockout() {
         .handle(
             Command::SetWave3Control {
                 id: DeviceId(1),
-                expected_generation: DeviceGeneration(1),
+                expected_generation: DeviceGeneration::new([0; 16], 1),
                 control: Wave3Control::Clipguard(true),
             },
             librewave_core::Origin::Client,
@@ -1142,7 +1144,7 @@ fn post_rename_save_failures_lock_without_false_acknowledgement() {
         .handle(
             Command::SetWave3Control {
                 id: DeviceId(1),
-                expected_generation: DeviceGeneration(1),
+                expected_generation: DeviceGeneration::new([0; 16], 1),
                 control: Wave3Control::Clipguard(true),
             },
             librewave_core::Origin::Client,
@@ -1170,7 +1172,7 @@ fn post_rename_save_failures_lock_without_false_acknowledgement() {
         .handle(
             Command::SetWave3Control {
                 id: DeviceId(1),
-                expected_generation: DeviceGeneration(1),
+                expected_generation: DeviceGeneration::new([0; 16], 1),
                 control: Wave3Control::Clipguard(true),
             },
             librewave_core::Origin::Client,
@@ -1201,7 +1203,7 @@ fn post_rename_save_failures_lock_without_false_acknowledgement() {
         .handle(
             Command::SetWave3Control {
                 id: DeviceId(1),
-                expected_generation: DeviceGeneration(1),
+                expected_generation: DeviceGeneration::new([0; 16], 1),
                 control: Wave3Control::Clipguard(true),
             },
             librewave_core::Origin::Client,
@@ -1479,7 +1481,7 @@ fn unverified_restoration_and_cleanup_failure_publish_no_observed_config() {
             .handle(
                 Command::SetWave3Control {
                     id: DeviceId(1),
-                    expected_generation: DeviceGeneration(1),
+                    expected_generation: DeviceGeneration::new([0; 16], 1),
                     control: Wave3Control::Clipguard(true),
                 },
                 librewave_core::Origin::Client,
@@ -1492,4 +1494,63 @@ fn unverified_restoration_and_cleanup_failure_publish_no_observed_config() {
             "failed verification must not publish the old baseline as observed hardware state"
         );
     }
+}
+
+#[test]
+fn restart_rejects_previous_daemon_device_generation() {
+    let mut first = harness(DesiredState::default(), wave3_config(), vec![], vec![]);
+    let old = inspect(&mut first.daemon).admission.generation().expect("admitted generation");
+    let mut changed = wave3_config();
+    changed.lowcut_enable = true;
+    let mut restarted = harness(DesiredState::default(), changed, vec![], vec![]);
+    restarted.daemon.epoch = [1; 16];
+    let current = inspect(&mut restarted.daemon).admission.generation().expect("new generation");
+    assert_eq!(current, DeviceGeneration::new([1; 16], 1));
+    let result = restarted.daemon.handle(
+        Command::SetWave3Control {
+            id: DeviceId(1),
+            expected_generation: old,
+            control: Wave3Control::LowCut(false),
+        },
+        librewave_core::Origin::Client,
+    );
+    assert!(matches!(
+        result.expect_err("previous daemon token").kind,
+        IpcErrorKind::StaleDeviceGeneration { .. }
+    ));
+    assert_eq!(*restarted.saves.borrow(), 0);
+    assert!(restarted.calls.borrow().is_empty(), "stale command reached hardware adapter");
+    restarted
+        .daemon
+        .handle(
+            Command::SetWave3Control {
+                id: DeviceId(1),
+                expected_generation: current,
+                control: Wave3Control::LowCut(false),
+            },
+            librewave_core::Origin::Client,
+        )
+        .expect("current daemon token");
+    assert_eq!(restarted.calls.borrow().len(), 1);
+}
+
+#[test]
+fn exhausted_hardware_generation_stops_before_persistence_and_usb() {
+    let mut h = harness(DesiredState::default(), wave3_config(), vec![], vec![]);
+    let generation = inspect(&mut h.daemon).admission.generation().expect("admission");
+    h.daemon.device_generations.insert("1-8.3".to_owned(), u64::MAX);
+    let error = h
+        .daemon
+        .handle(
+            Command::SetWave3Control {
+                id: DeviceId(1),
+                expected_generation: generation,
+                control: Wave3Control::LowCut(true),
+            },
+            librewave_core::Origin::Client,
+        )
+        .expect_err("exhausted generation");
+    assert_eq!(error.kind, IpcErrorKind::DeviceGenerationExhausted);
+    assert!(h.calls.borrow().is_empty());
+    assert_eq!(*h.saves.borrow(), 0);
 }

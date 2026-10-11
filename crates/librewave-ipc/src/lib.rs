@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// The current local request/response protocol version.
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 /// The maximum encoded JSON payload accepted by the local protocol.
 pub const MAX_FRAME_SIZE: usize = 1024 * 1024;
 
@@ -88,6 +88,8 @@ pub enum IpcErrorKind {
         expected: librewave_core::DeviceGeneration,
         actual: librewave_core::DeviceGeneration,
     },
+    /// The hardware generation cannot advance further.
+    DeviceGenerationExhausted,
     /// The physical baseline changed outside the daemon before a write.
     StaleDeviceBaseline,
     /// The semantic control value is outside its reviewed schema.
@@ -329,26 +331,26 @@ mod tests {
     }
 
     #[test]
-    fn semantic_control_command_and_stale_error_round_trip_at_version_four() {
-        assert_eq!(PROTOCOL_VERSION, 4);
+    fn semantic_control_command_and_stale_error_round_trip_at_version_five() {
+        assert_eq!(PROTOCOL_VERSION, 5);
         let request = RequestEnvelope {
             version: PROTOCOL_VERSION,
             request_id: 4,
             command: Command::SetWave3Control {
                 id: DeviceId(2),
-                expected_generation: DeviceGeneration(7),
+                expected_generation: DeviceGeneration::new([0; 16], 7),
                 control: Wave3Control::InputGain(FixedPointValue { raw: 512, fractional_bits: 8 }),
             },
         };
         assert_eq!(
             serde_json::to_value(request).expect("serialize semantic request"),
             json!({
-                "version": 4,
+                "version": 5,
                 "request_id": 4,
                 "command": {
                     "SetWave3Control": {
                         "id": 2,
-                        "expected_generation": 7,
+                        "expected_generation": "00000000000000000000000000000000:7",
                         "control": {"InputGain": {"raw": 512, "fractional_bits": 8}}
                     }
                 }
@@ -359,8 +361,8 @@ mod tests {
 
         let error = IpcError {
             kind: IpcErrorKind::StaleDeviceGeneration {
-                expected: DeviceGeneration(7),
-                actual: DeviceGeneration(8),
+                expected: DeviceGeneration::new([0; 16], 7),
+                actual: DeviceGeneration::new([0; 16], 8),
             },
             message: "stale device generation".to_owned(),
         };
@@ -368,11 +370,11 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response.clone()).expect("serialize stale response"),
             json!({
-                "version": 4,
+                "version": 5,
                 "request_id": 4,
                 "result": {
                     "Err": {
-                        "kind": {"StaleDeviceGeneration": {"expected": 7, "actual": 8}},
+                        "kind": {"StaleDeviceGeneration": {"expected": "00000000000000000000000000000000:7", "actual": "00000000000000000000000000000000:8"}},
                         "message": "stale device generation"
                     }
                 }
@@ -385,7 +387,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response).expect("serialize control response"),
             json!({
-                "version": 4,
+                "version": 5,
                 "request_id": 4,
                 "result": {
                     "Ok": {
@@ -432,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn mixer_route_round_trip_uses_named_exact_fader_steps_at_version_four() {
+    fn mixer_route_round_trip_uses_named_exact_fader_steps_at_version_five() {
         let request = RequestEnvelope {
             version: PROTOCOL_VERSION,
             request_id: 18,
@@ -450,7 +452,7 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "version": 4,
+                "version": 5,
                 "request_id": 18,
                 "command": {
                     "SetMixerRoute": {
