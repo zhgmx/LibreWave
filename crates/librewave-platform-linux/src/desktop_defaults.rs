@@ -48,14 +48,7 @@ impl DesktopDefaultStore for PipeWireDesktopDefaults {
         let client = MetadataClient::connect()?;
         client.set(0, Some(SYSTEM));
         client.set(1, Some(MICROPHONE));
-        client.roundtrip()?;
-        let observed = client.read()?;
-        if observed.configured_sink.as_deref() != Some(SYSTEM)
-            || observed.configured_source.as_deref() != Some(MICROPHONE)
-        {
-            return Err(io::Error::other("desktop default selection was not verified"));
-        }
-        Ok(observed)
+        client.wait_configured(Some(SYSTEM), Some(MICROPHONE), "selection")
     }
     fn recover(&mut self) -> io::Result<DesktopDefaults> {
         let client = MetadataClient::connect()?;
@@ -67,14 +60,11 @@ impl DesktopDefaultStore for PipeWireDesktopDefaults {
         if current.configured_source != expected.configured_source {
             client.set(1, expected.configured_source.as_deref());
         }
-        client.roundtrip()?;
-        let observed = client.read()?;
-        if observed.configured_sink != expected.configured_sink
-            || observed.configured_source != expected.configured_source
-        {
-            return Err(io::Error::other("desktop default recovery was not verified"));
-        }
-        Ok(observed)
+        client.wait_configured(
+            expected.configured_sink.as_deref(),
+            expected.configured_source.as_deref(),
+            "recovery",
+        )
     }
     fn restore(&mut self, saved: &DesktopDefaults) -> io::Result<DesktopDefaults> {
         validate_defaults(saved)?;
@@ -87,14 +77,11 @@ impl DesktopDefaultStore for PipeWireDesktopDefaults {
         if current.configured_source != expected.configured_source {
             client.set(1, expected.configured_source.as_deref());
         }
-        client.roundtrip()?;
-        let observed = client.read()?;
-        if observed.configured_sink != expected.configured_sink
-            || observed.configured_source != expected.configured_source
-        {
-            return Err(io::Error::other("desktop default restoration was not verified"));
-        }
-        Ok(observed)
+        client.wait_configured(
+            expected.configured_sink.as_deref(),
+            expected.configured_source.as_deref(),
+            "restoration",
+        )
     }
 }
 
@@ -232,6 +219,36 @@ impl MetadataClient {
         match &*self.defaults.borrow() {
             Ok(defaults) => Ok(defaults.clone()),
             Err(error) => Err(io::Error::new(error.kind(), error.to_string())),
+        }
+    }
+    fn wait_configured(
+        &self,
+        sink: Option<&str>,
+        source: Option<&str>,
+        action: &str,
+    ) -> io::Result<DesktopDefaults> {
+        self.roundtrip()?;
+        // A core sync flushes the request to the metadata owner. WirePlumber
+        // publishes the resulting property event asynchronously, after that
+        // sync can complete. Verify the owner acknowledgement, not the flush.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let observed = match &*self.defaults.borrow() {
+                Ok(defaults) => defaults.clone(),
+                Err(error) => return Err(io::Error::new(error.kind(), error.to_string())),
+            };
+            if observed.configured_sink.as_deref() == sink
+                && observed.configured_source.as_deref() == source
+            {
+                return Ok(observed);
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("desktop default {action} was not acknowledged within its deadline"),
+                ));
+            }
+            self.loop_.loop_().iterate(Duration::from_millis(5));
         }
     }
     fn set(&self, index: usize, name: Option<&str>) {

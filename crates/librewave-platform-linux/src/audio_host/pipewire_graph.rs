@@ -1240,6 +1240,52 @@ context.modules = [
         }
 
         #[test]
+        #[ignore = "requires LIBREWAVE_PIPEWIRE_INTEGRATION=1; delays only a private WirePlumber process without USB or ALSA"]
+        fn private_desktop_defaults_wait_for_policy_acknowledgement() {
+            use crate::desktop_defaults::{DesktopDefaultStore, PipeWireDesktopDefaults};
+            assert_eq!(std::env::var("LIBREWAVE_PIPEWIRE_INTEGRATION").as_deref(), Ok("1"));
+            let server = PrivatePipeWire::start(256, 11);
+            let policy = server.start_wireplumber();
+            let mut store = PipeWireDesktopDefaults;
+            let original = store.read().expect("private policy defaults");
+            for selecting in [true, false] {
+                let pid = policy.0.id().to_string();
+                assert!(
+                    Command::new("kill")
+                        .args(["-STOP", &pid])
+                        .status()
+                        .expect("pause private policy")
+                        .success()
+                );
+                std::thread::scope(|scope| {
+                    scope.spawn(|| {
+                        std::thread::sleep(Duration::from_millis(150));
+                        assert!(
+                            Command::new("kill")
+                                .args(["-CONT", &pid])
+                                .status()
+                                .expect("resume private policy")
+                                .success()
+                        );
+                    });
+                    if selecting {
+                        let selected = store.select().expect("wait for selection acknowledgement");
+                        assert_eq!(selected.configured_sink.as_deref(), Some("librewave.system"));
+                        assert_eq!(
+                            selected.configured_source.as_deref(),
+                            Some("librewave.microphone")
+                        );
+                    } else {
+                        let restored =
+                            store.restore(&original).expect("wait for restoration acknowledgement");
+                        assert_eq!(restored.configured_sink, original.configured_sink);
+                        assert_eq!(restored.configured_source, original.configured_source);
+                    }
+                });
+            }
+        }
+
+        #[test]
         #[ignore = "requires LIBREWAVE_PIPEWIRE_INTEGRATION=1; uses a private metadata server without USB, ALSA, or desktop services"]
         fn private_desktop_defaults_are_selected_and_restored() {
             use crate::desktop_defaults::{DesktopDefaultStore, PipeWireDesktopDefaults};
