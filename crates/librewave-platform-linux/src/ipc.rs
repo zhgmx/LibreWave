@@ -13,7 +13,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -82,22 +82,18 @@ impl Client {
                 ClientError::Connection { path: self.socket_path.clone(), message }
             }
         })?;
-        stream.set_read_timeout(Some(CONNECTION_TIMEOUT)).map_err(|error| {
-            ClientError::Connection { path: self.socket_path.clone(), message: error.to_string() }
-        })?;
-        stream.set_write_timeout(Some(CONNECTION_TIMEOUT)).map_err(|error| {
-            ClientError::Connection { path: self.socket_path.clone(), message: error.to_string() }
+        stream.set_nonblocking(true).map_err(|error| ClientError::Connection {
+            path: self.socket_path.clone(),
+            message: error.to_string(),
         })?;
         let request = RequestEnvelope { version: PROTOCOL_VERSION, request_id, command };
         let frame = encode_request(&request)
             .map_err(|error| ClientError::Protocol(format!("could not encode request: {error}")))?;
-        write_frame(&mut stream, &frame).map_err(|error| ClientError::Connection {
-            path: self.socket_path.clone(),
-            message: error.to_string(),
+        write_frame(&mut stream, &frame, CONNECTION_TIMEOUT, &mut || {}).map_err(|error| {
+            ClientError::Connection { path: self.socket_path.clone(), message: error.to_string() }
         })?;
-        let payload = read_frame(&mut stream).map_err(|error| ClientError::Connection {
-            path: self.socket_path.clone(),
-            message: error.to_string(),
+        let payload = read_frame(&mut stream, CONNECTION_TIMEOUT, &mut || {}).map_err(|error| {
+            ClientError::Connection { path: self.socket_path.clone(), message: error.to_string() }
         })?;
         let response =
             decode_response(&payload).map_err(|error| ClientError::Protocol(error.to_string()))?;
@@ -227,7 +223,7 @@ where
 }
 
 fn handle_connection_with_timeout<F>(
-    mut stream: UnixStream,
+    stream: UnixStream,
     policy: PeerCredentialPolicy,
     timeout: Duration,
     handler: F,
@@ -235,14 +231,27 @@ fn handle_connection_with_timeout<F>(
 where
     F: FnOnce(Command) -> Result<Response, IpcError>,
 {
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
+    handle_connection_with_tick(stream, policy, timeout, handler, &mut || {})
+}
+
+fn handle_connection_with_tick<F, T>(
+    mut stream: UnixStream,
+    policy: PeerCredentialPolicy,
+    timeout: Duration,
+    handler: F,
+    tick: &mut T,
+) -> io::Result<()>
+where
+    F: FnOnce(Command) -> Result<Response, IpcError>,
+    T: FnMut(),
+{
+    stream.set_nonblocking(true)?;
     peer_credentials(&stream).and_then(|credentials| {
         policy
             .check(credentials)
             .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))
     })?;
-    let payload = read_frame(&mut stream)?;
+    let payload = read_frame(&mut stream, timeout, tick)?;
     let request = match decode_request(&payload) {
         Ok(request) => request,
         Err(error) => {
@@ -251,18 +260,18 @@ where
                 IpcError { kind: IpcErrorKind::InvalidRequest, message: error.to_string() },
             );
             let frame = encode_response(&response).map_err(|error| codec_io_error(&error))?;
-            write_frame(&mut stream, &frame)?;
+            write_frame(&mut stream, &frame, timeout, tick)?;
             return Ok(());
         }
     };
     let response = process_request(request, handler);
     let frame = encode_response(&response).map_err(|error| codec_io_error(&error))?;
-    write_frame(&mut stream, &frame)
+    write_frame(&mut stream, &frame, timeout, tick)
 }
 
 /// Serves local IPC and a bounded control-side audio tick on one owner thread.
-/// The shorter connection timeout prevents a stalled client from hiding an
-/// audio progress fault for the ordinary connection timeout.
+/// Frame transfers have absolute deadlines and run the tick between I/O
+/// attempts. Partial traffic cannot extend a frame deadline.
 ///
 /// # Errors
 ///
@@ -285,11 +294,12 @@ where
         tick();
         match listener.listener.accept() {
             Ok((stream, _)) => {
-                if let Err(error) = handle_connection_with_timeout(
+                if let Err(error) = handle_connection_with_tick(
                     stream,
                     policy,
                     Duration::from_millis(250),
                     &mut handler,
+                    &mut tick,
                 ) {
                     report_connection_error(error);
                 }
@@ -334,9 +344,14 @@ where
     }
 }
 
-fn read_frame(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
+fn read_frame<T: FnMut()>(
+    stream: &mut UnixStream,
+    timeout: Duration,
+    tick: &mut T,
+) -> io::Result<Vec<u8>> {
+    let deadline = Instant::now() + timeout;
     let mut length = [0; 4];
-    stream.read_exact(&mut length).map_err(map_eof)?;
+    read_exact_until(stream, &mut length, deadline, tick, Instant::now).map_err(map_eof)?;
     let length = u32::from_be_bytes(length) as usize;
     if length > MAX_FRAME_SIZE {
         return Err(io::Error::new(
@@ -345,8 +360,67 @@ fn read_frame(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
         ));
     }
     let mut payload = vec![0; length];
-    stream.read_exact(&mut payload).map_err(map_eof)?;
+    read_exact_until(stream, &mut payload, deadline, tick, Instant::now).map_err(map_eof)?;
     Ok(payload)
+}
+
+fn remaining(deadline: Instant, now: Instant) -> io::Result<Duration> {
+    deadline
+        .checked_duration_since(now)
+        .filter(|left| !left.is_zero())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "IPC frame deadline expired"))
+}
+
+fn read_exact_until<R: Read, T: FnMut(), N: FnMut() -> Instant>(
+    reader: &mut R,
+    mut buffer: &mut [u8],
+    deadline: Instant,
+    tick: &mut T,
+    mut now: N,
+) -> io::Result<()> {
+    while !buffer.is_empty() {
+        let left = remaining(deadline, now())?;
+        match reader.read(buffer) {
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(count) => buffer = &mut buffer[count..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                tick();
+                std::thread::sleep(left.min(Duration::from_millis(5)));
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+        tick();
+    }
+    remaining(deadline, now())?;
+    Ok(())
+}
+
+fn write_all_until<W: Write, T: FnMut(), N: FnMut() -> Instant>(
+    writer: &mut W,
+    mut buffer: &[u8],
+    deadline: Instant,
+    tick: &mut T,
+    mut now: N,
+) -> io::Result<()> {
+    while !buffer.is_empty() {
+        let left = remaining(deadline, now())?;
+        match writer.write(buffer) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(count) => buffer = &buffer[count..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                tick();
+                std::thread::sleep(left.min(Duration::from_millis(5)));
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+        tick();
+    }
+    remaining(deadline, now())?;
+    Ok(())
 }
 
 fn map_eof(error: io::Error) -> io::Error {
@@ -357,8 +431,13 @@ fn map_eof(error: io::Error) -> io::Error {
     }
 }
 
-fn write_frame(stream: &mut UnixStream, frame: &[u8]) -> io::Result<()> {
-    stream.write_all(frame)
+fn write_frame<T: FnMut()>(
+    stream: &mut UnixStream,
+    frame: &[u8],
+    timeout: Duration,
+    tick: &mut T,
+) -> io::Result<()> {
+    write_all_until(stream, frame, Instant::now() + timeout, tick, Instant::now)
 }
 
 fn codec_io_error(error: &CodecError) -> io::Error {
@@ -456,6 +535,74 @@ fn is_stale_connection_error(error: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Trickle<'a>(&'a std::cell::Cell<Instant>);
+
+    impl Read for Trickle<'_> {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            self.0.set(self.0.get() + Duration::from_millis(100));
+            bytes[0] = b' ';
+            Ok(1)
+        }
+    }
+
+    impl Write for Trickle<'_> {
+        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+            self.0.set(self.0.get() + Duration::from_millis(100));
+            Ok(1)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn trickled_reads_and_writes_keep_ticking_and_cannot_extend_deadlines() {
+        for write in [false, true] {
+            let start = Instant::now();
+            let clock = std::cell::Cell::new(start);
+            let mut trickle = Trickle(&clock);
+            let mut ticks = 0;
+            let deadline = start + Duration::from_millis(250);
+            let mut bytes = [0; 8];
+            let result = if write {
+                write_all_until(&mut trickle, &bytes, deadline, &mut || ticks += 1, || clock.get())
+            } else {
+                read_exact_until(&mut trickle, &mut bytes, deadline, &mut || ticks += 1, || {
+                    clock.get()
+                })
+            };
+            assert_eq!(result.expect_err("absolute timeout").kind(), io::ErrorKind::TimedOut);
+            assert_eq!(ticks, 3);
+            assert_eq!(clock.get() - start, Duration::from_millis(300));
+        }
+    }
+
+    #[test]
+    fn complete_private_request_preserves_response_and_runs_supervision() {
+        let (server, mut client) = UnixStream::pair().expect("socket pair");
+        let frame = encode_request(&RequestEnvelope {
+            version: PROTOCOL_VERSION,
+            request_id: 7,
+            command: Command::GetStatus,
+        })
+        .expect("request");
+        client.write_all(&frame).expect("send");
+        let mut ticks = 0;
+        handle_connection_with_tick(
+            server,
+            PeerCredentialPolicy::current_user(),
+            Duration::from_secs(1),
+            |_| Ok(Response::Status { snapshot: librewave_core::Snapshot::empty() }),
+            &mut || ticks += 1,
+        )
+        .expect("serve");
+        assert!(ticks >= 3);
+        client.set_nonblocking(true).expect("nonblocking");
+        let payload =
+            read_frame(&mut client, Duration::from_secs(1), &mut || {}).expect("response");
+        assert_eq!(decode_response(&payload).expect("decode").request_id, 7);
+    }
 
     #[test]
     fn peer_policy_rejects_a_different_uid() {
