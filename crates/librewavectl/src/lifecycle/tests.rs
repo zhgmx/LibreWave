@@ -959,6 +959,15 @@ fn setup_never_overwrites_a_stale_original_backup() {
 fn uninstall_reports_not_installed_without_claiming_removal() {
     let fixture = Fixture::new();
     assert_eq!(fixture.lifecycle().uninstall(false).unwrap(), UninstallOutcome::NotInstalled);
+    assert!(!test_paths(&fixture.root).state_root.exists());
+    let paths = test_paths(&fixture.root);
+    let held = super::runtime::lock(&paths).unwrap();
+    fs::create_dir(&paths.state_root).unwrap();
+    fs::remove_dir(&paths.state_root).unwrap();
+    assert_eq!(super::runtime::lock(&paths).err().unwrap().kind(), io::ErrorKind::WouldBlock);
+    drop(held);
+    drop(super::runtime::lock(&paths).unwrap());
+    assert!(!paths.state_root.exists());
 }
 
 #[test]

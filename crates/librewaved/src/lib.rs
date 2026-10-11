@@ -94,15 +94,25 @@ fn service_state(availability: ServiceAvailability) -> ServiceState {
 /// Returns the operating-system error when the daemon socket cannot be created or accepted.
 pub fn run(socket_path: impl Into<PathBuf>) -> std::io::Result<()> {
     let socket_path = socket_path.into();
+    let signals = librewave_platform_linux::shutdown::ShutdownSignals::install()?;
     let daemon = Daemon::new().map_err(std::io::Error::other)?;
     let daemon = std::cell::RefCell::new(daemon);
-    librewave_platform_linux::ipc::serve_with_tick(
+    let serving = librewave_platform_linux::ipc::serve_with_tick(
         &socket_path,
         |command| daemon.borrow_mut().handle(command, librewave_core::Origin::Client),
         || daemon.borrow_mut().audio_tick(),
         || daemon.borrow_mut().audio_maintenance_tick(),
         |error| eprintln!("librewaved: connection error: {error}"),
-    )
+        || signals.requested(),
+    );
+    let cleanup = daemon.borrow_mut().quiesce_for_shutdown();
+    match (serving, cleanup) {
+        (Err(error), Err(cleanup)) => Err(std::io::Error::other(format!(
+            "IPC stopped: {error}; audio cleanup also failed: {cleanup}"
+        ))),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 /// Returns the daemon socket path selected by the environment.

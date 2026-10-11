@@ -156,6 +156,8 @@ The daemon stores active audio intent in `librewave/profiles/audio-state.json` b
 
 These commands do not enable login startup, change Gain Lock, or change an ALSA saved state. Closing the application window keeps the daemon running.
 
+The daemon handles termination on its control thread. It releases its current audio resources, retains accepted restart intent, and removes its own IPC socket. Stop verifies socket removal before it discards the ownership journal. Lifecycle operations lock a stable parent directory so removal cannot replace the lock authority or recreate the removed application state directory.
+
 ## Controlled live validation
 
 The new lifecycle has isolated regression tests. Native GUI behavior and real-device recovery remain unverified for this code.

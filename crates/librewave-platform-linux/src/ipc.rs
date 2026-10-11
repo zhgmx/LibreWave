@@ -277,23 +277,25 @@ where
 /// # Errors
 ///
 /// Returns a socket bind or accept error.
-pub fn serve_with_tick<F, C, T, R>(
+pub fn serve_with_tick<F, C, T, R, S>(
     socket_path: &Path,
     mut handler: F,
     mut control_tick: C,
     mut maintenance_tick: T,
     mut report_connection_error: R,
+    mut should_shutdown: S,
 ) -> io::Result<()>
 where
     F: FnMut(Command) -> Result<Response, IpcError>,
     C: FnMut(),
     T: FnMut(),
     R: FnMut(io::Error),
+    S: FnMut() -> bool,
 {
     let listener = bind_private_socket(socket_path)?;
     listener.listener.set_nonblocking(true)?;
     let policy = PeerCredentialPolicy::current_user();
-    loop {
+    while !should_shutdown() {
         control_tick();
         match listener.listener.accept() {
             Ok((stream, _)) => {
@@ -314,6 +316,7 @@ where
             Err(error) => return Err(error),
         }
     }
+    remove_owned_socket(&listener.path, listener.identity)
 }
 
 fn read_frame<T: FnMut()>(
@@ -507,6 +510,63 @@ fn is_stale_connection_error(error: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn termination_removes_owned_socket() {
+        const CHILD: &str = "LIBREWAVE_SIGNAL_TEST_SOCKET";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let signals = crate::shutdown::ShutdownSignals::install().expect("register signals");
+            assert!(crate::shutdown::ShutdownSignals::install().is_err());
+            serve_with_tick(
+                Path::new(&path),
+                |_| Ok(Response::Status { snapshot: librewave_core::Snapshot::empty() }),
+                || {},
+                || {},
+                |_| {},
+                || signals.requested(),
+            )
+            .expect("serve until termination");
+            return;
+        }
+        for signal in ["-TERM", "-INT"] {
+            let root = std::env::temp_dir()
+                .join(format!("librewave-signal-{}-{signal}", std::process::id()));
+            fs::create_dir(&root).expect("fixture");
+            let path = root.join("daemon.sock");
+            let mut child =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "ipc::tests::termination_removes_owned_socket",
+                        "--exact",
+                        "--test-threads=1",
+                    ])
+                    .env(CHILD, &path)
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .expect("isolated signal server");
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !path.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(path.exists(), "isolated server did not bind");
+            assert!(
+                std::process::Command::new("kill")
+                    .args([signal, &child.id().to_string()])
+                    .status()
+                    .expect("signal child")
+                    .success()
+            );
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while child.try_wait().expect("child status").is_none() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if child.try_wait().expect("child status").is_none() {
+                child.kill().expect("stop timed-out child");
+            }
+            assert!(child.wait().expect("child exit").success());
+            assert!(!path.exists(), "terminated daemon left its socket");
+            fs::remove_dir(root).expect("remove fixture");
+        }
+    }
 
     struct Trickle<'a>(&'a std::cell::Cell<Instant>);
 

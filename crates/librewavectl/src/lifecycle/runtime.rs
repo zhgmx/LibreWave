@@ -47,6 +47,7 @@ struct RuntimeManifest {
 pub(super) trait RuntimeHost {
     fn unit(&mut self) -> io::Result<UnitState>;
     fn verify_process(&mut self, manifest: &Manifest, running: bool) -> io::Result<()>;
+    fn verify_ipc_released(&mut self) -> io::Result<()>;
     fn service(&mut self, operation: SessionOperation) -> io::Result<()>;
     fn request(&mut self, command: Command) -> io::Result<Response>;
     fn now(&self) -> Instant {
@@ -59,6 +60,15 @@ pub(super) trait RuntimeHost {
 
 struct ProductionHost;
 impl RuntimeHost for ProductionHost {
+    fn verify_ipc_released(&mut self) -> io::Result<()> {
+        if checked_exists(&configured_socket_path())? {
+            return Err(io::Error::other(format!(
+                "the stopped daemon left its IPC path at {}; retain ownership and inspect this path",
+                configured_socket_path().display(),
+            )));
+        }
+        Ok(())
+    }
     fn unit(&mut self) -> io::Result<UnitState> {
         ProductionUnitInspector.inspect(UNIT_FILE_NAME)
     }
@@ -461,6 +471,7 @@ fn finish_stop(
             return Err(io::Error::other("daemon service is still active after stop"));
         }
         host.verify_process(manifest, false)?;
+        host.verify_ipc_released()?;
     }
     verify_restorable_files(paths, record)?;
     if let Some(saved) = &record.suspended {
@@ -619,8 +630,11 @@ fn invalid(message: &str) -> io::Error {
 
 pub(super) fn lock(paths: &InstallPaths) -> io::Result<OperationLock> {
     validate_parent_chain(&paths.state_root.join("runtime-manifest.json"), paths)?;
-    fs::create_dir_all(&paths.state_root)?;
-    OperationLock::acquire(&paths.state_root)
+    // Lock a stable parent inode. Removing an installation cannot replace
+    // the lock authority or recreate the application state directory.
+    let parent = paths.state_root.parent().ok_or_else(|| invalid("state root has no parent"))?;
+    fs::create_dir_all(parent)?;
+    OperationLock::acquire(parent)
 }
 fn installation(paths: &InstallPaths) -> io::Result<Manifest> {
     let manifest = read_json::<Manifest>(&paths.manifest())?.ok_or_else(|| {

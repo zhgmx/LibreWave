@@ -34,6 +34,7 @@ pub use services::{
     HostServiceObservation, ServiceProbe, SessionOperation, failed_observation, session_operation,
 };
 pub mod operation_lock;
+pub mod shutdown;
 mod usb;
 pub mod usb_access;
 

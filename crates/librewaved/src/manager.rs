@@ -286,6 +286,15 @@ impl Daemon {
         persistence
     }
 
+    pub(crate) fn quiesce_for_shutdown(&mut self) -> std::io::Result<()> {
+        // A service restart must keep accepted intent on disk. Release only
+        // the current process's resources, using the normal teardown order.
+        self.audio
+            .as_mut()
+            .map_or(Ok(()), AudioSupervisor::stop)
+            .map_err(|()| std::io::Error::other("audio cleanup failed during daemon shutdown"))
+    }
+
     fn save_audio_session(&mut self, session: AudioSession) -> Result<(), IpcError> {
         if let Err(error) = self.audio_session_store.save(&session) {
             // A post-rename error can have committed the intent. Retry the same

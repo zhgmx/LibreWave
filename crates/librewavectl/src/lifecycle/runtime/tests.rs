@@ -24,6 +24,7 @@ struct Host {
     replay_defaults: Option<DesktopDefaults>,
     delayed_default_replay: Option<(usize, DesktopDefaults)>,
     restoration_started: bool,
+    stale_socket: bool,
 }
 impl Host {
     fn new() -> Self {
@@ -34,6 +35,7 @@ impl Host {
             replay_defaults: None,
             delayed_default_replay: None,
             restoration_started: false,
+            stale_socket: false,
             baseline: None,
             audio: false,
             defaults: DesktopDefaults {
@@ -66,6 +68,9 @@ impl Host {
     }
 }
 impl RuntimeHost for Host {
+    fn verify_ipc_released(&mut self) -> io::Result<()> {
+        if self.stale_socket { Err(io::Error::other("stale daemon socket")) } else { Ok(()) }
+    }
     fn unit(&mut self) -> io::Result<UnitState> {
         Ok(UnitState { enabled: false, active: self.active })
     }
@@ -309,6 +314,22 @@ fn stop_waits_through_empty_metadata_and_delayed_policy_replay() {
     restored(&paths, &fragment, &host);
     assert_eq!(host.defaults, original);
     assert!(host.delayed_default_replay.is_none());
+}
+
+#[test]
+fn stop_keeps_ownership_when_the_terminated_daemon_leaves_a_socket() {
+    let (_fixture, paths, fragment) = fixture();
+    let mut host = Host::new();
+    start(&paths, Some(&fragment), &mut host).unwrap();
+    host.stale_socket = true;
+    assert!(stop(&paths, &mut host).is_err());
+    assert!(record_path(&paths).exists());
+    assert!(!host.active);
+    let events = host.events.clone();
+    host.stale_socket = false;
+    stop(&paths, &mut host).unwrap();
+    restored(&paths, &fragment, &host);
+    assert_eq!(events, host.events);
 }
 
 #[test]

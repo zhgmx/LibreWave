@@ -102,6 +102,18 @@ fn start_intent_survives_daemon_restart_and_stop_cancels_it_before_cleanup() {
 }
 
 #[test]
+fn process_shutdown_releases_owner_without_cancelling_durable_restart_intent() {
+    let fixture = Fixture::new();
+    let mut daemon = fixture.daemon();
+    Fixture::request(&mut daemon, Command::StartExperimentalAudio).expect("start intent");
+    daemon.quiesce_for_shutdown().expect("release process owner");
+    assert!(!daemon.audio.as_ref().is_some_and(AudioSupervisor::needs_tick));
+    assert!(fixture.store().load().expect("retained intent").enabled);
+    let restarted = fixture.daemon();
+    assert!(restarted.audio.as_ref().is_some_and(AudioSupervisor::needs_tick));
+}
+
+#[test]
 fn baseline_survives_partial_selection_restart_and_interrupted_restoration() {
     let fixture = Fixture::new();
     let original = fixture.value.borrow().clone();
