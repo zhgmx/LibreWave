@@ -52,10 +52,13 @@ status polling obtains the current profile.
 
 Normal daemon startup leaves the mixer audio path inactive. The opt-in host can
 report an active mixer after it owns the audio path. Live meter values are not
-published over IPC. Hardware controls still require physical write validation.
+published over IPC. Physical write validation is limited to the Low-cut control
+on Wave:3 API 5.4. Other hardware controls still require validation.
 Default-route selection, restart recovery, and hotplug remain unverified.
 Longer stability on the current startup and routing implementation also
 requires validation.
+Software microphone monitoring still needs a test that separates it from
+direct device monitoring.
 
 The Linux application uses upstream Zed GPUI and `gpui_platform` from
 Zed tag `v0.233.9`, commit `236e6ddf54e0763d0343f4d3e369d2ae00fe9670`,

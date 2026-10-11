@@ -183,13 +183,26 @@ pub(crate) fn decode_field(
                 reason: ValueError::InvalidBoolean(value),
             }),
         },
-        FieldCodec::SignedFixed { fractional_bits, .. } => {
-            let value = SemanticValue::FixedPoint {
-                raw: i32::from(i16::from_le_bytes([bytes[0], bytes[1]])),
-                fractional_bits,
-            };
-            validate(&spec.codec(), value)
-                .map_err(|reason| CodecError::Value { field: spec.field(), reason })?;
+        FieldCodec::SignedFixed { fractional_bits, minimum_raw, maximum_raw, .. } => {
+            let raw = i32::from(i16::from_le_bytes([bytes[0], bytes[1]]));
+            let value = SemanticValue::FixedPoint { raw, fractional_bits };
+            if spec.field() == Wave3ConfigField::InputGain {
+                // The physical gain knob can report values between the reviewed write steps.
+                // Preserve that observed value when patching a different field.
+                if raw < minimum_raw || raw > maximum_raw {
+                    return Err(CodecError::Value {
+                        field: spec.field(),
+                        reason: ValueError::OutsideRange {
+                            minimum: minimum_raw,
+                            maximum: maximum_raw,
+                            actual: raw,
+                        },
+                    });
+                }
+            } else {
+                validate(&spec.codec(), value)
+                    .map_err(|reason| CodecError::Value { field: spec.field(), reason })?;
+            }
             Ok(value)
         }
         FieldCodec::VolumeSelect => {

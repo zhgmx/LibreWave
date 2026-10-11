@@ -32,7 +32,7 @@ The reviewed API 5.3 and 5.4 `/config` messages use the same 16-byte layout. The
 
 | Control | Wire location | Unit and limits | Confidence |
 | --- | --- | --- | --- |
-| Microphone gain | Bytes 0 to 1, signed little-endian Q8.8 | 0 to 40 dB, 0.5 dB steps | Recovered schema and independent implementation |
+| Microphone gain | Bytes 0 to 1, signed little-endian Q8.8 | 0 to 40 dB; reviewed write step is 0.5 dB | Recovered schema, independent implementation, and physical read |
 | Microphone mute | Byte 4 | Boolean | Recovered schema |
 | Clipguard | Byte 5 | Boolean | Recovered schema |
 | Low-cut filter | Byte 6 | Boolean | Recovered schema |
@@ -48,7 +48,9 @@ The Wave:3 configuration does not contain Wave Link mixer faders. Mixer channel 
 
 LibreWave now has a typed transaction path for these reviewed API 5.3 and 5.4 fields. It admits the exact device and API, changes one semantic field in a complete baseline, preserves protected bytes, reads the complete message before and after the write, and attempts restoration after a failure. Default tests use fake transports and do not write to live hardware.
 
-Physical validation of each writable field is still required. The test plan must name the field, original value, requested value, readback, and safe restoration. Product documentation must not claim that physical write validation is complete until those tests pass.
+Physical Wave:3 API 5.4 reads can report microphone gain between the reviewed 0.5 dB write steps, including raw Q8.8 value 4726 (about 18.46 dB). LibreWave accepts in-range Q8.8 values on reads and preserves their exact bytes when it writes another field. Authored gain writes still require 0.5 dB steps.
+
+Physical write validation is limited to the Low-cut filter on Wave:3 API 5.4. Other writable fields still require physical validation. Each test plan must name the field, original value, requested value, readback, and safe restoration.
 
 ## Generated catalog
 

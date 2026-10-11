@@ -856,7 +856,9 @@ fn stepped(
     minimum: i32,
     maximum: i32,
 ) -> Option<FixedPointValue> {
-    let raw = value.raw.checked_add(delta)?;
+    const HALF_DB_RAW: i32 = 128;
+    let target = value.raw.checked_add(delta)?;
+    let raw = target.checked_add(HALF_DB_RAW / 2)?.div_euclid(HALF_DB_RAW) * HALF_DB_RAW;
     (minimum..=maximum).contains(&raw).then_some(FixedPointValue { raw, ..value })
 }
 
@@ -886,6 +888,22 @@ mod tests {
         assert_eq!(stepped(gain, 128, 0, 40 * 256).map(|value| value.raw), Some(128));
         let headphone = FixedPointValue { raw: -60 * 256, fractional_bits: 8 };
         assert_eq!(stepped(headphone, -128, -60 * 256, 0), None);
+    }
+
+    #[test]
+    fn hardware_steps_round_physical_gain_to_reviewed_write_values() {
+        let physical_gain = FixedPointValue { raw: 4_726, fractional_bits: 8 };
+        assert_eq!(stepped(physical_gain, 128, 0, 40 * 256).map(|value| value.raw), Some(4_864));
+        assert_eq!(stepped(physical_gain, -128, 0, 40 * 256).map(|value| value.raw), Some(4_608));
+        let physical_headphone = FixedPointValue { raw: -1_153, fractional_bits: 8 };
+        assert_eq!(
+            stepped(physical_headphone, 128, -60 * 256, 0).map(|value| value.raw),
+            Some(-1_024)
+        );
+        assert_eq!(
+            stepped(physical_headphone, -128, -60 * 256, 0).map(|value| value.raw),
+            Some(-1_280)
+        );
     }
 
     #[test]

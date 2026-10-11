@@ -238,6 +238,42 @@ fn rejects_a_device_side_stale_baseline_before_any_write() {
 }
 
 #[test]
+fn physical_gain_change_blocks_stale_write_then_preserves_gain_on_lowcut_restore() {
+    let mut original = baseline();
+    original[0..2].copy_from_slice(&4_096i16.to_le_bytes());
+    original[6] = 1;
+    let mut physical = original;
+    physical[0..2].copy_from_slice(&4_726i16.to_le_bytes());
+    let mut restored = physical;
+    restored[6] = 0;
+    let mut transport = FakeTransport::with_probe(ApiVersion::new(5, 4), original);
+    let mut session = transport.admit(3);
+    let expected = *session.config();
+    transport.read(physical);
+
+    assert_eq!(
+        session.transact_control(&mut transport, expected, Wave3ControlChange::Lowcut(false)),
+        TransactionOutcome::Rejected {
+            error: TransactionError::StaleBaseline { expected, actual: *session.config() }
+        }
+    );
+    assert_eq!(session.config().as_bytes(), &physical);
+    assert_eq!(transport.events.len(), 1);
+    assert!(matches!(transport.events[0], Event::Read { .. }));
+
+    let expected = *session.config();
+    transport.read(physical);
+    transport.writes.push_back(Ok(16));
+    transport.read(restored);
+    assert_eq!(
+        session.transact_control(&mut transport, expected, Wave3ControlChange::Lowcut(false)),
+        TransactionOutcome::Applied { config: *session.config() }
+    );
+    assert_eq!(session.config().as_bytes(), &restored);
+    assert!(matches!(&transport.events[2], Event::Write { payload, .. } if payload == &restored));
+}
+
+#[test]
 fn unchanged_and_caller_stale_requests_never_write() {
     let original = baseline();
     let mut unchanged_transport = FakeTransport::with_probe(ApiVersion::new(5, 4), original);

@@ -210,10 +210,28 @@ mod tests {
     }
 
     #[test]
-    fn typed_controls_reject_invalid_wire_values_through_the_schema() {
+    fn physical_gain_between_write_steps_is_read_and_preserved() {
         let schema = admitted_config(ApiVersion::new(5, 4));
         let mut payload = [0; 16];
-        payload[0..2].copy_from_slice(&1i16.to_le_bytes());
+        payload[0..2].copy_from_slice(&4_726i16.to_le_bytes());
+        payload[6] = 1;
+        payload[12] = VolumeSelect::Mic as u8;
+        let mut config = Wave3Config::from_schema(schema, &payload).expect("payload shape");
+        assert_eq!(config.controls().expect("physical gain").microphone_gain.raw_q8_8(), 4_726);
+        assert_eq!(
+            config.apply_control(Wave3ControlChange::Lowcut(false)),
+            Ok(PatchResult::Changed)
+        );
+        payload[6] = 0;
+        assert_eq!(config.as_bytes(), &payload);
+        assert!(matches!(Wave3GainDb::from_raw_q8_8(4_726), Err(ValueError::WrongStep { .. })));
+    }
+
+    #[test]
+    fn typed_controls_reject_out_of_range_wire_values_through_the_schema() {
+        let schema = admitted_config(ApiVersion::new(5, 4));
+        let mut payload = [0; 16];
+        payload[0..2].copy_from_slice(&10_241i16.to_le_bytes());
         payload[12] = VolumeSelect::Mic as u8;
         let config = Wave3Config::from_schema(schema, &payload).expect("payload shape");
 
@@ -221,7 +239,7 @@ mod tests {
             config.controls(),
             Err(CodecError::Value {
                 field: Wave3ConfigField::InputGain,
-                reason: ValueError::WrongStep { .. }
+                reason: ValueError::OutsideRange { .. }
             })
         ));
     }
