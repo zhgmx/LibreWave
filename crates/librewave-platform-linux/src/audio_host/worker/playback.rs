@@ -13,6 +13,7 @@ use super::{
 };
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(in crate::audio_host) struct PlaybackWorkerBoundary {
@@ -107,6 +108,10 @@ impl ParkedPlaybackWorker {
             match self.egress.worker_state() {
                 BridgeState::Primed if !self.park_until_active() => {
                     return PlaybackWorkerTerminal::Stopped;
+                }
+                BridgeState::PrimingCheck => {
+                    thread::park_timeout(Duration::from_millis(1));
+                    continue;
                 }
                 BridgeState::Quiescing | BridgeState::Stopped => {
                     return PlaybackWorkerTerminal::Stopped;

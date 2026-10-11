@@ -570,6 +570,9 @@ fn prime_with_quantum(
                 );
                 process_playback(parts, &mut positions, &mut submitter, playback_period);
             }
+            BridgeState::PrimingCheck => {
+                parts.control.progress_priming_check().expect("finish priming gate");
+            }
             BridgeState::Primed => return positions,
             state => panic!("unexpected priming state: {state:?}"),
         }
@@ -1256,7 +1259,11 @@ fn completed_capture_boundary_spans_gate_accounting_and_publishes_once() {
             .playback
             .process(playback_observation, &mut submitter)
             .expect("playback gate observes in-flight capture");
-        assert_eq!(parts.control.state(), BridgeState::PlaybackStabilizing);
+        assert_eq!(parts.control.state(), BridgeState::PrimingCheck);
+        assert_eq!(
+            parts.control.progress_priming_check().expect("capture still owns its boundary"),
+            BridgeState::PrimingCheck,
+        );
         release_tx.send(()).expect("release retained capture prefix");
         let capture = capture.join().expect("capture publication thread").expect("capture report");
         (capture, playback)
@@ -1271,6 +1278,38 @@ fn completed_capture_boundary_spans_gate_accounting_and_publishes_once() {
     assert_eq!(parts.capture_ingress.worker_application_position(), report.0.application_end_frame);
     assert_eq!(parts.control.shared.capture_in_flight.load(Ordering::SeqCst), 0);
     assert_eq!(report.1.delivery, PlaybackBoundaryDelivery::SubmittedStabilizing);
+    assert_ne!(
+        parts.control.progress_priming_check().expect("complete gate after capture publication"),
+        BridgeState::PrimingCheck,
+    );
+}
+
+#[test]
+fn graph_boundary_overlap_does_not_reopen_priming_gate() {
+    let mut parts = simulation_parts();
+    let mut positions = reach_playback_stabilizing(&mut parts);
+    let mut output = OutputStorage::new();
+    publish_capture(&mut parts, &mut positions, SIMULATION_PLAYBACK_PERIOD, 0.25);
+    process_graph(
+        &mut parts,
+        &mut positions,
+        SIMULATION_PLAYBACK_PERIOD,
+        GraphSystemInput::unconnected(),
+        &mut output,
+    );
+    parts.control.shared.graph_in_flight.store(1, Ordering::SeqCst);
+    let mut submitter = ExactSubmitter::new(SIMULATION_PLAYBACK_PERIOD);
+    process_playback(&mut parts, &mut positions, &mut submitter, SIMULATION_PLAYBACK_PERIOD);
+    assert_eq!(parts.control.state(), BridgeState::PrimingCheck);
+    assert_eq!(
+        parts.control.progress_priming_check().expect("graph boundary still owns its token"),
+        BridgeState::PrimingCheck,
+    );
+    parts.control.shared.graph_in_flight.store(0, Ordering::SeqCst);
+    assert_ne!(
+        parts.control.progress_priming_check().expect("finish after graph boundary"),
+        BridgeState::PrimingCheck,
+    );
 }
 
 #[test]

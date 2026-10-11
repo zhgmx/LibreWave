@@ -545,6 +545,41 @@ impl ClockBridgeControl {
         self.shared.state()
     }
 
+    /// Completes a pending startup gate after the playback boundary commits.
+    /// Existing capture and graph boundaries can finish while the gate is
+    /// closed. New processing boundaries cannot start in `PrimingCheck`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a terminal FIFO sequence error or a changed bridge state.
+    pub fn progress_priming_check(&mut self) -> Result<BridgeState, BridgeError> {
+        if self.state() != BridgeState::PrimingCheck {
+            return Ok(self.state());
+        }
+        let capture = self.shared.capture_in_flight.load(Ordering::SeqCst);
+        let graph = self.shared.graph_in_flight.load(Ordering::SeqCst);
+        let playback = self.shared.playback_in_flight.load(Ordering::SeqCst);
+        if capture != 0 || graph != 0 || playback != 0 {
+            return Ok(BridgeState::PrimingCheck);
+        }
+        let capture_fill = self.capture_fill_observer.stable_fill_frames().map_err(|error| {
+            mark_fault(&self.shared, map_sequence(error, BridgeClockDomain::WaveCapture))
+        })?;
+        let playback_fill = self.playback_fill_observer.stable_fill_frames().map_err(|error| {
+            mark_fault(&self.shared, map_sequence(error, BridgeClockDomain::WavePlayback))
+        })?;
+        let next = if self.shared.within_startup_guards(capture_fill, playback_fill) {
+            BridgeState::Primed
+        } else {
+            BridgeState::PlaybackStabilizing
+        };
+        if self.shared.transition(BridgeState::PrimingCheck, next) {
+            Ok(next)
+        } else {
+            Err(BridgeError::State { actual: self.state() })
+        }
+    }
+
     pub(super) fn worker_attempt_epoch(&self) -> ClockAttemptEpoch {
         self.shared.attempt_epoch
     }
@@ -858,7 +893,6 @@ impl ClockBridgeParts {
             },
             playback: PlaybackEgress {
                 consumer: playback_consumer,
-                capture_fill_observer: capture_fill_observer.clone(),
                 graph_observation_reader,
                 estimator: ClockRateEstimator::new(config.playback.estimator),
                 matcher: playback_matcher,
@@ -1272,7 +1306,8 @@ impl GraphClockProcessor {
             silence_outputs(outputs);
             return Ok(true);
         }
-        let state = attempt_state(&self.shared)?;
+        let state =
+            if state == BridgeState::PrimingCheck { state } else { attempt_state(&self.shared)? };
         if !matches!(state, BridgeState::Primed | BridgeState::PrimingCheck) {
             return Ok(false);
         }
@@ -1727,7 +1762,6 @@ pub enum PlaybackBoundaryDelivery {
 /// The playback-worker owner of the stereo matcher and FIFO consumer.
 pub struct PlaybackEgress {
     consumer: Consumer<WAVE3_PLAYBACK_CHANNELS>,
-    capture_fill_observer: FillObserver<WAVE3_CAPTURE_CHANNELS>,
     graph_observation_reader: CopySlotReader<GraphClockObservation>,
     estimator: ClockRateEstimator,
     matcher: RateMatcher,
@@ -1908,7 +1942,7 @@ impl PlaybackEgress {
                 BridgeError::InvalidPeriod { actual: input_frames, expected: self.period_frames },
             )
         })?;
-        let playback_fill_after_commit = fill.checked_sub(input_frames).ok_or_else(|| {
+        fill.checked_sub(input_frames).ok_or_else(|| {
             mark_fault(
                 &self.shared,
                 BridgeError::Shortage {
@@ -1965,17 +1999,12 @@ impl PlaybackEgress {
                 );
             }
         }
-        let priming_gate = if state == BridgeState::PlaybackStabilizing
+        if state == BridgeState::PlaybackStabilizing
             && hardware_progress == HardwareProgress::Advanced
+            && !self.shared.transition(BridgeState::PlaybackStabilizing, BridgeState::PrimingCheck)
         {
-            Some(prepare_priming_gate(
-                &self.shared,
-                &self.capture_fill_observer,
-                playback_fill_after_commit,
-            )?)
-        } else {
-            None
-        };
+            return Err(BridgeError::State { actual: self.shared.state() });
+        }
 
         fifo_step.commit();
         if let Some(step) = graph_observation_step {
@@ -2007,8 +2036,6 @@ impl PlaybackEgress {
                 BridgeState::PlaybackEstimatorPriming,
                 BridgeState::PlaybackStabilizing,
             );
-        } else if let Some(next) = priming_gate {
-            let _ = self.shared.transition(BridgeState::PrimingCheck, next);
         }
         Ok(PlaybackProcessReport {
             application_start_frame,
@@ -2033,34 +2060,6 @@ fn accepted_application_position(
         });
     }
     checked_end(BridgeClockDomain::WavePlayback, application_start_frame, accepted_frames)
-}
-
-fn prepare_priming_gate(
-    shared: &SharedAttempt,
-    capture_fill_observer: &FillObserver<WAVE3_CAPTURE_CHANNELS>,
-    playback_fill: usize,
-) -> Result<BridgeState, BridgeError> {
-    if !shared.transition(BridgeState::PlaybackStabilizing, BridgeState::PrimingCheck) {
-        return Err(BridgeError::State { actual: shared.state() });
-    }
-
-    // Activity counters increment before their owner reads the state. The
-    // sequentially consistent gate therefore either observes an earlier
-    // owner in flight or makes that owner observe PrimingCheck and stop before
-    // it can publish a FIFO sequence.
-    let capture_in_flight = shared.capture_in_flight.load(Ordering::SeqCst);
-    let graph_in_flight = shared.graph_in_flight.load(Ordering::SeqCst);
-    if capture_in_flight != 0 || graph_in_flight != 0 {
-        return Ok(BridgeState::PlaybackStabilizing);
-    }
-    let capture_fill = capture_fill_observer
-        .stable_fill_frames()
-        .map_err(|error| mark_fault(shared, map_sequence(error, BridgeClockDomain::WaveCapture)))?;
-    Ok(if shared.within_startup_guards(capture_fill, playback_fill) {
-        BridgeState::Primed
-    } else {
-        BridgeState::PlaybackStabilizing
-    })
 }
 
 fn attempt_state(shared: &SharedAttempt) -> Result<BridgeState, BridgeError> {

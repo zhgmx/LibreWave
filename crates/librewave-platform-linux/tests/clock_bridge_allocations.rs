@@ -265,6 +265,9 @@ fn exact_callback_reachable_sequence_does_not_allocate_or_deallocate() {
                     }
                 }
             }
+            BridgeState::PrimingCheck => {
+                parts.control.progress_priming_check().expect("finish preflight priming gate");
+            }
             BridgeState::Primed => break,
             state => panic!("unexpected state: {state:?}"),
         }

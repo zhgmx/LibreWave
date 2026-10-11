@@ -6,7 +6,8 @@
 use super::alsa::{RealAlsaFacade, SelectedPcmCard};
 use super::clock_bridge::observation::{CopySlotReader, copy_slot};
 use super::clock_bridge::{
-    BridgeState, ClockBridgeControl, ClockBridgeParts, GraphClockProcessor, PlaybackEgress,
+    BridgeError, BridgeState, ClockBridgeControl, ClockBridgeParts, GraphClockProcessor,
+    PlaybackEgress,
 };
 use super::graph_bridge::ClockBridgeGraphProcessor;
 use super::pipewire::RealPipeWireFacade;
@@ -319,9 +320,10 @@ impl ComposedAudioHost {
         }
         let state = self
             .control
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| attempt_error(phase, "bridge control is absent"))?
-            .state();
+            .progress_priming_check()
+            .map_err(|error| attempt_error(phase, error))?;
         if state == BridgeState::Faulted {
             let startup =
                 graph.startup_note().unwrap_or_else(|| "startup mapping unavailable".to_owned());
@@ -595,11 +597,25 @@ impl AudioHost for ComposedAudioHost {
                 return Err(attempt_error("worker parking", "workers did not park"));
             }
         }
+        let deadline = Instant::now() + self.policy.startup_timeout;
+        loop {
+            let result = self
+                .control
+                .as_mut()
+                .ok_or_else(|| attempt_error("bridge activation", "control is absent"))?
+                .activate();
+            match result {
+                Ok(()) => break,
+                Err(BridgeError::ActivationNotQuiescent { .. }) if Instant::now() < deadline => {
+                    self.graph_step("bridge activation")?;
+                }
+                Err(error) => return Err(attempt_error("bridge activation", error)),
+            }
+        }
         let control = self
             .control
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| attempt_error("bridge activation", "control is absent"))?;
-        control.activate().map_err(|error| attempt_error("bridge activation", error))?;
         self.capture
             .as_ref()
             .ok_or_else(|| attempt_error("capture resume", "worker is absent"))?
