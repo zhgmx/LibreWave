@@ -550,6 +550,8 @@ fn create_adapter(
         "monitor.passthrough" => "true"
     };
     if driver {
+        // System feeds the mixer through monitor ports, which are unscaled by default.
+        properties.insert("monitor.channel-volumes", "true");
         properties.insert(*pw::keys::PRIORITY_DRIVER, "200001");
         properties.insert("node.force-quantum", quantum.get().to_string());
     }
@@ -1190,6 +1192,105 @@ context.modules = [
                 assert!(Instant::now() < deadline, "PipeWire graph did not process {count} cycles");
                 graph.iterate(Duration::from_millis(10));
             }
+        }
+
+        struct SystemLevels(Arc<[std::sync::atomic::AtomicU32; 2]>);
+
+        impl GraphProcessor for SystemLevels {
+            fn process(&mut self, block: ProcessBlock<'_>) -> Result<(), ProcessFault> {
+                for (peak, samples) in self.0.iter().zip([block.system.left, block.system.right]) {
+                    let value =
+                        samples.iter().fold(0.0_f32, |value, sample| value.max(sample.abs()));
+                    peak.store(value.to_bits(), Ordering::Relaxed);
+                }
+                block.microphone.left.fill(0.0);
+                block.microphone.right.fill(0.0);
+                block.monitor.left.fill(0.0);
+                block.monitor.right.fill(0.0);
+                block.stream.left.fill(0.0);
+                block.stream.right.fill(0.0);
+                Ok(())
+            }
+        }
+
+        #[test]
+        #[ignore = "requires LIBREWAVE_PIPEWIRE_INTEGRATION=1 and PipeWire runtime tools"]
+        fn private_system_volume_and_mute_reach_mixer() {
+            assert_eq!(std::env::var("LIBREWAVE_PIPEWIRE_INTEGRATION").as_deref(), Ok("1"));
+            let server = PrivatePipeWire::start(256, 10);
+            let plans = endpoint_plans(DELIBERATE_ENDPOINTS).expect("deliberate endpoints");
+            let peaks = Arc::new(std::array::from_fn(|_| std::sync::atomic::AtomicU32::new(0)));
+            let quantum = NonZeroU32::new(256).expect("fixed quantum");
+            let mut graph = InactiveGraph::construct(
+                REMOTE,
+                &plans,
+                quantum,
+                AdapterPortMode::SelfConfigured,
+                SystemLevels(Arc::clone(&peaks)),
+            )
+            .expect("construct volume graph")
+            .activate()
+            .expect("activate volume graph");
+            let system = graph.node_ids().expect("graph ids")[0];
+            let mut producer = TestPeer::new(
+                &graph.inner.core,
+                "Volume producer",
+                peer_properties("librewave.integration.producer"),
+                TestPeerMode::Producer,
+                system,
+                quantum,
+            )
+            .expect("create volume producer");
+            producer.add_port(0, true, "test_system_FL", "FL").expect("producer FL");
+            producer.add_port(1, true, "test_system_FR", "FR").expect("producer FR");
+            producer.connect_inactive().expect("connect producer");
+            roundtrip(&graph.inner.main_loop, &graph.inner.core).expect("observe producer");
+            roundtrip(&graph.inner.main_loop, &graph.inner.core).expect("observe producer ports");
+            let links: Vec<_> = ["FL", "FR"]
+                .into_iter()
+                .map(|channel| {
+                    let state = graph.inner.registry_state.borrow();
+                    create_link(
+                        &graph.inner.core,
+                        state
+                            .port_id(producer.node_id(), "out", &format!("test_system_{channel}"))
+                            .expect("producer port"),
+                        state
+                            .port_id(system, "in", &format!("playback_{channel}"))
+                            .expect("System port"),
+                    )
+                    .expect("link volume producer")
+                })
+                .collect();
+            producer.set_active(true).expect("activate producer");
+            for (props, bounds) in [
+                ("{ channelVolumes = [ 1.0 1.0 ] mute = false }", [(0.25, 0.5), (0.375, 0.625)]),
+                (
+                    "{ channelVolumes = [ 0.25 0.5 ] mute = false }",
+                    [(0.0625, 0.125), (0.1875, 0.3125)],
+                ),
+                ("{ mute = true }", [(0.0, 0.0), (0.0, 0.0)]),
+                ("{ mute = false }", [(0.0625, 0.125), (0.1875, 0.3125)]),
+            ] {
+                let status = server
+                    .command("pw-cli")
+                    .args(["set-param", &system.to_string(), "Props", props])
+                    .output()
+                    .expect("set System software controls");
+                assert!(status.status.success(), "software control rejected: {status:?}");
+                run_cycles(&mut graph, 32);
+                assert!(!graph.diagnostics().failed, "volume change faulted graph");
+                for (peak, (minimum, maximum)) in peaks.iter().zip(bounds) {
+                    let observed = f32::from_bits(peak.load(Ordering::Relaxed));
+                    assert!(
+                        (minimum..=maximum).contains(&observed),
+                        "{props}: expected {minimum}..={maximum}, observed {observed}"
+                    );
+                }
+            }
+            drop(links);
+            producer.destroy();
+            graph.teardown().expect("tear down volume graph");
         }
 
         fn assert_driver_stable<P: GraphProcessor>(
