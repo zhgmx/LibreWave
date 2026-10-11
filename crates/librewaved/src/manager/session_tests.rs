@@ -139,6 +139,10 @@ fn new_default_choices_survive_restoration_and_selection_requires_readiness() {
         IpcErrorKind::AudioNotReady
     );
     Fixture::request(&mut daemon, Command::CaptureDesktopDefaults).expect("capture");
+    let mut active = Snapshot::empty();
+    active.mixer = MixerSnapshot::active(MixerProfile::default());
+    daemon.state.replace(active, librewave_core::Origin::Recovery);
+    Fixture::request(&mut daemon, Command::SelectDesktopDefaults).expect("select");
     fixture.value.borrow_mut().configured_sink = Some("new-user-output".into());
     fixture.value.borrow_mut().configured_source = Some("librewave.microphone".into());
     Fixture::request(&mut daemon, Command::RestoreDesktopDefaults).expect("restore");
@@ -149,6 +153,20 @@ fn new_default_choices_survive_restoration_and_selection_requires_readiness() {
         Some(fixture.value.borrow().clone())
     );
     let mut restarted = fixture.daemon();
+    *fixture.value.borrow_mut() = DesktopDefaults::default();
+    Fixture::request(&mut restarted, Command::RestoreDesktopDefaults)
+        .expect("transient empty policy metadata");
+    assert_eq!(
+        fixture
+            .store()
+            .load()
+            .expect("retained confirmed baseline")
+            .defaults
+            .expect("baseline remains owned")
+            .configured_sink
+            .as_deref(),
+        Some("new-user-output")
+    );
     fixture.value.borrow_mut().configured_sink = Some("librewave.system".into());
     fixture.value.borrow_mut().configured_source = Some("librewave.microphone".into());
     Fixture::request(&mut restarted, Command::RestoreDesktopDefaults)

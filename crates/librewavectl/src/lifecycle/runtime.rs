@@ -393,11 +393,16 @@ fn stop_inner(
         )?;
     }
     verify_restorable_files(paths, &record)?;
-    if record.defaults_captured {
-        request_kind(host, Command::RestoreDesktopDefaults, |reply| {
-            matches!(reply, Response::DesktopDefaults { .. })
-        })?;
-    }
+    let expected_defaults = if record.defaults_captured {
+        let Response::DesktopDefaults { defaults } =
+            host.request(Command::RestoreDesktopDefaults)?
+        else {
+            return Err(unexpected());
+        };
+        Some(defaults)
+    } else {
+        None
+    };
     if checked_exists(&paths.wireplumber())? {
         if !policy_matches(paths)? {
             return Err(io::Error::other("policy changed before removal; preserved"));
@@ -421,32 +426,10 @@ fn stop_inner(
     if record.policy_pending {
         host.service(SessionOperation::RestartWirePlumber)?;
         wait_services(host)?;
-        if !record.defaults_captured {
-            return Err(invalid("policy ownership has no captured defaults"));
-        }
-        // The restarted policy can replay its earlier configured selections.
-        // Restore only still-owned selections against the daemon's confirmed
-        // restoration baseline, preserving any later user choice.
-        let Response::DesktopDefaults { defaults: expected } =
-            host.request(Command::RestoreDesktopDefaults)?
-        else {
-            return Err(unexpected());
-        };
-        wait(
-            host,
-            |host| {
-                let Response::DesktopDefaults { defaults } =
-                    host.request(Command::GetDesktopDefaults)?
-                else {
-                    return Err(unexpected());
-                };
-                Ok(defaults.configured_sink == expected.configured_sink
-                    && defaults.configured_source == expected.configured_source
-                    && defaults.effective_sink.as_deref() != Some("librewave.system")
-                    && defaults.effective_source.as_deref() != Some("librewave.microphone"))
-            },
-            "desktop defaults were not restored after WirePlumber restart; retry stop",
-        )?;
+        let expected = expected_defaults
+            .as_ref()
+            .ok_or_else(|| invalid("policy ownership has no captured defaults"))?;
+        wait_restored(host, expected)?;
     }
     if record.defaults_captured {
         request_kind(host, Command::CompleteDesktopRestore, |reply| {
@@ -569,6 +552,39 @@ fn wait_selected(host: &mut impl RuntimeHost) -> io::Result<()> {
     )
 }
 
+fn wait_restored(
+    host: &mut impl RuntimeHost,
+    expected: &librewave_core::DesktopDefaults,
+) -> io::Result<()> {
+    let mut stable_since = None;
+    wait(
+        host,
+        |host| {
+            // Policy state can be replayed after the metadata object appears.
+            // Keep the confirmed baseline while observing a full stable interval.
+            request_kind(host, Command::RestoreDesktopDefaults, |reply| {
+                matches!(reply, Response::DesktopDefaults { .. })
+            })?;
+            let Response::DesktopDefaults { defaults } =
+                host.request(Command::GetDesktopDefaults)?
+            else {
+                return Err(unexpected());
+            };
+            if defaults.configured_sink != expected.configured_sink
+                || defaults.configured_source != expected.configured_source
+                || defaults.effective_sink.as_deref() == Some("librewave.system")
+                || defaults.effective_source.as_deref() == Some("librewave.microphone")
+            {
+                stable_since = None;
+                return Ok(false);
+            }
+            let since = stable_since.get_or_insert(host.now());
+            Ok(host.now().duration_since(*since) >= Duration::from_secs(1))
+        },
+        "desktop defaults were not restored after WirePlumber restart; retry stop",
+    )
+}
+
 fn wait(
     host: &mut impl RuntimeHost,
     mut check: impl FnMut(&mut dyn RuntimeHost) -> io::Result<bool>,
@@ -586,7 +602,7 @@ fn wait(
     }
 }
 fn request_kind(
-    host: &mut impl RuntimeHost,
+    host: &mut (impl RuntimeHost + ?Sized),
     command: Command,
     check: impl FnOnce(&Response) -> bool,
 ) -> io::Result<()> {

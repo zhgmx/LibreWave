@@ -22,6 +22,8 @@ struct Host {
     clock: Instant,
     stale_nodes: bool,
     replay_defaults: Option<DesktopDefaults>,
+    delayed_default_replay: Option<(usize, DesktopDefaults)>,
+    restoration_started: bool,
 }
 impl Host {
     fn new() -> Self {
@@ -30,6 +32,8 @@ impl Host {
             clock: Instant::now(),
             stale_nodes: false,
             replay_defaults: None,
+            delayed_default_replay: None,
+            restoration_started: false,
             baseline: None,
             audio: false,
             defaults: DesktopDefaults {
@@ -151,6 +155,13 @@ impl RuntimeHost for Host {
             }
             Command::CheckAudioAccess => Ok(Response::AudioAccessChecked),
             Command::GetDesktopDefaults => {
+                if let Some((reads, defaults)) = self.delayed_default_replay.as_mut() {
+                    *reads -= 1;
+                    if *reads == 0 {
+                        self.defaults = defaults.clone();
+                        self.delayed_default_replay = None;
+                    }
+                }
                 Ok(Response::DesktopDefaults { defaults: self.defaults.clone() })
             }
             Command::CaptureDesktopDefaults => {
@@ -201,7 +212,10 @@ impl RuntimeHost for Host {
                 }
                 self.defaults.effective_sink = self.defaults.configured_sink.clone();
                 self.defaults.effective_source = self.defaults.configured_source.clone();
-                self.baseline = Some(self.defaults.clone());
+                if !self.restoration_started {
+                    self.baseline = Some(self.defaults.clone());
+                }
+                self.restoration_started = true;
                 Ok(Response::DesktopDefaults { defaults: self.defaults.clone() })
             }
             Command::CompleteDesktopRestore => {
@@ -281,6 +295,20 @@ fn stop_restores_owned_defaults_replayed_by_restarted_policy() {
     assert_eq!(host.defaults.configured_sink, prior.configured_sink);
     assert_eq!(host.defaults.configured_source.as_deref(), Some("later-user-choice"));
     assert!(!host.active);
+}
+
+#[test]
+fn stop_waits_through_empty_metadata_and_delayed_policy_replay() {
+    let (_fixture, paths, fragment) = fixture();
+    let mut host = Host::new();
+    let original = host.defaults.clone();
+    start(&paths, Some(&fragment), &mut host).unwrap();
+    host.delayed_default_replay = Some((2, host.defaults.clone()));
+    host.replay_defaults = Some(DesktopDefaults::default());
+    stop(&paths, &mut host).unwrap();
+    restored(&paths, &fragment, &host);
+    assert_eq!(host.defaults, original);
+    assert!(host.delayed_default_replay.is_none());
 }
 
 #[test]
