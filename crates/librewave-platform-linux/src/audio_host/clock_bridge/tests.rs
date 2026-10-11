@@ -653,6 +653,43 @@ fn reach_playback_stabilizing(parts: &mut ClockBridgeParts) -> Positions {
     panic!("simulation did not reach PlaybackStabilizing")
 }
 
+fn align_startup_fifo_fills(parts: &mut ClockBridgeParts) {
+    let capture_fill =
+        parts.control.capture_fill_observer.stable_fill_frames().expect("capture fill");
+    if capture_fill < SIMULATION_TARGET_FILL {
+        parts
+            .capture_ingress
+            .producer
+            .prepare_push(&vec![0.0; SIMULATION_TARGET_FILL - capture_fill])
+            .expect("align capture fill")
+            .commit();
+    } else if capture_fill > SIMULATION_TARGET_FILL {
+        parts
+            .graph
+            .capture_consumer
+            .peek_exact(&mut vec![0.0; capture_fill - SIMULATION_TARGET_FILL])
+            .expect("align capture fill")
+            .commit();
+    }
+    let playback_fill =
+        parts.control.playback_fill_observer.stable_fill_frames().expect("playback fill");
+    if playback_fill < SIMULATION_TARGET_FILL {
+        parts
+            .graph
+            .playback_producer
+            .prepare_push(&vec![0.0; (SIMULATION_TARGET_FILL - playback_fill) * 2])
+            .expect("align playback fill")
+            .commit();
+    } else if playback_fill > SIMULATION_TARGET_FILL {
+        parts
+            .playback
+            .consumer
+            .peek_exact(&mut vec![0.0; (playback_fill - SIMULATION_TARGET_FILL) * 2])
+            .expect("align playback fill")
+            .commit();
+    }
+}
+
 fn reach_playback_filter_delay(parts: &mut ClockBridgeParts) -> Positions {
     parts.control.start_capture().expect("start capture priming");
     let mut positions = Positions::new();
@@ -832,6 +869,32 @@ fn capture_hardware_cannot_trail_completed_application_progress() {
         .expect("capture availability may put hardware ahead of application");
     assert_eq!(report.application_end_frame, 1);
     assert_eq!(report.hardware_frame_position, 2);
+}
+
+#[test]
+fn capture_priming_leaves_fifo_room_for_graph_construction() {
+    let mut parts = simulation_parts();
+    parts.control.start_capture().expect("start capture");
+    let mut positions = Positions::new();
+    for _ in 0..3 {
+        publish_capture(&mut parts, &mut positions, SIMULATION_CAPTURE_PERIOD, 0.0);
+        assert_eq!(parts.control.state(), BridgeState::CapturePriming);
+    }
+    publish_capture(&mut parts, &mut positions, SIMULATION_CAPTURE_PERIOD, 0.0);
+    assert_eq!(parts.control.state(), BridgeState::CaptureFilterDelay);
+    assert_eq!(
+        parts.graph.capture_consumer.available_frames(),
+        Ok(SIMULATION_TARGET_FILL - SIMULATION_STARTUP_GUARD),
+    );
+
+    // Eight capture periods can arrive while PipeWire and WirePlumber settle.
+    // The previous target-fill gate left no space for another complete read.
+    for _ in 0..8 {
+        publish_capture(&mut parts, &mut positions, SIMULATION_CAPTURE_PERIOD, 0.0);
+    }
+    let fill = parts.graph.capture_consumer.available_frames().expect("capture fill");
+    assert_eq!(fill, SIMULATION_TARGET_FILL + SIMULATION_STARTUP_GUARD);
+    assert!(SIMULATION_FIFO_CAPACITY - fill >= SIMULATION_CAPTURE_PERIOD);
 }
 
 #[test]
@@ -1219,9 +1282,73 @@ fn priming_check_rechecks_published_fifo_sequences() {
 }
 
 #[test]
+fn playback_stabilizing_keeps_graph_running_when_capture_fill_is_outside_guard() {
+    let mut parts = simulation_parts();
+    let mut positions = reach_playback_stabilizing(&mut parts);
+    let current_fill =
+        parts.control.capture_fill_observer.stable_fill_frames().expect("capture fill");
+    let high_fill = SIMULATION_TARGET_FILL + SIMULATION_STARTUP_GUARD + 512;
+    let extra = high_fill.saturating_sub(current_fill);
+    parts
+        .capture_ingress
+        .producer
+        .prepare_push(&vec![0.0; extra])
+        .expect("test-only capture cursor movement")
+        .commit();
+    let mut output = OutputStorage::new();
+    let mut submitter = ExactSubmitter::new(SIMULATION_PLAYBACK_PERIOD);
+    process_graph(
+        &mut parts,
+        &mut positions,
+        SIMULATION_PLAYBACK_PERIOD,
+        GraphSystemInput::unconnected(),
+        &mut output,
+    );
+    process_playback(&mut parts, &mut positions, &mut submitter, SIMULATION_PLAYBACK_PERIOD);
+    assert_eq!(parts.control.state(), BridgeState::PlaybackStabilizing);
+    assert!(
+        parts.control.capture_fill_observer.stable_fill_frames().expect("capture fill")
+            > SIMULATION_TARGET_FILL + SIMULATION_STARTUP_GUARD
+    );
+}
+
+#[test]
+fn playback_stabilizing_keeps_graph_running_when_playback_fill_is_outside_guard() {
+    let mut parts = simulation_parts();
+    let mut positions = reach_playback_stabilizing(&mut parts);
+    let current_fill =
+        parts.control.playback_fill_observer.stable_fill_frames().expect("playback fill");
+    let low_fill = SIMULATION_TARGET_FILL - SIMULATION_STARTUP_GUARD - 512;
+    let drain = current_fill.saturating_sub(low_fill);
+    parts
+        .playback
+        .consumer
+        .peek_exact(&mut vec![0.0; drain * WAVE3_PLAYBACK_CHANNELS])
+        .expect("test-only playback cursor movement")
+        .commit();
+    let mut output = OutputStorage::new();
+    let mut submitter = ExactSubmitter::new(SIMULATION_PLAYBACK_PERIOD);
+    publish_capture(&mut parts, &mut positions, SIMULATION_PLAYBACK_PERIOD, 0.0);
+    process_graph(
+        &mut parts,
+        &mut positions,
+        SIMULATION_PLAYBACK_PERIOD,
+        GraphSystemInput::unconnected(),
+        &mut output,
+    );
+    process_playback(&mut parts, &mut positions, &mut submitter, SIMULATION_PLAYBACK_PERIOD);
+    assert_eq!(parts.control.state(), BridgeState::PlaybackStabilizing);
+    assert!(
+        parts.control.playback_fill_observer.stable_fill_frames().expect("playback fill")
+            < SIMULATION_TARGET_FILL - SIMULATION_STARTUP_GUARD
+    );
+}
+
+#[test]
 fn completed_capture_boundary_spans_gate_accounting_and_publishes_once() {
     let mut parts = simulation_parts();
     let mut positions = reach_playback_stabilizing(&mut parts);
+    align_startup_fifo_fills(&mut parts);
     let mut output = OutputStorage::new();
     process_graph(
         &mut parts,
@@ -1288,6 +1415,7 @@ fn completed_capture_boundary_spans_gate_accounting_and_publishes_once() {
 fn graph_boundary_overlap_does_not_reopen_priming_gate() {
     let mut parts = simulation_parts();
     let mut positions = reach_playback_stabilizing(&mut parts);
+    align_startup_fifo_fills(&mut parts);
     let mut output = OutputStorage::new();
     publish_capture(&mut parts, &mut positions, SIMULATION_PLAYBACK_PERIOD, 0.25);
     process_graph(

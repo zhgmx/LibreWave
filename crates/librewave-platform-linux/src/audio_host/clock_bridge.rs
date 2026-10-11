@@ -893,6 +893,7 @@ impl ClockBridgeParts {
             },
             playback: PlaybackEgress {
                 consumer: playback_consumer,
+                capture_fill_observer: capture_fill_observer.clone(),
                 graph_observation_reader,
                 estimator: ClockRateEstimator::new(config.playback.estimator),
                 matcher: playback_matcher,
@@ -1096,8 +1097,11 @@ impl CaptureReadBoundary<'_> {
             ObservationPublication::NotPublishedHandoffFull
         };
         ingress.last_observation = Some(clock);
+        // Leave room for capture frames that arrive while the control thread
+        // constructs the graph. The final active-state guard still uses the
+        // full target and its configured range.
         if ingress.shared.state() == BridgeState::CapturePriming
-            && fill >= ingress.shared.capture_target
+            && fill >= ingress.shared.capture_target.saturating_sub(ingress.shared.capture_guard)
         {
             let _ = ingress
                 .shared
@@ -1762,6 +1766,7 @@ pub enum PlaybackBoundaryDelivery {
 /// The playback-worker owner of the stereo matcher and FIFO consumer.
 pub struct PlaybackEgress {
     consumer: Consumer<WAVE3_PLAYBACK_CHANNELS>,
+    capture_fill_observer: FillObserver<WAVE3_CAPTURE_CHANNELS>,
     graph_observation_reader: CopySlotReader<GraphClockObservation>,
     estimator: ClockRateEstimator,
     matcher: RateMatcher,
@@ -2001,9 +2006,32 @@ impl PlaybackEgress {
         }
         if state == BridgeState::PlaybackStabilizing
             && hardware_progress == HardwareProgress::Advanced
-            && !self.shared.transition(BridgeState::PlaybackStabilizing, BridgeState::PrimingCheck)
         {
-            return Err(BridgeError::State { actual: self.shared.state() });
+            // These fills are only a hint. The control owner checks both
+            // published sequences after all boundaries leave the gate.
+            // Avoid pausing a graph boundary when either FIFO is plainly
+            // outside its startup guard.
+            let capture_near_target =
+                self.capture_fill_observer.stable_fill_frames().ok().is_some_and(|capture_fill| {
+                    within_guard(
+                        capture_fill,
+                        self.shared.capture_target,
+                        self.shared.capture_guard,
+                    )
+                });
+            let playback_near_target = within_guard(
+                fill - input_frames,
+                self.shared.playback_target,
+                self.shared.playback_guard,
+            );
+            if capture_near_target
+                && playback_near_target
+                && !self
+                    .shared
+                    .transition(BridgeState::PlaybackStabilizing, BridgeState::PrimingCheck)
+            {
+                return Err(BridgeError::State { actual: self.shared.state() });
+            }
         }
 
         fifo_step.commit();
