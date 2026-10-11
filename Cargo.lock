@@ -3212,6 +3212,7 @@ dependencies = [
  "pipewire",
  "pkg-config",
  "rusb",
+ "serde",
  "serde_json",
 ]
 

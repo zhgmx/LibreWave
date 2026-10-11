@@ -57,6 +57,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
             profiles_path: self.paths.profiles(),
             audio_ownership: AudioOwnership::ExperimentalOptIn,
             owned_paths,
+            usb_access: Vec::new(),
         })
     }
 

@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod access_tests;
 mod artifacts;
 mod diagnostics;
 mod engine;

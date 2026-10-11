@@ -378,6 +378,16 @@ where
     E: Write,
 {
     let arguments = arguments.into_iter().collect::<Vec<_>>();
+    if arguments.get(1).is_some_and(|argument| argument == "--internal-restore-wave3-access") {
+        if arguments.len() != 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the privileged ACL helper accepts only its bounded standard input",
+            ));
+        }
+        librewave_platform_linux::usb_access::restore_access_input(&mut std::io::stdin().lock())?;
+        return Ok(0);
+    }
     if lifecycle::is_command(&arguments) {
         return lifecycle::run(&arguments, output, errors);
     }

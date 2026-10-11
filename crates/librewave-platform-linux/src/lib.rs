@@ -35,6 +35,7 @@ pub use services::{
 };
 pub mod operation_lock;
 mod usb;
+pub mod usb_access;
 
 pub use usb::{
     DescriptorError, TopologyError, UsbProbeError, Wave3SnapshotError, Wave3UsbConnection,

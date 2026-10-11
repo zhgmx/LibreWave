@@ -9,6 +9,7 @@ use super::model::{
 use super::system::{ProcessInspector, UdevSystem, UnitInspector};
 use super::validation::{validate_manifest, validate_purge_path};
 use librewave_platform_linux::audio_policy::{UDEV_POLICY_FILE_NAME, Wave3AudioPolicy};
+use librewave_platform_linux::usb_access::AccessState;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -164,6 +165,12 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
             }
         }
         let mut next = self.build_manifest(request, previous.as_ref())?;
+        next.usb_access = if let Some(previous) = &previous {
+            self.udev.verify_access(&previous.usb_access, AccessState::Granted)?;
+            previous.usb_access.clone()
+        } else {
+            self.udev.snapshot_access()?
+        };
         let transaction_root = self.paths.state_root.join("transactions/setup");
         self.prepare_original_snapshots(&mut next, previous.as_ref())?;
         validate_manifest(&next, &self.paths)?;
@@ -191,13 +198,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
             fs::write(path, content)?;
         }
         if let Err(error) = self.apply_manifest(&next, request, &journal.rollback_paths) {
-            let rollback = self.rollback_setup(&journal);
-            return match rollback {
-                Ok(()) => Err(error),
-                Err(rollback_error) => Err(io::Error::other(format!(
-                    "setup failed: {error}; rollback also failed: {rollback_error}"
-                ))),
-            };
+            return Err(self.failed_setup(&journal, error));
         }
         for owned in &next.owned_paths {
             let verification = self.matches_owned(owned);
@@ -211,14 +212,11 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
                     "a staged artifact failed verification at {}: {detail}",
                     owned.path.display(),
                 ));
-                let rollback = self.rollback_setup(&journal);
-                return match rollback {
-                    Ok(()) => Err(error),
-                    Err(rollback_error) => Err(io::Error::other(format!(
-                        "setup verification failed: {error}; rollback also failed: {rollback_error}"
-                    ))),
-                };
+                return Err(self.failed_setup(&journal, error));
             }
+        }
+        if let Err(error) = self.udev.verify_access(&next.usb_access, AccessState::Granted) {
+            return Err(self.failed_setup(&journal, error));
         }
         journal.phase = Phase::Applied;
         self.write_journal(&journal)?;
@@ -235,6 +233,15 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
         self.write_journal(&journal)?;
         remove_if_exists(&self.paths.journal())?;
         Ok(next)
+    }
+
+    fn failed_setup(&mut self, journal: &Journal, error: io::Error) -> io::Error {
+        match self.rollback_setup(journal) {
+            Ok(()) => error,
+            Err(rollback) => {
+                io::Error::other(format!("setup failed: {error}; rollback also failed: {rollback}"))
+            }
+        }
     }
 
     fn switch_manifest(&self, next: &Manifest) -> io::Result<()> {
@@ -272,6 +279,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
         if !modified.is_empty() {
             return Ok(UninstallOutcome::Modified(modified));
         }
+        self.udev.verify_access(&manifest.usb_access, AccessState::Restorable)?;
         let mut journal = Journal {
             schema_version: MANIFEST_SCHEMA,
             operation: Operation::Uninstall,
@@ -302,6 +310,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
             journal.udev_refresh_pending = false;
             self.write_journal(&journal)?;
         }
+        self.udev.restore_access(&manifest.usb_access)?;
         for owned in manifest.owned_paths.iter().rev() {
             if owned.path == self.paths.udev_rule {
                 continue;
@@ -389,6 +398,13 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
             "installation manifest",
             format!("Schema {} is valid.", manifest.schema_version),
         ));
+        match self.udev.verify_access(&manifest.usb_access, AccessState::Granted) {
+            Ok(()) => checks.push(pass(
+                "USB access permissions",
+                "The connected node ACL matches its owned grant.",
+            )),
+            Err(error) => checks.push(fail("USB access permissions", error.to_string())),
+        }
         for owned in &manifest.owned_paths {
             match self.matches_owned(owned) {
                 Ok(true) => checks.push(pass(
@@ -553,6 +569,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
 
     pub(super) fn verify_installed(&self, manifest: &Manifest) -> io::Result<()> {
         self.preflight_runtime()?;
+        self.udev.verify_access(&manifest.usb_access, AccessState::Granted)?;
         for owned in &manifest.owned_paths {
             if !self.matches_owned(owned)? {
                 return Err(io::Error::other(format!(
@@ -585,6 +602,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
 
     pub(super) fn verify_uninstalled(&self, manifest: &Manifest) -> io::Result<()> {
         self.preflight_runtime()?;
+        self.udev.verify_access(&manifest.usb_access, AccessState::Restored)?;
         for owned in &manifest.owned_paths {
             if !is_uninstalled_state(owned)? {
                 return Err(io::Error::other(format!(

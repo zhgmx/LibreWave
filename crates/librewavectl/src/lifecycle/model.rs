@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub const MANIFEST_SCHEMA: u32 = 2;
+pub const MANIFEST_SCHEMA: u32 = 3;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -77,6 +77,7 @@ pub struct Manifest {
     pub profiles_path: PathBuf,
     pub audio_ownership: AudioOwnership,
     pub owned_paths: Vec<OwnedPath>,
+    pub usb_access: Vec<librewave_platform_linux::usb_access::AccessSnapshot>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -27,6 +27,7 @@ The manifest is the source of truth for paths that LibreWave owns. It records:
 - Versioned executable files and stable links.
 - The inactive systemd user unit.
 - The exact Wave:3 udev access rule.
+- Original numeric USB ACLs and the exact connected node identities.
 - The active build directory.
 - User files that setup replaced.
 - Original file hashes and exact backup paths.
@@ -44,6 +45,7 @@ On Ubuntu 24.04, install the same packages that CI uses:
 ```text
 sudo apt-get update
 sudo apt-get install --no-install-recommends \
+  acl \
   clang \
   fontconfig \
   libasound2-dev \
@@ -65,6 +67,7 @@ On Fedora, install these packages:
 
 ```text
 sudo dnf install \
+  acl \
   alsa-lib-devel \
   clang \
   fontconfig \
@@ -110,6 +113,12 @@ A failure before the manifest switch restores the previous paths byte for byte. 
 Setup does not install or reload the WirePlumber card-disable rule. It does not enable the unit, start the daemon, open ALSA, or publish PipeWire objects. The separate experimental start operation composes the endpoint engine and physical workers. The new application lifecycle still needs controlled hardware and recovery tests. Setup alone cannot take ownership of the physical Wave card.
 
 The udev refresh matches USB vendor `0fd9` and product `0070`. It does not trigger another USB product, a device interface, or firmware mode. If the privileged install or refresh operation fails, setup fails and does not claim that access is current. Rollback or journal recovery preserves or restores the prior rule state.
+
+Setup records the original numeric ACL for each connected Wave:3 node before it installs the access rule. The manifest also records the boot ID, USB topology, node inode, and filesystem identity. It contains no device serial. An upgrade retains the original baseline. Setup refuses an ACL that `uaccess` would change for another user or widen for another group.
+
+Removal of the udev rule alone can leave its ACL on a connected node. Uninstall therefore restores the recorded ACL after it removes and refreshes the rule. Restoration accepts only the exact recorded connection and an unchanged owned grant. It pins that node while it restores the original ACL and verifies the result. An interrupted restoration retains the manifest, journal, and binaries so uninstall can resume.
+
+A changed ACL is preserved. A node connected after setup, after reconnect, or after a reboot has no original baseline unless the recorded node identity still matches. Uninstall refuses to guess its permissions. Keep the installation records and review that exact connection before cleanup. Reconnect and login permission recovery remain acceptance gates.
 
 ## Experimental application lifecycle
 
@@ -210,9 +219,10 @@ Doctor also scans fixed LibreWave paths when the manifest is missing. It does no
 3. Stops before any deletion if one owned path was changed.
 4. Restores replaced files from verified backups.
 5. Removes the exact manifest-owned udev rule, reloads udev, and refreshes only connected normal-mode Wave:3 devices.
-6. Removes executable links, the inactive unit, and exact build files.
-7. Removes its exact backup and transaction files.
-8. Verifies that no manifest-owned path, running daemon, active unit, stale policy, or build directory remains.
+6. Restores and verifies the original USB ACLs for the recorded connected nodes.
+7. Removes executable links, the inactive unit, and exact build files.
+8. Removes its exact backup and transaction files.
+9. Verifies that no manifest-owned path, running daemon, active unit, stale policy, or build directory remains.
 
 Normal uninstall preserves profiles and says where they remain. `librewavectl uninstall --purge` removes profiles only after explicit confirmation. The journal records this choice, so an interrupted removal cannot resume with different profile behavior.
 

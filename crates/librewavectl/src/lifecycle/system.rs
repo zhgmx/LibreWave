@@ -7,12 +7,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use librewave_platform_linux::audio_policy::Wave3AudioPolicy;
+use librewave_platform_linux::usb_access::{self, AccessSnapshot, AccessState};
 
 pub trait UdevSystem {
     fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>>;
     fn install_and_refresh(&mut self, path: &Path, content: &[u8]) -> io::Result<()>;
     fn remove_and_refresh(&mut self, path: &Path) -> io::Result<()>;
     fn refresh_wave3_access(&mut self) -> io::Result<()>;
+    fn snapshot_access(&self) -> io::Result<Vec<AccessSnapshot>>;
+    fn verify_access(&self, snapshots: &[AccessSnapshot], state: AccessState) -> io::Result<()>;
+    fn restore_access(&mut self, snapshots: &[AccessSnapshot]) -> io::Result<()>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -157,6 +161,34 @@ impl ProductionUdev {
 }
 
 impl UdevSystem for ProductionUdev {
+    fn snapshot_access(&self) -> io::Result<Vec<AccessSnapshot>> {
+        usb_access::snapshot_access()
+    }
+    fn verify_access(&self, snapshots: &[AccessSnapshot], state: AccessState) -> io::Result<()> {
+        usb_access::verify_access(snapshots, state)
+    }
+    fn restore_access(&mut self, snapshots: &[AccessSnapshot]) -> io::Result<()> {
+        usb_access::verify_access(snapshots, AccessState::Restorable)?;
+        if usb_access::verify_access(snapshots, AccessState::Restored).is_ok() {
+            return Ok(());
+        }
+        let mut child = Command::new("/usr/bin/pkexec")
+            .arg(std::env::current_exe()?)
+            .arg("--internal-restore-wave3-access")
+            .stdin(Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("missing access restoration input"))?
+            .write_all(&serde_json::to_vec(snapshots).map_err(io::Error::other)?)?;
+        if !child.wait()?.success() {
+            return Err(io::Error::other(
+                "privileged Wave:3 ACL restoration did not complete; retain the installation journal and retry uninstall",
+            ));
+        }
+        usb_access::verify_access(snapshots, AccessState::Restored)
+    }
     fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
         self.validate(path)?;
         read_exact_regular_file(path)
@@ -271,6 +303,15 @@ impl UnitInspector for TestUnitInspector {
 
 #[cfg(test)]
 impl UdevSystem for TestUdev {
+    fn snapshot_access(&self) -> io::Result<Vec<AccessSnapshot>> {
+        Ok(Vec::new())
+    }
+    fn verify_access(&self, _: &[AccessSnapshot], _: AccessState) -> io::Result<()> {
+        Ok(())
+    }
+    fn restore_access(&mut self, _: &[AccessSnapshot]) -> io::Result<()> {
+        Ok(())
+    }
     fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
         assert_eq!(path, self.expected);
         read_exact_regular_file(path)

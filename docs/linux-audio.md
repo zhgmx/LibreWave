@@ -41,6 +41,8 @@ After it installs or removes this rule, the lifecycle reloads the udev rules. It
 
 The rule does not use `MODE="0666"`. It does not match a USB class or interface, and it does not grant access to DFU or another product mode. `snd_usb_audio` stays bound during normal operation.
 
+The installation manifest records the connected nodes' original ACLs before the access rule is applied. Removal restores those exact permissions after the udev refresh. A changed ACL or a new node incarnation stops cleanup and retains the ownership records. See [Setup and removal](setup.md) for the connection limits.
+
 ## Runtime ownership plan
 
 The direct backend must follow this one startup path:

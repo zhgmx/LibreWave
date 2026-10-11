@@ -13,6 +13,7 @@ use std::path::{Component, Path};
 pub(super) fn validate_manifest(manifest: &Manifest, paths: &InstallPaths) -> io::Result<()> {
     validate_lifecycle_paths(paths)?;
     validate_schema(manifest.schema_version, "manifest")?;
+    librewave_platform_linux::usb_access::validate_snapshots(&manifest.usb_access)?;
     validate_absolute(&manifest.active_build_directory)?;
     let expected_build = paths.installations().join(manifest.identity.stable_key());
     if manifest.active_build_directory != expected_build
