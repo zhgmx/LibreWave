@@ -121,7 +121,7 @@ impl GraphRuntime for RealGraphRuntime {
         diagnostics.failed.then(|| {
             diagnostics.faults.into_iter().flatten().next().map_or_else(
                 || "PipeWire callback faulted without a record".to_owned(),
-                |record| format!("PipeWire callback fault: {record:?}"),
+                |record| format!("PipeWire callback fault: {record:?}; complete cycles {}, observed System link generation {}", diagnostics.process_cycles, diagnostics.system_link_word),
             )
         })
     }

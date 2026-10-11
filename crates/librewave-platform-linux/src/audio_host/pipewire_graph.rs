@@ -1676,6 +1676,101 @@ context.modules = [
         }
 
         #[test]
+        #[ignore = "requires LIBREWAVE_PIPEWIRE_INTEGRATION=1; uses private policy and software clients without USB or ALSA"]
+        fn private_wireplumber_starts_with_waiting_clients() {
+            assert_eq!(std::env::var("LIBREWAVE_PIPEWIRE_INTEGRATION").as_deref(), Ok("1"));
+            require_program("pw-play");
+            require_program("pw-record");
+            for (cycle, rate) in [(9, "48000"), (10, "44100")] {
+                let server = PrivatePipeWire::start(256, cycle);
+                let policy = server.start_wireplumber();
+                // These clients exist before any LibreWave endpoint. Policy
+                // must link them as the graph is published and activated.
+                let player = TestChild(
+                    server
+                        .command("pw-play")
+                        .args([
+                            "--target",
+                            "librewave.system",
+                            "--raw",
+                            "--rate",
+                            rate,
+                            "--channels",
+                            "2",
+                            "--format",
+                            "s16",
+                            "/dev/zero",
+                        ])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .expect("waiting private player"),
+                );
+                let recorder = TestChild(
+                    server
+                        .command("pw-record")
+                        .args([
+                            "--target",
+                            "librewave.microphone",
+                            "--raw",
+                            "--rate",
+                            rate,
+                            "--channels",
+                            "2",
+                            "--format",
+                            "s16",
+                            "/dev/null",
+                        ])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .expect("waiting private recorder"),
+                );
+                let plans = endpoint_plans(DELIBERATE_ENDPOINTS).expect("endpoints");
+                let processor = EngineProcessor::new(1024, Arc::new(ProcessorProof::default()));
+                let mut graph = InactiveGraph::construct(
+                    REMOTE,
+                    &plans,
+                    NonZeroU32::new(256).expect("quantum"),
+                    AdapterPortMode::WirePlumber,
+                    processor,
+                )
+                .expect("construct graph with waiting clients")
+                .activate()
+                .expect("activate graph with waiting clients");
+                run_cycles(&mut graph, 128);
+                let links =
+                    server.command("pw-link").arg("-l").output().expect("private startup links");
+                assert!(links.status.success());
+                let links = String::from_utf8(links.stdout).expect("UTF-8 links");
+                for expected in [
+                    "pw-play:output_FL\n  |-> librewave.system:playback_FL",
+                    "pw-play:output_FR\n  |-> librewave.system:playback_FR",
+                    "librewave.microphone:capture_FL\n  |-> pw-record:input_FL",
+                    "librewave.microphone:capture_FR\n  |-> pw-record:input_FR",
+                ] {
+                    assert!(
+                        links.contains(expected),
+                        "waiting client did not connect at {rate} Hz: {links}"
+                    );
+                }
+                assert!(!graph.diagnostics().failed);
+                assert!(graph.diagnostics().process_cycles >= 128);
+                assert_eq!(graph.diagnostics().system_link_word & 1, 1);
+                drop(player);
+                drop(recorder);
+                graph.teardown().expect("startup cleanup");
+                assert!(
+                    crate::desktop_defaults::audio_endpoints()
+                        .expect("private cleanup nodes")
+                        .is_empty()
+                );
+                drop(graph);
+                drop(policy);
+            }
+        }
+
+        #[test]
         #[ignore = "requires LIBREWAVE_PIPEWIRE_INTEGRATION=1 and private PipeWire/WirePlumber runtime tools"]
         #[allow(
             clippy::too_many_lines,

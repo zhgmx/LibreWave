@@ -398,6 +398,7 @@ impl<P> CallbackState<P> {
 
 pub(super) struct FilterDiagnostics {
     pub(super) process_cycles: u64,
+    pub(super) system_link_word: u64,
     pub(super) startup_incomplete_cycles: u64,
     pub(super) startup_missing_mask: u32,
     pub(super) startup_quantum: u32,
@@ -522,6 +523,7 @@ impl<P: GraphProcessor> FilterHandle<P> {
         let (faults, dropped_faults) = self.callbacks.faults.snapshot();
         FilterDiagnostics {
             process_cycles: self.callbacks.process_cycles.load(Ordering::Relaxed),
+            system_link_word: self.callbacks.link_word.load(Ordering::Acquire),
             startup_incomplete_cycles: self
                 .callbacks
                 .startup_incomplete_cycles
