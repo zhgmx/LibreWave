@@ -5,6 +5,7 @@ mod fs_ops;
 mod hash;
 mod identity;
 mod model;
+mod runtime;
 mod system;
 mod transaction;
 mod validation;
@@ -16,7 +17,10 @@ use std::path::{Path, PathBuf};
 use system::{ProductionProcessInspector, ProductionUdev, ProductionUnitInspector};
 
 pub fn is_command(arguments: &[String]) -> bool {
-    matches!(arguments.get(1).map(String::as_str), Some("setup" | "doctor" | "uninstall"))
+    matches!(
+        arguments.get(1).map(String::as_str),
+        Some("setup" | "doctor" | "uninstall" | "start" | "stop")
+    )
 }
 
 pub fn run<O: Write, E: Write>(
@@ -25,6 +29,9 @@ pub fn run<O: Write, E: Write>(
     errors: &mut E,
 ) -> io::Result<i32> {
     let command = arguments.get(1).map(String::as_str);
+    if matches!(command, Some("start" | "stop")) {
+        return runtime::run(arguments, output);
+    }
     if matches!(arguments.get(2).map(String::as_str), Some("--help" | "-h")) && arguments.len() == 3
     {
         let kind = match command {
@@ -53,7 +60,12 @@ pub fn run<O: Write, E: Write>(
             } else {
                 None
             };
-            let checks = lifecycle.doctor(expected.as_ref());
+            let mut checks = lifecycle.doctor(expected.as_ref());
+            let live = runtime::live_checks(&lifecycle.paths);
+            if !live.is_empty() {
+                checks.retain(|check| check.name != "PipeWire graph objects");
+                checks.extend(live);
+            }
             let failed = checks.iter().any(|check| check.state == CheckState::Fail);
             for check in checks {
                 writeln!(output, "{} {}: {}", state_label(check.state), check.name, check.detail)?;
@@ -115,11 +127,11 @@ fn run_setup(
     let identity = current_identity(options, &binaries)?;
     writeln!(
         output,
-        "LibreWave will install the current CLI, read-only daemon, user unit, and exact Wave:3 access rule."
+        "LibreWave will install the current CLI, daemon, user unit, and exact Wave:3 access rule."
     )?;
     writeln!(
         output,
-        "Audio ownership will remain blocked. LibreWave will not install a WirePlumber card-disable rule or start the daemon."
+        "Setup leaves audio inactive. Use `start --experimental` after access and live-test approval."
     )?;
     if !options.yes && !confirm("Continue with setup? [y/N] ")? {
         writeln!(output, "Setup canceled.")?;
@@ -157,7 +169,7 @@ fn write_command_help(output: &mut impl Write, command: CommandKind) -> io::Resu
         CommandKind::Setup => {
             writeln!(output, "Usage: librewavectl setup [OPTIONS]")?;
             writeln!(output)?;
-            writeln!(output, "Install the current CLI and read-only daemon.")?;
+            writeln!(output, "Install the current CLI and daemon. Leave audio inactive.")?;
             writeln!(output)?;
             writeln!(output, "Options:")?;
             writeln!(
@@ -204,7 +216,6 @@ fn state_label(state: CheckState) -> &'static str {
         CheckState::Pass => "PASS",
         CheckState::Fail => "FAIL",
         CheckState::Blocked => "BLOCKED",
-        CheckState::NotImplemented => "NOT IMPLEMENTED",
     }
 }
 

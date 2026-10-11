@@ -444,6 +444,23 @@ fn classify_existence(result: io::Result<fs::Metadata>) -> io::Result<bool> {
     }
 }
 
+/// Publish a complete file only if the destination is still absent.
+pub(super) fn atomic_write_absent(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+    let (mut file, temporary) = create_temporary(path)?;
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
+        file.sync_all()?;
+        fs::hard_link(&temporary, path)?;
+        if let Some(parent) = path.parent() {
+            fs::File::open(parent)?.sync_all()?;
+        }
+        fs::remove_file(&temporary)?;
+        Ok(())
+    })();
+    cleanup_temporary_result(result, &temporary)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

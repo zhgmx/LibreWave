@@ -21,27 +21,15 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
         if processes.is_empty() {
             return vec![pass("running daemon", "No LibreWave daemon process is running.")];
         }
-        processes
-            .into_iter()
-            .map(|process| {
-                let status = if !process.deleted
-                    && process.executable == expected
-                    && process.sha256.as_deref() == Some(manifest.identity.daemon_sha256.as_str())
-                {
-                    "current installed"
-                } else {
-                    "stale, modified, or deleted"
-                };
-                fail(
-                    "running daemon",
-                    format!(
-                        "Process {} uses the {status} daemon at {}. Stop it before changing this safety-gated installation.",
-                        process.pid,
-                        process.executable.display()
-                    ),
-                )
-            })
-            .collect()
+        let exactly_one = processes.len() == 1;
+        processes.into_iter().map(|process| {
+            if exactly_one && !process.deleted && process.executable == expected
+                && process.sha256.as_deref() == Some(manifest.identity.daemon_sha256.as_str()) {
+                pass("running daemon", format!("Process {} uses the current installed daemon at {}.", process.pid, process.executable.display()))
+            } else {
+                fail("running daemon", format!("Process {} is extra, stale, modified, or deleted at {}. Stop it before changing the installation.", process.pid, process.executable.display()))
+            }
+        }).collect()
     }
 
     pub(super) fn backup_artifact_checks(&self, manifest: &Manifest) -> Vec<Check> {
@@ -231,17 +219,22 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
 
     pub(super) fn unit_state_check(&self) -> Check {
         match self.unit_inspector.inspect(UNIT_FILE_NAME) {
-            Ok(state) if state.enabled || state.active => fail(
+            Ok(state) if state.enabled => fail(
                 "systemd user unit state",
-                format!(
-                    "The safety-gated unit is{}{}. Disable and stop it before audio ownership is implemented.",
-                    if state.enabled { " enabled" } else { "" },
-                    if state.active { " active" } else { "" }
-                ),
+                "Automatic daemon startup is enabled. Disable it before experimental takeover.",
             ),
-            Ok(_) => {
-                pass("systemd user unit state", "The safety-gated unit is disabled and inactive.")
-            }
+            Ok(state) if state.active => match super::runtime::has_ownership(&self.paths) {
+                Ok(true) => pass(
+                    "systemd user unit state",
+                    "The unit is active for a recorded audio ownership operation.",
+                ),
+                Ok(false) => pass(
+                    "systemd user unit state",
+                    "The installed daemon is running. Stop it before setup or uninstall.",
+                ),
+                Err(error) => fail("systemd user unit state", error.to_string()),
+            },
+            Ok(_) => pass("systemd user unit state", "The unit is disabled and inactive."),
             Err(error) => {
                 fail("systemd user unit state", format!("Cannot inspect the user unit: {error}"))
             }

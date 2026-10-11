@@ -118,3 +118,11 @@ No product documentation may claim exact Wave Link parity while required cells r
 A read-only live inspection of the Wave:3 ALSA card found two simple control groups. `Mic Capture Volume` has integer steps from 0 to 80, mapped from 0.00 to 40.00 dB. `PCM Playback Volume` has integer steps from 0 to 120, mapped from -60.00 to 0.00 dB. Each group also has a switch and a read-only channel map.
 
 These ranges match the Wave:3 microphone gain and headphone level ranges. LibreWave therefore treats the physical card controls as hardware aliases. They are not software endpoint volumes, and the future LibreWave endpoints must not use them for desktop volume or mute.
+
+## Gain across reconnect
+
+A physical observation reported 18.4609375 dB before reconnect and 16 dB after reconnect. The recovered value uses eight fractional bits. Regression tests preserve the exact raw gain during a knob-target change and do not place an unmanaged readback value into desired hardware state. These tests found no LibreWave rounding path that explains the change.
+
+The reference system's saved ALSA microphone capture volume is 32 on a 0 through 80 range. Its dB range is 0 through 4000 hundredths of a dB, so that saved value corresponds to 16 dB. The installed ALSA restore unit invokes `alsactl restore`. The ALSA udev rule also invokes restore when a sound control device is added. The restore unit was inactive during inspection; that does not exclude the separate udev path on reconnect.
+
+This evidence makes ALSA restoration a plausible cause. It does not prove that ALSA wrote the observed change. A controlled reconnect trace must establish the writer before any ALSA persistence change. LibreWave does not disable ALSA restoration or change its saved state as part of setup or audio takeover.

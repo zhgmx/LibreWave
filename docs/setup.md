@@ -103,13 +103,72 @@ Setup then:
 7. Switches the active link atomically.
 8. Verifies and stores the new manifest.
 9. Removes superseded, unmodified LibreWave build files.
-10. Leaves production audio ownership blocked.
+10. Leaves audio inactive.
 
 A failure before the manifest switch restores the previous paths byte for byte. A failure after the switch leaves a journal so the next setup can finish exact cleanup.
 
-Setup does not install or reload the WirePlumber card-disable rule. It does not enable the unit, start the daemon, open ALSA, or publish PipeWire objects. The opt-in audio host composes the endpoint engine and physical workers in code, but live ownership and recovery tests have not run. Setup cannot take ownership of the physical Wave card.
+Setup does not install or reload the WirePlumber card-disable rule. It does not enable the unit, start the daemon, open ALSA, or publish PipeWire objects. The separate experimental start operation composes the endpoint engine and physical workers. The new application lifecycle still needs controlled hardware and recovery tests. Setup alone cannot take ownership of the physical Wave card.
 
 The udev refresh matches USB vendor `0fd9` and product `0070`. It does not trigger another USB product, a device interface, or firmware mode. If the privileged install or refresh operation fails, setup fails and does not claim that access is current. Rollback or journal recovery preserves or restores the prior rule state.
+
+## Experimental application lifecycle
+
+Prerequisites: install matching CLI and daemon binaries with the current manifest schema. Connect exactly one supported Wave:3. PipeWire and WirePlumber must run in the same user session. The device must already have reviewed USB access. A start operation cannot grant access. Approve any persistent access rule separately before you run setup.
+
+Keep the installed unit disabled. Use the normal session socket for service control. Explicitly configured default names derived from USB identities cannot be saved because they can contain a device serial. Automatic defaults and stable virtual defaults are supported.
+
+1. Run `librewavectl start --experimental`.
+2. Run `librewavectl doctor`.
+3. Run `librewavectl stop` when you want to release audio ownership.
+
+If an existing user WirePlumber fragment creates competing Wave endpoints, select that exact file in the application or use an absolute path:
+
+```text
+librewavectl start --experimental --suspend-config /absolute/path/to/wireplumber.conf.d/51-elgato.conf
+```
+
+Start verifies the installed artifacts and refuses extra, stale, or modified daemon processes. It reloads the user units and starts `librewaved.service` when necessary. It checks host services and read-only device admission before it changes the audio policy.
+
+The daemon saves the configured default selections. The lifecycle backs up the selected regular `.conf` file, including its mode, and suspends only that file. It creates the exact `80-librewave-wave3.conf` policy and restarts WirePlumber. It waits for ready audio before selecting `librewave.system` and `librewave.microphone`. Success requires both configured and effective defaults to select those endpoints.
+
+The generated unit quotes executable paths and pins the installation's configuration root so the daemon uses the same profiles as the clients.
+
+The runtime journal records every owned file and whether the daemon service was already active. Repeated starts reuse that record. A repeated start without `--suspend-config` uses the recorded file. Setup and uninstall refuse to run until the ownership record is cleared. One process lock serializes all lifecycle operations.
+
+A failed start runs the same restoration path as stop. Stop cancels durable audio recovery, releases the audio resources, and waits for all LibreWave nodes to disappear. Cleanup failure retains the policy and backup. After successful cleanup, the daemon restores each configured default only while it still selects LibreWave. A later user selection is preserved. The lifecycle restores the exact fragment, removes its policy, restarts WirePlumber, and verifies the defaults. The daemon retains the baseline until this verification is complete. The lifecycle stops a service that it launched and removes its journal and backup.
+
+If restoration fails, keep the journal and backup and retry `librewavectl stop`. A modified file is preserved. The error names the conflicting artifact or failed operation. Do not delete the journal to bypass that check. An interrupted final service stop resumes without starting a new daemon or restarting WirePlumber again.
+
+The daemon stores active audio intent in `librewave/profiles/audio-state.json` below the configuration root. A daemon restart reloads that intent. Hotplug and host-service recovery use the existing capture-first supervisor. After graph recovery, the daemon reselects missing defaults and preserves explicit user choices. Stop saves disabled audio intent before cleanup. An interrupted or failed persistence operation reports an error instead of claiming that stop completed.
+
+These commands do not enable login startup, change Gain Lock, or change an ALSA saved state. Closing the application window keeps the daemon running.
+
+## Controlled live validation
+
+The new lifecycle has isolated regression tests. Native GUI behavior and real-device recovery remain unverified for this code.
+
+Before a live run, review `setup --plan`, the selected fragment, the current installation manifest, and the saved hardware profile. Record the current configured and effective defaults, fragment bytes and mode, unit state, daemon path, product nodes, and hardware gain without recording a serial. Confirm the exact access grant separately. Existing read-only USB access is sufficient for takeover; the plan includes no hardware control write.
+
+1. Install the reviewed build after approving `/etc/udev/rules.d/70-librewave-wave3.rules` and its exact normal-mode Wave:3 refresh.
+2. Run `librewavectl start --experimental --suspend-config <absolute-fragment-path>`.
+3. Verify application audio, software microphone monitoring, independent mixes, and the four deliberate desktop endpoints.
+4. Run `librewavectl start --experimental` again.
+5. Verify that one daemon and one audio graph remain.
+6. Change one software endpoint volume.
+7. Verify that hardware gain is unchanged.
+8. Run `systemctl --user restart librewaved.service`.
+9. Verify that accepted audio intent recovers.
+10. Run `systemctl --user restart pipewire.service`.
+11. Verify audio recovery.
+12. Run `systemctl --user restart wireplumber.service`.
+13. Verify audio recovery.
+14. Test reconnect only after approval for the physical action and the exact temporary access grant.
+15. Run `librewavectl stop`.
+16. Verify exact fragment restoration, preserved user default changes, original service state, and zero LibreWave graph nodes.
+17. Run `librewavectl uninstall`.
+18. Verify every manifest-owned path, service, access rule, process, and graph object.
+
+Stop immediately on unexpected hardware changes or a cleanup failure. Preserve the ownership files and use the normal stop path for recovery. Do not retire the existing workaround until this sequence passes. Sleep and login recovery require separate acceptance runs before production support.
 
 ## Development loop
 
@@ -132,11 +191,13 @@ cargo xtask dev-uninstall
 - The manifest and interrupted journal.
 - CLI and daemon file hashes.
 - Stable link targets and the active build directory.
-- The inactive unit and running daemon executable paths.
-- The exact udev rule and any stale WirePlumber rule.
+- Unit state and running daemon executable paths.
+- The exact udev rule, temporary WirePlumber policy, and audio ownership journal.
 - Stale build directories, temporary files, and backups.
-- The blocked production-audio prerequisite.
-- Graph inspection as not implemented until a production graph exists.
+- The remaining production validation gate.
+- Live product nodes and audio readiness through the installed daemon while ownership is recorded.
+
+An unavailable graph observation is a blocked check. Doctor does not report it as a successful cleanup. A changed policy, backup, stale daemon, or incomplete restoration is a failed check.
 
 Doctor also scans fixed LibreWave paths when the manifest is missing. It does not claim that an unavailable PipeWire check passed.
 

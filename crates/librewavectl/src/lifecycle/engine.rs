@@ -87,7 +87,6 @@ pub enum CheckState {
     Pass,
     Fail,
     Blocked,
-    NotImplemented,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -138,6 +137,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
     }
 
     pub fn setup(&mut self, request: &InstallRequest<'_>) -> io::Result<Manifest> {
+        let _lock = super::runtime::lock(&self.paths)?;
         self.preflight_runtime()?;
         self.recover_for_setup()?;
         validate_source(request.cli_source, &request.identity.cli_sha256)?;
@@ -247,6 +247,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
     }
 
     pub fn uninstall(&mut self, purge_profiles: bool) -> io::Result<UninstallOutcome> {
+        let _lock = super::runtime::lock(&self.paths)?;
         self.preflight_runtime()?;
         let interrupted = self.read_journal()?;
         let recovering = interrupted.is_some();
@@ -370,7 +371,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
                 checks.push(fail("installation manifest", "LibreWave is not installed."));
                 checks.extend(self.orphan_checks());
                 checks.push(blocked_audio());
-                checks.push(not_implemented_graph());
+                checks.push(unavailable_graph_observation());
                 return checks;
             }
             Err(error) => {
@@ -380,7 +381,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
                 ));
                 checks.extend(self.orphan_checks());
                 checks.push(blocked_audio());
-                checks.push(not_implemented_graph());
+                checks.push(unavailable_graph_observation());
                 return checks;
             }
         };
@@ -421,25 +422,9 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
         checks.extend(self.stale_artifact_checks(&manifest));
         checks.extend(self.backup_artifact_checks(&manifest));
         checks.push(self.unit_state_check());
-        match checked_exists(&manifest.wireplumber_policy_path) {
-            Ok(true) => checks.push(fail(
-                "WirePlumber ownership policy",
-                format!(
-                    "A stale LibreWave card-disable rule exists at {}. This build does not own or activate it.",
-                    manifest.wireplumber_policy_path.display()
-                ),
-            )),
-            Ok(false) => checks.push(blocked(
-                "WirePlumber ownership policy",
-                "Not installed because the production ALSA/PipeWire host is not implemented.",
-            )),
-            Err(error) => checks.push(fail(
-                "WirePlumber ownership policy",
-                format!("Cannot inspect the blocked policy path: {error}"),
-            )),
-        }
+        checks.extend(super::runtime::file_checks(&self.paths, &manifest));
         checks.push(blocked_audio());
-        checks.push(not_implemented_graph());
+        checks.push(unavailable_graph_observation());
         checks
     }
 
@@ -537,6 +522,11 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
     }
 
     fn preflight_runtime(&self) -> io::Result<()> {
+        if super::runtime::has_ownership(&self.paths)? {
+            return Err(io::Error::other(
+                "audio ownership or restoration is recorded; run `librewavectl stop` before setup or uninstall",
+            ));
+        }
         let unit = self.unit_inspector.inspect(UNIT_FILE_NAME)?;
         if unit.enabled || unit.active {
             return Err(io::Error::other(
@@ -776,15 +766,15 @@ fn blocked(name: impl Into<String>, detail: impl Into<String>) -> Check {
 fn blocked_audio() -> Check {
     blocked(
         "production audio ownership",
-        "Blocked because the production ALSA/PipeWire host is not implemented. The physical Wave card remains under desktop control.",
+        "Experimental start is available. Production support remains blocked on controlled hardware and recovery validation.",
     )
 }
 
-fn not_implemented_graph() -> Check {
+fn unavailable_graph_observation() -> Check {
     Check {
-        state: CheckState::NotImplemented,
+        state: CheckState::Blocked,
         name: "PipeWire graph objects".to_owned(),
-        detail: "Not checked because LibreWave does not yet publish a production graph.".to_owned(),
+        detail: "A graph observation requires a running installed daemon. The CLI never opens PipeWire directly.".to_owned(),
     }
 }
 

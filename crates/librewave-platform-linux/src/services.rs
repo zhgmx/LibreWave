@@ -11,6 +11,39 @@ use std::sync::{
 use std::thread::JoinHandle;
 mod command;
 
+/// A fixed user-session operation used only by the installation lifecycle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionOperation {
+    ReloadUnits,
+    StartDaemon,
+    StopDaemon,
+    RestartWirePlumber,
+}
+
+/// Executes one bounded operation without changing service enablement.
+/// # Errors
+/// Returns a command, timeout, or unsuccessful service operation error.
+pub fn session_operation(operation: SessionOperation) -> io::Result<()> {
+    let arguments: &[&str] = match operation {
+        SessionOperation::ReloadUnits => &["--user", "daemon-reload"],
+        SessionOperation::StartDaemon => &["--user", "start", "librewaved.service"],
+        SessionOperation::StopDaemon => &["--user", "stop", "librewaved.service"],
+        SessionOperation::RestartWirePlumber => &["--user", "restart", "wireplumber.service"],
+    };
+    let result = command::run_with_timeout(
+        Command::new("systemctl").args(arguments),
+        &AtomicBool::new(false),
+        std::time::Duration::from_secs(10),
+    )?;
+    if !result.status.success() {
+        return Err(io::Error::other(format!(
+            "user service operation {operation:?} failed: {}",
+            String::from_utf8_lossy(&result.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
 /// One complete read-only service observation, including restart identities.
 #[derive(Debug)]
 pub struct HostServiceObservation {

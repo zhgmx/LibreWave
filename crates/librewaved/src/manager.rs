@@ -1,3 +1,7 @@
+mod session;
+use crate::audio_session::{
+    AudioSession, AudioSessionStore, FileAudioSessionStore, MemoryAudioSessionStore,
+};
 use crate::control::{ConnectionOutcome, ConnectionRefreshOutcome, ManagedWave3Connection};
 use crate::persistence::{
     DesiredState, DesiredStateStore, DesiredWave3Controls, FileDesiredStateStore,
@@ -42,7 +46,16 @@ pub struct Daemon {
     audio_invocations: HostServiceInvocations,
     service_probe: Option<librewave_platform_linux::ServiceProbe>,
     next_service_probe: Instant,
+    desktop_defaults: Box<dyn librewave_platform_linux::desktop_defaults::DesktopDefaultStore>,
+    audio_access: Box<AudioAccessCheck>,
+    audio_endpoints: Box<dyn FnMut() -> std::io::Result<Vec<String>>>,
+    audio_session: AudioSession,
+    audio_session_store: Box<dyn AudioSessionStore>,
+    defaults_recovery_pending: bool,
+    next_defaults_recovery: Instant,
 }
+
+type AudioAccessCheck = dyn FnMut(&UsbDeviceCandidate) -> Result<(), AdmissionError>;
 
 type ConnectionFactory =
     dyn FnMut(&UsbDeviceCandidate) -> Result<Box<dyn ManagedWave3Connection>, AdmissionError>;
@@ -68,7 +81,7 @@ impl Daemon {
     pub fn new() -> Result<Self, PersistenceError> {
         let store = FileDesiredStateStore::new(profile_state_path("device-state.json")?);
         let mixer_store = FileMixerStateStore::new(profile_state_path("mixer-state.json")?);
-        Self::with_components(
+        let mut daemon = Self::with_components(
             LinuxInventory::new(),
             librewave_platform_linux::DiscoveryPaths::default(),
             Box::new(store),
@@ -78,7 +91,11 @@ impl Daemon {
                     .map(|connection| Box::new(connection) as Box<dyn ManagedWave3Connection>)
                     .map_err(admission_error)
             },
-        )
+        )?;
+        daemon.audio_session_store =
+            Box::new(FileAudioSessionStore(profile_state_path("audio-state.json")?));
+        daemon.load_audio_session()?;
+        Ok(daemon)
     }
 
     fn with_components(
@@ -124,6 +141,19 @@ impl Daemon {
             audio_invocations: HostServiceInvocations::default(),
             service_probe: Some(librewave_platform_linux::ServiceProbe::default()),
             next_service_probe: Instant::now(),
+            desktop_defaults: Box::new(
+                librewave_platform_linux::desktop_defaults::PipeWireDesktopDefaults,
+            ),
+            audio_session: AudioSession::default(),
+            audio_session_store: Box::new(MemoryAudioSessionStore(AudioSession::default())),
+            defaults_recovery_pending: false,
+            next_defaults_recovery: Instant::now(),
+            audio_endpoints: Box::new(librewave_platform_linux::desktop_defaults::audio_endpoints),
+            audio_access: Box::new(|candidate| {
+                librewave_platform_linux::probe_wave3_usb(candidate)
+                    .map(|_| ())
+                    .map_err(admission_error)
+            }),
         })
     }
 
@@ -152,6 +182,13 @@ impl Daemon {
             audio_invocations: HostServiceInvocations::default(),
             service_probe: None,
             next_service_probe: Instant::now(),
+            desktop_defaults: Box::new(UnavailableDesktopDefaults),
+            audio_access: Box::new(|_| Err(AdmissionError::Disconnected)),
+            audio_endpoints: Box::new(|| Ok(Vec::new())),
+            audio_session: AudioSession::default(),
+            audio_session_store: Box::new(MemoryAudioSessionStore(AudioSession::default())),
+            defaults_recovery_pending: false,
+            next_defaults_recovery: Instant::now(),
         }
     }
 
@@ -213,20 +250,53 @@ impl Daemon {
     ///
     /// Returns an error while a canceled attempt still owns resources.
     pub fn enable_experimental_audio(&mut self) -> Result<(), IpcError> {
+        if self.snapshot().mixer.runtime
+            == (MixerRuntimeState::Inactive {
+                reason: librewave_core::MixerInactiveReason::CleanupPending,
+            })
+        {
+            return Err(audio_cleanup_error());
+        }
+        let mut session = self.audio_session.clone();
+        session.enabled = true;
+        self.save_audio_session(session)?;
+        self.activate_audio(librewave_core::Origin::Client)
+    }
+
+    fn activate_audio(&mut self, origin: librewave_core::Origin) -> Result<(), IpcError> {
         if let Some(audio) = self.audio.as_mut() {
             audio.enable().map_err(|()| audio_cleanup_error())?;
         } else {
             self.audio = Some(AudioSupervisor::new());
         }
         self.next_audio_inventory = Instant::now();
-        self.update_mixer_runtime(librewave_core::Origin::Client);
+        self.update_mixer_runtime(origin);
         Ok(())
     }
 
     fn stop_audio(&mut self, origin: librewave_core::Origin) -> Result<(), IpcError> {
+        let mut session = self.audio_session.clone();
+        session.enabled = false;
+        // Cancel durable recovery before releasing any resource.
+        let persistence = self.save_audio_session(session);
+        self.defaults_recovery_pending = false;
         let result = self.audio.as_mut().map_or(Ok(()), AudioSupervisor::stop);
         self.update_mixer_runtime(origin);
-        result.map_err(|()| audio_cleanup_error())
+        result.map_err(|()| audio_cleanup_error())?;
+        persistence
+    }
+
+    fn save_audio_session(&mut self, session: AudioSession) -> Result<(), IpcError> {
+        if let Err(error) = self.audio_session_store.save(&session) {
+            // A post-rename error can have committed the intent. Retry the same
+            // complete state before doing more platform work.
+            if matches!(error, PersistenceError::SaveAfterRename(_)) {
+                self.audio_session = session;
+            }
+            return Err(internal_error(format!("cannot save audio recovery state: {error}")));
+        }
+        self.audio_session = session;
+        Ok(())
     }
 
     fn update_mixer_runtime(&mut self, origin: librewave_core::Origin) {
@@ -273,6 +343,7 @@ impl Daemon {
         let Some(supervisor) = self.audio.as_mut() else {
             return;
         };
+        let previous_runtime = supervisor.runtime();
         supervisor.tick(
             candidate.as_ref(),
             &pipewire,
@@ -281,6 +352,21 @@ impl Daemon {
             &profile,
             allow_start,
         );
+        if supervisor.runtime() != previous_runtime
+            && supervisor.runtime() == MixerRuntimeState::Active
+        {
+            self.defaults_recovery_pending = self.audio_session.selected;
+        }
+        if self.defaults_recovery_pending
+            && supervisor.runtime() == MixerRuntimeState::Active
+            && now >= self.next_defaults_recovery
+        {
+            self.next_defaults_recovery = now + Duration::from_secs(2);
+            match self.desktop_defaults.recover() {
+                Ok(_) => self.defaults_recovery_pending = false,
+                Err(error) => eprintln!("librewaved: desktop default recovery pending: {error}"),
+            }
+        }
         self.update_mixer_runtime(librewave_core::Origin::Recovery);
     }
 
@@ -326,6 +412,13 @@ impl Daemon {
                 self.stop_audio(origin)?;
                 Ok(Response::AudioStopped { mixer: self.snapshot().mixer.clone() })
             }
+            Command::CheckAudioAccess => self.check_audio_access(origin),
+            Command::GetDesktopDefaults => self.read_desktop_defaults(),
+            Command::GetAudioEndpoints => self.read_audio_endpoints(),
+            Command::CaptureDesktopDefaults => self.capture_desktop_defaults(),
+            Command::SelectDesktopDefaults => self.select_desktop_defaults(),
+            Command::RestoreDesktopDefaults => self.restore_desktop_defaults(),
+            Command::CompleteDesktopRestore => self.complete_desktop_restore(),
             Command::SetMixerRoute { expected_generation, source, target, route } => {
                 let mixer =
                     self.set_mixer_route(expected_generation, source, target, route, origin)?;
@@ -1178,5 +1271,26 @@ fn generation_exhausted() -> IpcError {
     IpcError {
         kind: IpcErrorKind::DeviceGenerationExhausted,
         message: "device generation is exhausted".to_owned(),
+    }
+}
+
+struct UnavailableDesktopDefaults;
+impl librewave_platform_linux::desktop_defaults::DesktopDefaultStore
+    for UnavailableDesktopDefaults
+{
+    fn read(&mut self) -> std::io::Result<librewave_core::DesktopDefaults> {
+        Err(std::io::Error::other("desktop defaults are not configured in this test daemon"))
+    }
+    fn select(&mut self) -> std::io::Result<librewave_core::DesktopDefaults> {
+        self.read()
+    }
+    fn recover(&mut self) -> std::io::Result<librewave_core::DesktopDefaults> {
+        self.read()
+    }
+    fn restore(
+        &mut self,
+        _: &librewave_core::DesktopDefaults,
+    ) -> std::io::Result<librewave_core::DesktopDefaults> {
+        self.read()
     }
 }

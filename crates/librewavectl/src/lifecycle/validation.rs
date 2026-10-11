@@ -120,8 +120,9 @@ fn validate_exact_metadata(
             return Err(invalid_data("manifest daemon metadata is not exact"));
         }
     } else if entry.path == paths.unit() {
-        let unit_hash =
-            hash::bytes(render_unit(&paths.active_link().join("bin/librewaved")).as_bytes());
+        let unit_hash = hash::bytes(
+            render_unit(&paths.active_link().join("bin/librewaved"), &paths.config_root).as_bytes(),
+        );
         if entry.sha256.as_deref() != Some(unit_hash.as_str()) || entry.mode != Some(0o644) {
             return Err(invalid_data("manifest unit metadata is not exact"));
         }
@@ -344,7 +345,7 @@ fn validate_snapshot(
     Ok(())
 }
 
-fn validate_parent_chain(path: &Path, _paths: &InstallPaths) -> io::Result<()> {
+pub(super) fn validate_parent_chain(path: &Path, _paths: &InstallPaths) -> io::Result<()> {
     validate_absolute(path)?;
     let mut parent = std::path::PathBuf::from("/");
     let components = path.components().collect::<Vec<_>>();

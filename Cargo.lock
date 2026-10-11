@@ -3212,6 +3212,7 @@ dependencies = [
  "pipewire",
  "pkg-config",
  "rusb",
+ "serde_json",
 ]
 
 [[package]]
@@ -3230,6 +3231,7 @@ dependencies = [
  "librewave-core",
  "librewave-ipc",
  "librewave-platform-linux",
+ "librewavectl",
 ]
 
 [[package]]

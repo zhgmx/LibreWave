@@ -15,14 +15,14 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-struct Fixture {
-    root: PathBuf,
-    cli: PathBuf,
-    daemon: PathBuf,
+pub(super) struct Fixture {
+    pub(super) root: PathBuf,
+    pub(super) cli: PathBuf,
+    pub(super) daemon: PathBuf,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
             "librewave-lifecycle-{}-{}",
@@ -37,7 +37,7 @@ impl Fixture {
         Self { root, cli, daemon }
     }
 
-    fn lifecycle(&self) -> Lifecycle<TestUdev, TestUnitInspector, TestProcessInspector> {
+    pub(super) fn lifecycle(&self) -> Lifecycle<TestUdev, TestUnitInspector, TestProcessInspector> {
         let paths = test_paths(&self.root);
         Lifecycle::new(
             paths.clone(),
@@ -47,7 +47,7 @@ impl Fixture {
         )
     }
 
-    fn identity(&self, revision: &str) -> BuildIdentity {
+    pub(super) fn identity(&self, revision: &str) -> BuildIdentity {
         BuildIdentity {
             source_revision: revision.to_owned(),
             source_dirty: false,
@@ -60,7 +60,7 @@ impl Fixture {
         }
     }
 
-    fn install(
+    pub(super) fn install(
         &self,
         lifecycle: &mut Lifecycle<TestUdev, TestUnitInspector, TestProcessInspector>,
         revision: &str,
@@ -95,7 +95,7 @@ fn first_install_records_exact_build_and_preserves_profiles() {
         b"cli-v1"
     );
     assert_eq!(fs::read_link(&manifest.active_link).unwrap(), manifest.active_build_directory);
-    assert_eq!(manifest.audio_ownership, AudioOwnership::BlockedMissingProductionHost);
+    assert_eq!(manifest.audio_ownership, AudioOwnership::ExperimentalOptIn);
     assert!(!manifest.wireplumber_policy_path.exists());
     assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed);
     assert_eq!(fs::read(profiles).unwrap(), b"profile");

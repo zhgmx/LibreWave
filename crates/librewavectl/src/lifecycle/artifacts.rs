@@ -22,7 +22,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
         let unit = self.paths.unit();
         validate_systemd_path(&active.join("bin/librewaved"))?;
         let udev_content = Wave3AudioPolicy::new().render_udev();
-        let unit_content = render_unit(&active.join("bin/librewaved"));
+        let unit_content = render_unit(&active.join("bin/librewaved"), &self.paths.config_root);
         let values = [
             directory(self.paths.data_root.clone()),
             directory(self.paths.installations()),
@@ -55,7 +55,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
             udev_policy_path: self.paths.udev_rule.clone(),
             wireplumber_policy_path: self.paths.wireplumber(),
             profiles_path: self.paths.profiles(),
-            audio_ownership: AudioOwnership::BlockedMissingProductionHost,
+            audio_ownership: AudioOwnership::ExperimentalOptIn,
             owned_paths,
         })
     }
@@ -68,7 +68,8 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
     ) -> io::Result<()> {
         let cli_target = manifest.active_build_directory.join("bin/librewavectl");
         let daemon_target = manifest.active_build_directory.join("bin/librewaved");
-        let unit_content = render_unit(&manifest.active_link.join("bin/librewaved"));
+        let unit_content =
+            render_unit(&manifest.active_link.join("bin/librewaved"), &self.paths.config_root);
         let udev_content = Wave3AudioPolicy::new().render_udev();
         for (owned, snapshot) in manifest.owned_paths.iter().zip(rollback) {
             let unchanged = if owned.path == manifest.udev_policy_path {
@@ -143,11 +144,29 @@ fn matches_udev_snapshot<U: UdevSystem>(udev: &U, snapshot: &Snapshot) -> io::Re
     }
 }
 
-pub(super) fn render_unit(daemon: &Path) -> String {
+pub(super) fn render_unit(daemon: &Path, config_root: &Path) -> String {
+    let executable = quote_unit_value(&daemon.to_string_lossy(), true);
+    let config = quote_unit_value(&format!("XDG_CONFIG_HOME={}", config_root.display()), false);
     format!(
-        "[Unit]\nDescription=LibreWave read-only device service\n\n[Service]\nExecStart={}\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
-        daemon.display()
+        "[Unit]\nDescription=LibreWave device and audio service\n\n[Service]\nExecStart={executable}\nEnvironment={config}\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n"
     )
+}
+fn quote_unit_value(value: &str, expand_environment: bool) -> String {
+    let mut encoded = String::from("\"");
+    for character in value.chars() {
+        match character {
+            '\\' => encoded.push_str("\\\\"),
+            '"' => encoded.push_str("\\\""),
+            '%' => encoded.push_str("%%"),
+            '$' if expand_environment => encoded.push_str("$$"),
+            '\n' => encoded.push_str("\\n"),
+            '\r' => encoded.push_str("\\r"),
+            '\t' => encoded.push_str("\\t"),
+            other => encoded.push(other),
+        }
+    }
+    encoded.push('"');
+    encoded
 }
 
 fn directory(path: PathBuf) -> OwnedPath {
@@ -183,5 +202,20 @@ fn symlink_entry(path: PathBuf, target: PathBuf) -> OwnedPath {
         mode: None,
         created_by_librewave: false,
         original: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn unit_pins_the_profile_root_and_quotes_paths_without_expansion() {
+        let unit = render_unit(
+            Path::new("/tmp/Audio files/$build%/librewaved"),
+            Path::new("/tmp/User config/$config%"),
+        );
+        assert!(unit.contains("ExecStart=\"/tmp/Audio files/$$build%%/librewaved\"\n"));
+        assert!(unit.contains("Environment=\"XDG_CONFIG_HOME=/tmp/User config/$config%%\"\n"));
+        assert!(!unit.contains("EXPERIMENTAL_AUDIO"));
     }
 }

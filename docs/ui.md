@@ -7,19 +7,18 @@ requests through `librewaved`. The application does not open the USB device.
 ## Prerequisites
 
 Install the Rust toolchain and native build packages in [Setup](setup.md).
-The `librewaved` daemon must run in the same user session. The current
-development build does not start it automatically.
+For lifecycle controls, install matching CLI and daemon binaries with `librewavectl setup`. Setup includes an exact udev access operation that requires separate approval. Use **View setup plan** to see the paths and access rule without changes. Audio startup still requires reviewed device access and a running PipeWire and WirePlumber session.
 
 ## Start the application
 
-1. Run `cargo run -p librewaved` in one terminal.
-2. Run `cargo run -p librewave` in another terminal.
+1. Run `cargo run -p librewave`.
+2. Select **Start experimental audio**.
 
-The application shows a connection error if it cannot reach the daemon. It
-checks daemon status every two seconds and removes old status when the daemon
-disconnects. It shows the new snapshot after the daemon starts again. It does
-not read the device configuration when the window opens. Set `LIBREWAVE_SOCKET`
-for both processes to use a development socket outside the normal session.
+The start action launches the installed daemon service and waits for ready audio and selected desktop defaults. If an existing WirePlumber fragment conflicts with ownership, use **Choose fragment…** to select the exact `.conf` file. The lifecycle backs it up and restores it on failure or stop. See [Setup](setup.md) for the full contract.
+
+Select **Stop and restore** to release audio and restore desktop ownership. Closing the window keeps audio running. Lifecycle operations run on the background executor. The application prevents overlapping actions and preserves a restoration error while status polling continues. A deliberate stop clears the active snapshot and suppresses the expected disconnect error.
+
+For device and mixer development without an installation, run `cargo run -p librewaved` separately. The application checks status every two seconds and removes old status after an unexpected disconnect. It shows a new snapshot when the daemon becomes available again. Opening the window does not read hardware controls. `LIBREWAVE_SOCKET` selects a development IPC socket; installed service lifecycle controls use the normal session socket.
 
 The main view places sources on the left and destination mixes on the right.
 This follows the horizontal matrix used by [Wave Link 3](https://www.elgato.com/us/en/s/wave-link-app).
@@ -50,15 +49,18 @@ status polling obtains the current profile.
 
 ## Current limits
 
-Normal daemon startup leaves the mixer audio path inactive. The opt-in host can
-report an active mixer after it owns the audio path. Live meter values are not
+A fresh daemon leaves the mixer audio path inactive. A daemon restart reloads
+a previously accepted audio intent. Experimental start reports ready audio only
+after the host owns the audio path. Live meter values are not
 published over IPC. Physical write validation is limited to the Low-cut control
 on Wave:3 API 5.4. Other hardware controls still require validation.
-Default-route selection, restart recovery, and hotplug remain unverified.
+The new service launch, default restoration, restart recovery, and hotplug
+lifecycle remain unverified on physical hardware. GPUI tests check state handling;
+they do not validate a native Wayland or X11 window.
 Longer stability on the current startup and routing implementation also
 requires validation.
-Software microphone monitoring still needs a test that separates it from
-direct device monitoring.
+The new lifecycle needs a monitoring test that separates software microphone
+monitoring from direct device monitoring.
 
 The Linux application uses upstream Zed GPUI and `gpui_platform` from
 Zed tag `v0.233.9`, commit `236e6ddf54e0763d0343f4d3e369d2ae00fe9670`,

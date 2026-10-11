@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub const MANIFEST_SCHEMA: u32 = 1;
+pub const MANIFEST_SCHEMA: u32 = 2;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -82,7 +82,7 @@ pub struct Manifest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioOwnership {
-    BlockedMissingProductionHost,
+    ExperimentalOptIn,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

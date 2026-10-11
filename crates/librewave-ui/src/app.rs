@@ -42,6 +42,12 @@ pub fn run() {
     });
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionExpectation {
+    Connect,
+    Stopped,
+}
+
 struct Shell {
     snapshot: Option<Snapshot>,
     pending: bool,
@@ -50,6 +56,9 @@ struct Shell {
     action_error: Option<String>,
     connection_error: Option<String>,
     hardware_state_stale: bool,
+    suspend_config: Option<std::path::PathBuf>,
+    lifecycle_message: Option<String>,
+    session_expectation: SessionExpectation,
 }
 
 impl Shell {
@@ -62,6 +71,9 @@ impl Shell {
             action_error: None,
             connection_error: None,
             hardware_state_stale: false,
+            suspend_config: None,
+            lifecycle_message: None,
+            session_expectation: SessionExpectation::Connect,
         };
         shell.send(Command::GetStatus, cx);
         cx.spawn(async move |this, cx| {
@@ -137,19 +149,22 @@ impl Shell {
         match result {
             Ok(Response::Status { snapshot }) => {
                 self.snapshot = Some(snapshot);
+                self.session_expectation = SessionExpectation::Connect;
                 self.connection_error = None;
                 self.hardware_state_stale = false;
             }
             Ok(_) => {
                 self.snapshot = None;
-                self.action_error = None;
                 self.connection_error =
                     Some("The daemon returned an unexpected status response.".to_owned());
             }
             Err(error) => {
                 self.snapshot = None;
-                self.action_error = None;
-                self.connection_error = Some(error.to_string());
+                self.connection_error = if self.session_expectation == SessionExpectation::Stopped {
+                    None
+                } else {
+                    Some(error.to_string())
+                };
             }
         }
         true
@@ -204,7 +219,11 @@ impl Shell {
         } else {
             self.snapshot = None;
             self.action_error = None;
-            self.connection_error = Some(error.to_string());
+            self.connection_error = if self.session_expectation == SessionExpectation::Stopped {
+                None
+            } else {
+                Some(error.to_string())
+            };
             self.hardware_state_stale = false;
         }
         false
@@ -225,6 +244,106 @@ impl Render for Shell {
 }
 
 impl Shell {
+    fn run_lifecycle(&mut self, action: librewavectl::SessionAction, cx: &mut Context<Self>) {
+        if self.pending {
+            return;
+        }
+        self.pending = true;
+        self.request_epoch = self.request_epoch.wrapping_add(1);
+        self.action_error = None;
+        self.lifecycle_message = None;
+        self.connection_error = None;
+        let stopped = matches!(action, librewavectl::SessionAction::Stop);
+        let starting = matches!(action, librewavectl::SessionAction::Start { .. });
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { librewavectl::session_action(action) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.pending = false;
+                if this.apply_lifecycle_result(stopped, starting, result) {
+                    this.poll_status(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn apply_lifecycle_result(
+        &mut self,
+        stopped: bool,
+        starting: bool,
+        result: std::io::Result<String>,
+    ) -> bool {
+        match result {
+            Ok(message) => {
+                self.lifecycle_message = Some(message);
+                if stopped {
+                    self.session_expectation = SessionExpectation::Stopped;
+                    self.snapshot = None;
+                    self.connection_error = None;
+                } else if starting {
+                    self.session_expectation = SessionExpectation::Connect;
+                    return true;
+                }
+            }
+            Err(error) => self.action_error = Some(error.to_string()),
+        }
+        false
+    }
+
+    fn choose_fragment(&mut self, cx: &mut Context<Self>) {
+        if self.pending {
+            return;
+        }
+        let selection = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Select the WirePlumber .conf fragment to suspend temporarily".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let result = selection.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(Ok(Some(paths))) => this.suspend_config = paths.into_iter().next(),
+                    Ok(Ok(None)) => {}
+                    Ok(Err(error)) => this.action_error = Some(error.to_string()),
+                    Err(error) => this.action_error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn lifecycle_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div().p(px(16.)).rounded(px(8.)).bg(rgb(PANEL)).flex().flex_col().gap(px(10.))
+            .child(div().text_sm().child("Experimental audio ownership"))
+            .child(div().text_sm().text_color(rgb(MUTED)).child(
+                "Start requires setup and USB access. The selected fragment is backed up and restored on stop. Closing this window keeps audio running."))
+            .child(div().flex().gap(px(8.))
+                .child(button("session-start", if self.pending { "Working…" } else { "Start experimental audio" })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.run_lifecycle(librewavectl::SessionAction::Start { suspend_config: this.suspend_config.clone() }, cx);
+                    })))
+                .child(button("session-stop", "Stop and restore")
+                    .on_click(cx.listener(|this, _, _, cx| this.run_lifecycle(librewavectl::SessionAction::Stop, cx))))
+                .child(button("setup-plan", "View setup plan")
+                    .on_click(cx.listener(|this, _, _, cx| this.run_lifecycle(librewavectl::SessionAction::SetupPlan, cx)))))
+            .child(div().flex().gap(px(8.))
+                .child(button("choose-fragment", "Choose fragment…").on_click(cx.listener(|this, _, _, cx| this.choose_fragment(cx))))
+                .child(button("clear-fragment", "Clear selection").on_click(cx.listener(|this, _, _, cx| {
+                    if !this.pending { this.suspend_config = None; cx.notify(); }
+                }))))
+            .child(div().text_sm().text_color(rgb(MUTED)).child(self.suspend_config.as_ref().map_or_else(
+                || "No user fragment selected.".to_owned(), |path| format!("Temporarily suspend: {}", path.display()))))
+            .when_some(self.lifecycle_message.clone(), |view, message| view.child(div().text_sm().child(message)))
+    }
+
     fn hardware_writable(&self, access: DeviceWriteAccess) -> bool {
         matches!(access, DeviceWriteAccess::Ready) && !self.pending && !self.hardware_state_stale
     }
@@ -270,6 +389,7 @@ impl Shell {
                     ),
             )
             .child(service_panel(self.snapshot.as_ref()))
+            .child(self.lifecycle_controls(cx))
             .when_some(self.connection_error.clone(), |view, error| {
                 view.child(
                     div()
@@ -878,9 +998,48 @@ mod tests {
             action_error: None,
             connection_error: None,
             hardware_state_stale: false,
+            suspend_config: None,
+            lifecycle_message: None,
+            session_expectation: SessionExpectation::Connect,
         }
     }
 
+    #[test]
+    fn lifecycle_stop_clears_active_status_and_expected_disconnect_keeps_the_result() {
+        let mut snapshot = Snapshot::empty();
+        snapshot.mixer = MixerSnapshot::active(MixerProfile::default());
+        let mut shell = shell_with(snapshot);
+        assert!(!shell.apply_lifecycle_result(true, false, Ok("Restored".into())));
+        assert!(shell.snapshot.is_none());
+        assert!(shell.apply_poll_result(
+            0,
+            Err(ClientError::Connection {
+                path: PathBuf::from("/tmp/stopped.sock"),
+                message: "stopped".into()
+            })
+        ));
+        assert!(shell.connection_error.is_none());
+        assert_eq!(shell.lifecycle_message.as_deref(), Some("Restored"));
+        assert!(shell.apply_lifecycle_result(false, true, Ok("Ready".into())));
+        assert_eq!(shell.session_expectation, SessionExpectation::Connect);
+    }
+    #[test]
+    fn lifecycle_restoration_errors_survive_status_polling() {
+        let mut shell = shell_with(Snapshot::empty());
+        assert!(!shell.apply_lifecycle_result(
+            false,
+            true,
+            Err(std::io::Error::other("restoration pending; retry stop"))
+        ));
+        shell.apply_poll_result(
+            0,
+            Err(ClientError::Connection {
+                path: PathBuf::from("/tmp/failed.sock"),
+                message: "unreachable".into(),
+            }),
+        );
+        assert_eq!(shell.action_error.as_deref(), Some("restoration pending; retry stop"));
+    }
     #[test]
     fn hardware_steps_stop_at_reviewed_boundaries() {
         let gain = FixedPointValue { raw: 0, fractional_bits: 8 };

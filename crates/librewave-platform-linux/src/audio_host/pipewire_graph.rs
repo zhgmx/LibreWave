@@ -996,6 +996,9 @@ mod tests {
 
         impl PrivatePipeWire {
             fn start(quantum: u32, cycle: u32) -> Self {
+                Self::start_with_metadata(quantum, cycle, false)
+            }
+            fn start_with_metadata(quantum: u32, cycle: u32, metadata: bool) -> Self {
                 require_program("pipewire");
                 require_program("pw-cli");
                 require_program("pw-metadata");
@@ -1011,7 +1014,11 @@ mod tests {
                 let runtime = root.join("runtime");
                 fs::create_dir_all(&config).expect("create private PipeWire config directory");
                 fs::create_dir_all(&runtime).expect("create private PipeWire runtime directory");
-                fs::write(config.join("proof-server.conf"), server_config(quantum))
+                let mut config_text = server_config(quantum);
+                if metadata {
+                    config_text.push_str("\ncontext.objects = [ { factory = metadata args = { metadata.name = defaults } } ]\n");
+                }
+                fs::write(config.join("proof-server.conf"), config_text)
                     .expect("write private PipeWire server config");
                 fs::write(config.join("proof-client.conf"), client_config())
                     .expect("write private PipeWire client config");
@@ -1211,6 +1218,48 @@ context.modules = [
                 block.stream.right.fill(0.0);
                 Ok(())
             }
+        }
+
+        #[test]
+        #[ignore = "requires LIBREWAVE_PIPEWIRE_INTEGRATION=1; uses a private metadata server without USB, ALSA, or desktop services"]
+        fn private_desktop_defaults_are_selected_and_restored() {
+            use crate::desktop_defaults::{DesktopDefaultStore, PipeWireDesktopDefaults};
+            assert_eq!(std::env::var("LIBREWAVE_PIPEWIRE_INTEGRATION").as_deref(), Ok("1"));
+            let server = PrivatePipeWire::start_with_metadata(256, 7, true);
+            let mut store = PipeWireDesktopDefaults;
+            let original = store.read().expect("read automatic defaults");
+            assert_eq!(original.configured_sink, None);
+            assert_eq!(original.configured_source, None);
+            let selected = store.select().expect("select software endpoints");
+            assert_eq!(selected.configured_sink.as_deref(), Some("librewave.system"));
+            assert_eq!(selected.configured_source.as_deref(), Some("librewave.microphone"));
+            let status = server
+                .command("pw-metadata")
+                .args([
+                    "-n",
+                    "defaults",
+                    "0",
+                    "default.configured.audio.source",
+                    r#"{"name":"new-user-choice"}"#,
+                    "Spa:String:JSON",
+                ])
+                .stdout(Stdio::null())
+                .status()
+                .expect("private user choice");
+            assert!(status.success());
+            let restored = store.restore(&original).expect("restore automatic selection");
+            assert_eq!(restored.configured_sink, None);
+            assert_eq!(restored.configured_source.as_deref(), Some("new-user-choice"));
+            assert_eq!(store.restore(&original).expect("repeat restoration"), restored);
+            let recovered = store.recover().expect("recover missing defaults");
+            assert_eq!(recovered.configured_sink.as_deref(), Some("librewave.system"));
+            assert_eq!(recovered.configured_source.as_deref(), Some("new-user-choice"));
+            assert_eq!(store.restore(&original).expect("restore recovered defaults"), restored);
+            assert!(
+                crate::desktop_defaults::audio_endpoints()
+                    .expect("inspect private nodes")
+                    .is_empty()
+            );
         }
 
         #[test]

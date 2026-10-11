@@ -1,6 +1,7 @@
 #![doc = "The `LibreWave` user-session daemon and its composition root."]
 
 mod audio;
+mod audio_session;
 mod control;
 mod persistence;
 
@@ -93,12 +94,7 @@ fn service_state(availability: ServiceAvailability) -> ServiceState {
 /// Returns the operating-system error when the daemon socket cannot be created or accepted.
 pub fn run(socket_path: impl Into<PathBuf>) -> std::io::Result<()> {
     let socket_path = socket_path.into();
-    let mut daemon = Daemon::new().map_err(std::io::Error::other)?;
-    if std::env::var_os("LIBREWAVE_EXPERIMENTAL_AUDIO").as_deref()
-        == Some(std::ffi::OsStr::new("1"))
-    {
-        daemon.enable_experimental_audio().map_err(std::io::Error::other)?;
-    }
+    let daemon = Daemon::new().map_err(std::io::Error::other)?;
     let daemon = std::cell::RefCell::new(daemon);
     librewave_platform_linux::ipc::serve_with_tick(
         &socket_path,

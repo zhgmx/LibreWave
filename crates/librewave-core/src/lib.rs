@@ -479,6 +479,20 @@ pub enum Command {
     StartExperimentalAudio,
     /// Cancel audio recovery and release the daemon-owned audio resources.
     StopAudio,
+    /// Check exact device access and schema without restoring managed controls.
+    CheckAudioAccess,
+    /// Read desktop default selections through the daemon-owned adapter.
+    GetDesktopDefaults,
+    /// Read product graph node names for readiness and cleanup verification.
+    GetAudioEndpoints,
+    /// Save the current configured defaults once, before desktop takeover.
+    CaptureDesktopDefaults,
+    /// Select the ready `LibreWave` System and Microphone endpoints.
+    SelectDesktopDefaults,
+    /// Restore prior selections only where `LibreWave` still owns the selection.
+    RestoreDesktopDefaults,
+    /// Release the saved baseline after the client verifies policy restoration.
+    CompleteDesktopRestore,
     /// Atomically replace one complete monitor or stream route.
     SetMixerRoute {
         expected_generation: MixerGeneration,
@@ -486,6 +500,16 @@ pub enum Command {
         target: MixTarget,
         route: MixRoute,
     },
+}
+
+/// Desktop default selections. An absent configured value means automatic selection.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesktopDefaults {
+    pub configured_sink: Option<String>,
+    pub configured_source: Option<String>,
+    pub effective_sink: Option<String>,
+    pub effective_source: Option<String>,
 }
 
 /// Events emitted when daemon state changes.

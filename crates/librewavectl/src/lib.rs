@@ -14,6 +14,48 @@ use std::path::Path;
 
 mod lifecycle;
 
+/// User-initiated application lifecycle actions shared by the CLI and `GPUI` client.
+#[derive(Clone, Debug)]
+pub enum SessionAction {
+    Start { suspend_config: Option<std::path::PathBuf> },
+    Stop,
+    SetupPlan,
+}
+
+/// Runs the same installation lifecycle used by the CLI, without a second authority.
+/// # Errors
+/// Returns a setup, readiness, or restoration error. No privilege grant is applied here.
+pub fn session_action(action: SessionAction) -> io::Result<String> {
+    let mut arguments = vec!["librewavectl".to_owned()];
+    match action {
+        SessionAction::Start { suspend_config } => {
+            arguments.extend(["start".to_owned(), "--experimental".to_owned()]);
+            if let Some(path) = suspend_config {
+                arguments.push("--suspend-config".to_owned());
+                arguments.push(
+                    path.to_str()
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "configuration path must be UTF-8",
+                            )
+                        })?
+                        .to_owned(),
+                );
+            }
+        }
+        SessionAction::Stop => arguments.push("stop".to_owned()),
+        SessionAction::SetupPlan => arguments.extend(["setup".to_owned(), "--plan".to_owned()]),
+    }
+    let mut output = Vec::new();
+    let mut errors = Vec::new();
+    let exit = lifecycle::run(&arguments, &mut output, &mut errors)?;
+    if exit != 0 {
+        return Err(io::Error::other(String::from_utf8_lossy(&errors).into_owned()));
+    }
+    String::from_utf8(output).map_err(io::Error::other)
+}
+
 /// Runs the CLI against one explicit daemon socket.
 ///
 /// # Errors
@@ -660,6 +702,11 @@ fn write_help<W: Write>(output: &mut W) -> io::Result<()> {
     writeln!(output, "Use the device generation shown by `librewavectl devices inspect <id>`.")?;
     writeln!(output, "Use the mixer generation shown by `librewavectl mixer show`.")?;
     writeln!(output, "  setup           Install the current build")?;
+    writeln!(
+        output,
+        "  start --experimental [--suspend-config <PATH>]  Start reversible audio ownership"
+    )?;
+    writeln!(output, "  stop            Restore desktop ownership and stop the launched service")?;
     writeln!(output, "  doctor          Check the installation")?;
     writeln!(output, "  uninstall       Remove manifest-owned files")
 }
@@ -696,7 +743,7 @@ mod tests {
         write_status(&mut output, &snapshot()).expect("render status");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "Daemon: connected\nProtocol: 6\nState generation: 4\nDevices: 1\nMixer: generation 0, inactive, 2 sources\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
+            "Daemon: connected\nProtocol: 7\nState generation: 4\nDevices: 1\nMixer: generation 0, inactive, 2 sources\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
         );
     }
 

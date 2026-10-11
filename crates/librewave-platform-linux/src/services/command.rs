@@ -95,10 +95,18 @@ fn read_pipe(pipe: &mut impl Read, output: &mut Vec<u8>) -> io::Result<bool> {
 }
 
 pub(super) fn run(command: &mut Command, cancel: &AtomicBool) -> io::Result<Output> {
+    run_with_timeout(command, cancel, PROBE_TIMEOUT)
+}
+
+pub(super) fn run_with_timeout(
+    command: &mut Command,
+    cancel: &AtomicBool,
+    timeout: Duration,
+) -> io::Result<Output> {
     if cancel.load(Ordering::Acquire) {
         return Err(io::Error::new(io::ErrorKind::TimedOut, "service probe cancelled"));
     }
-    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let child = command.process_group(0).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     collect(child, deadline, cancel)
 }

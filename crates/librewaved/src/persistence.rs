@@ -288,7 +288,7 @@ impl MixerStateStore for FileMixerStateStore {
     }
 }
 
-fn load_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, PersistenceError> {
+pub(super) fn load_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, PersistenceError> {
     recover_pending(path)?;
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -306,7 +306,7 @@ fn load_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, PersistenceE
     serde_json::from_slice(&bytes).map(Some).map_err(PersistenceError::Invalid)
 }
 
-fn save_json<T: Serialize>(path: &Path, value: &T) -> Result<(), PersistenceError> {
+pub(super) fn save_json<T: Serialize>(path: &Path, value: &T) -> Result<(), PersistenceError> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "state-file path has no parent")
     })?;

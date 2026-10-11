@@ -91,9 +91,11 @@ The daemon must not alternate between two competing graph layouts or repeatedly 
 
 `librewavectl` owns setup, verification, and removal. It records every installed path, backup, service unit, and policy file in one installation manifest. Setup stages a complete new installation, validates it, switches the active link atomically, and removes superseded LibreWave-owned files.
 
-The current setup installs the exact Wave:3 udev access rule and an inactive daemon unit. It does not install the WirePlumber card-disable rule, enable the unit, start the daemon, or take audio ownership. These actions stay blocked until the production ALSA and PipeWire host is ready.
+The current setup installs the exact Wave:3 udev access rule and an inactive daemon unit. It does not install the WirePlumber card-disable rule, enable the unit, start the daemon, or take audio ownership. `start --experimental` launches the installed unit and takes reversible audio ownership. Automatic login startup remains disabled until controlled recovery tests pass.
 
 Uninstall removes only unmodified, manifest-owned paths and restores exact user files from verified backups. It preserves profiles by default. An explicit, confirmed purge removes profiles. Setup does not change Gain Lock or other hardware settings, so uninstall has no hardware value to restore.
+
+The installation lifecycle records temporary policy and service changes in `runtime-manifest.json`. The daemon stores audio intent and the original configured defaults in `profiles/audio-state.json`. The clients use IPC to select or restore defaults. They never open the audio graph. A stopped daemon can reload an accepted audio intent after a crash. Stop cancels that intent before resource cleanup.
 
 Development commands build the current checkout and call the same installer. They do not maintain a separate development installation path. See [Setup and removal](setup.md).
 

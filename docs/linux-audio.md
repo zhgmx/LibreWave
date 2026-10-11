@@ -1,6 +1,6 @@
 # Linux audio integration
 
-Status: The daemon now has an explicit, opt-in audio attempt that composes the ALSA workers, independent-clock bridge, and PipeWire graph. The normal daemon path remains disabled and the default `LinuxAudioHost` still returns `GraphNotReady` before it opens ALSA. Private PipeWire tests run the composed path with fake PCMs and check that an existing physical node blocks ownership. Full audio ownership, recovery, and latency validation remain incomplete.
+Status: The daemon has an explicit experimental audio lifecycle that composes the ALSA workers, independent-clock bridge, and PipeWire graph. A fresh daemon leaves audio inactive. Accepted audio intent survives daemon restart. The CLI and GPUI can start the installed service, suspend one selected user fragment, and restore desktop ownership. Private PipeWire tests use fake PCMs. The new application lifecycle still needs physical ownership, recovery, and latency validation.
 
 ## Reference system
 
@@ -12,7 +12,7 @@ Some Wave microphones produce silent capture when playback starts before capture
 
 LibreWave uses one physical audio owner. `librewaved` will open the Wave:3 ALSA capture PCM directly, consume capture frames, confirm that capture is active, and then open the playback PCM. WirePlumber must not create or reserve the admitted physical card. PipeWire will carry only the product endpoints that `librewave-core` defines.
 
-`librewave-platform-linux` contains the policy artifacts, ordered lifecycle, and direct host. The host uses `alsa` 0.12.1 and `pipewire` 0.9.2. The PipeWire Rust crate does not wrap `pw_filter`. A small C shim includes the installed PipeWire headers and owns only the ABI-sensitive filter event, hook, and process-position layouts. Rust owns graph policy, lifecycle, validation, and processing. An explicit environment flag connects this code to daemon startup. Normal startup and setup do not select it.
+`librewave-platform-linux` contains the policy artifacts, ordered lifecycle, and direct host. The host uses `alsa` 0.12.1 and `pipewire` 0.9.2. The PipeWire Rust crate does not wrap `pw_filter`. A small C shim includes the installed PipeWire headers and owns only the ABI-sensitive filter event, hook, and process-position layouts. Rust owns graph policy, lifecycle, validation, and processing. `StartExperimentalAudio` connects this code to the daemon supervisor through IPC. Setup does not activate it.
 
 The host correlates an admitted USB candidate to one ALSA card. It requires one stable ALSA card identifier and one PCM device for each direction. It repeats the sysfs and procfs correlation immediately before each open. The open uses the revalidated card identifier, device number, and subdevice zero. A changed card number, identifier, topology, or PCM set stops startup.
 
@@ -31,7 +31,7 @@ The rule sets only `device.disabled = true`, which disables the exact card in th
 
 WirePlumber documents `device.disabled` as the property that removes a matched card or device. See the [WirePlumber ALSA configuration reference](https://pipewire.pages.freedesktop.org/wireplumber/daemon/configuration/alsa.html).
 
-The rule has no serial, name, family, class, or regular-expression match. A different vendor ID or adjacent product ID does not match it. The current setup does not install or activate this rule. A future setup can install it only after the production audio host can take ownership. Hardware validation must then confirm that WirePlumber created no physical nodes and holds no reservation before `librewaved` takes ownership.
+The rule has no serial, name, family, class, or regular-expression match. A different vendor ID or adjacent product ID does not match it. The current setup does not install or activate this rule. `start --experimental` installs it temporarily after read-only admission and records its ownership. Stop removes it after verified audio cleanup. Production activation still requires controlled hardware and recovery validation. Hardware validation must then confirm that WirePlumber created no physical nodes and holds no reservation before `librewaved` takes ownership.
 
 ## Device access policy
 
@@ -110,6 +110,7 @@ A separate test changes the live quantum from 128 to 64 frames. PipeWire pauses 
 Run the integration gate only on a host with the PipeWire development files, `pipewire`, `pw-cli`, and `pw-metadata`:
 
 ```text
+LIBREWAVE_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux audio_host::pipewire_graph::tests::integration::private_desktop_defaults_are_selected_and_restored -- --ignored --exact --test-threads=1
 LIBREWAVE_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux audio_host::pipewire_graph::tests::integration::private_pipewire_graph -- --ignored --exact --test-threads=1
 LIBREWAVE_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux audio_host::pipewire_graph::tests::integration::private_composed_audio_attempt -- --ignored --exact --test-threads=1
 LIBREWAVE_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux audio_host::pipewire_graph::tests::integration::private_existing_physical_node_blocks_ownership -- --ignored --exact --test-threads=1
@@ -173,7 +174,7 @@ Tests choose FIFO capacities, guard values, estimator spans, controller gains, a
 
 The opt-in host composes both workers, the bridge, and the PipeWire callback. Its control-side startup gates have an eight-second deadline. After activation, capture, playback, and graph progress each have a one-second watchdog. IPC frame transfers have absolute deadlines. The daemon continues supervision ticks between nonblocking reads and writes, including while a client sends an incomplete frame. Read-only service probes run off the owner thread. A stopped worker, bridge fault, callback fault, missing physical-node hiding rule, changed device, or changed host-service invocation tears down the attempt. Cleanup failure blocks a replacement. The daemon retries a clean failure after two seconds. The default test suite still opens no live ALSA or desktop PipeWire object.
 
-The named provisional policy uses a 1,024-frame capture period with an 8,192-frame buffer, a 256-frame playback period with a 2,048-frame buffer, and a fixed 256-frame graph quantum. Each bridge FIFO has 16,384 frames, an 8,192-frame target, and a 4,096-frame startup guard. Capture admission advances at 4,096 queued frames. The final guard check still uses the 8,192-frame target. Playback checks both FIFO fills before it pauses the graph for that final check. The rate ratio range is 0.98 through 1.02. Capture rate estimates require at least 8,192 frames and 160 ms of observation. Playback rate estimates require at least 32,768 frames and 640 ms. ALSA waits use 10 milliseconds and four transient retries. These values favor startup headroom. They are not measured latency settings. `LIBREWAVE_EXPERIMENTAL_AUDIO=1` selects this host for that daemon process. Normal startup and setup do not set the flag.
+The named provisional policy uses a 1,024-frame capture period with an 8,192-frame buffer, a 256-frame playback period with a 2,048-frame buffer, and a fixed 256-frame graph quantum. Each bridge FIFO has 16,384 frames, an 8,192-frame target, and a 4,096-frame startup guard. Capture admission advances at 4,096 queued frames. The final guard check still uses the 8,192-frame target. Playback checks both FIFO fills before it pauses the graph for that final check. The rate ratio range is 0.98 through 1.02. Capture rate estimates require at least 8,192 frames and 160 ms of observation. Playback rate estimates require at least 32,768 frames and 640 ms. ALSA waits use 10 milliseconds and four transient retries. These values favor startup headroom. They are not measured latency settings. `librewavectl start --experimental` selects this host through the installed daemon. Setup leaves audio inactive. The daemon reloads accepted audio intent from its strict audio-state file after restart.
 
 ## Mixer control plane
 
@@ -185,7 +186,7 @@ The current product profile has two logical sources. Source 1 is Microphone, and
 
 For a changed route, the daemon writes the complete desired profile to a temporary file, syncs it, renames it, and syncs the profile directory. It updates retained state only after all these steps succeed. If the directory sync fails after the rename, the command reports durability ambiguity and retained state does not advance. The destination can already contain the next complete profile. A retry with the retained generation writes the same next profile and converges the file and snapshot. On startup, the daemon strictly loads whichever complete file is present.
 
-The normal mixer snapshot reports that the audio host and mixer engine are not connected. Its meter values are unavailable. In the opt-in path, the snapshot becomes active only after the lifecycle reaches `Ready`; a later fault changes it back to inactive. Mixer commands save desired state and stage a complete profile at a graph boundary when that attempt is active. They do not enable the daemon service or activate the opt-in path.
+A fresh, inactive mixer snapshot reports that the audio host and mixer engine are not connected. Its meter values are unavailable. In the opt-in path, the snapshot becomes active only after the lifecycle reaches `Ready`; a later fault changes it back to inactive. Mixer commands save desired state and stage a complete profile at a graph boundary when that attempt is active. They do not enable the daemon service or activate the opt-in path.
 
 ## Volume ownership
 

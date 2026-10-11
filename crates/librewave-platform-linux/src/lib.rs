@@ -27,9 +27,13 @@ pub use librewave_device::{DeviceIdentity, DeviceModel, UsbIdentity};
 pub mod audio_host;
 pub mod audio_lifecycle;
 pub mod audio_policy;
+pub mod desktop_defaults;
 mod discovery;
 mod services;
-pub use services::{HostServiceObservation, ServiceProbe, failed_observation};
+pub use services::{
+    HostServiceObservation, ServiceProbe, SessionOperation, failed_observation, session_operation,
+};
+pub mod operation_lock;
 mod usb;
 
 pub use usb::{
