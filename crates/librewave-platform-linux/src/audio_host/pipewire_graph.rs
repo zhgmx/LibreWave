@@ -1370,5 +1370,62 @@ context.modules = [
             assert!(nodes.status.success());
             assert!(!String::from_utf8_lossy(&nodes.stdout).contains("librewave."));
         }
+
+        #[test]
+        #[ignore = "requires LIBREWAVE_PIPEWIRE_INTEGRATION=1 and PipeWire runtime tools"]
+        fn private_existing_physical_node_blocks_ownership() {
+            assert_eq!(
+                std::env::var("LIBREWAVE_PIPEWIRE_INTEGRATION").as_deref(),
+                Ok("1"),
+                "set LIBREWAVE_PIPEWIRE_INTEGRATION=1 for the private ownership proof",
+            );
+            let _server = PrivatePipeWire::start(256, 6);
+            pw::init();
+            let main_loop = pw::main_loop::MainLoopRc::new(None).expect("test loop");
+            let context = pw::context::ContextRc::new(&main_loop, None).expect("test context");
+            let core = context.connect_rc(None).expect("test connection");
+            let physical = core
+                .create_object::<pw::node::Node>(
+                    "adapter",
+                    &pw::properties::properties! {
+                        *pw::keys::FACTORY_NAME => "support.null-audio-sink",
+                        *pw::keys::NODE_NAME => "librewave.test-physical",
+                        *pw::keys::MEDIA_CLASS => "Audio/Sink",
+                        "api.alsa.path" => "hw:7",
+                        *pw::keys::AUDIO_CHANNELS => "2",
+                        "audio.position" => "FL,FR",
+                    },
+                )
+                .expect("test physical node");
+            roundtrip(&main_loop, &core).expect("publish test node");
+            let candidate = crate::UsbDeviceCandidate {
+                identity: crate::DeviceIdentity::wave3(),
+                topology: crate::UsbTopology::new("1-8.3"),
+                alsa_cards: vec![crate::AlsaCardInfo {
+                    number: 7,
+                    id: Some("Wave3".to_owned()),
+                    name: Some("Wave:3".to_owned()),
+                }],
+            };
+            let mut facade = crate::audio_host::pipewire::RealPipeWireFacade::default();
+            assert_eq!(
+                crate::audio_host::PipeWireFacade::verify_physical_nodes_hidden(
+                    &mut facade,
+                    &candidate,
+                ),
+                Err(crate::audio_host::LinuxAudioError::PhysicalNodeExposed),
+            );
+            drop(physical);
+            roundtrip(&main_loop, &core).expect("remove test node");
+            drop(facade);
+            let mut facade = crate::audio_host::pipewire::RealPipeWireFacade::default();
+            assert_eq!(
+                crate::audio_host::PipeWireFacade::verify_physical_nodes_hidden(
+                    &mut facade,
+                    &candidate,
+                ),
+                Ok(()),
+            );
+        }
     }
 }

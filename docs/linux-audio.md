@@ -1,6 +1,6 @@
 # Linux audio integration
 
-Status: The daemon now has an explicit, opt-in audio attempt that composes the ALSA workers, independent-clock bridge, and PipeWire graph. The normal daemon path remains disabled and the default `LinuxAudioHost` still returns `GraphNotReady` before it opens ALSA. A private PipeWire test runs the composed path with fake PCMs. No live Wave:3 audio ownership or latency claim has passed hardware validation.
+Status: The daemon now has an explicit, opt-in audio attempt that composes the ALSA workers, independent-clock bridge, and PipeWire graph. The normal daemon path remains disabled and the default `LinuxAudioHost` still returns `GraphNotReady` before it opens ALSA. Private PipeWire tests run the composed path with fake PCMs and check that an existing physical node blocks ownership. No live Wave:3 audio ownership or latency claim has passed hardware validation.
 
 ## Reference system
 
@@ -12,7 +12,7 @@ Some Wave microphones produce silent capture when playback starts before capture
 
 LibreWave uses one physical audio owner. `librewaved` will open the Wave:3 ALSA capture PCM directly, consume capture frames, confirm that capture is active, and then open the playback PCM. WirePlumber must not create or reserve the admitted physical card. PipeWire will carry only the product endpoints that `librewave-core` defines.
 
-`librewave-platform-linux` contains the policy artifacts, ordered lifecycle, and direct host. The host uses `alsa` 0.12.1 and `pipewire` 0.9.2. The PipeWire Rust crate does not wrap `pw_filter`. A small C shim includes the installed PipeWire headers and owns only the ABI-sensitive filter event, hook, and process-position layouts. Rust owns graph policy, lifecycle, validation, and processing. None of this code is connected to daemon startup, setup, or the running graph.
+`librewave-platform-linux` contains the policy artifacts, ordered lifecycle, and direct host. The host uses `alsa` 0.12.1 and `pipewire` 0.9.2. The PipeWire Rust crate does not wrap `pw_filter`. A small C shim includes the installed PipeWire headers and owns only the ABI-sensitive filter event, hook, and process-position layouts. Rust owns graph policy, lifecycle, validation, and processing. An explicit environment flag connects this code to daemon startup. Normal startup and setup do not select it.
 
 The host correlates an admitted USB candidate to one ALSA card. It requires one stable ALSA card identifier and one PCM device for each direction. It repeats the sysfs and procfs correlation immediately before each open. The open uses the revalidated card identifier, device number, and subdevice zero. A changed card number, identifier, topology, or PCM set stops startup.
 
@@ -85,7 +85,7 @@ All four plans set `node.virtual=true`. Applications render to the System sink. 
 
 The physical Wave capture and playback PCMs are not desktop endpoints. LibreWave must not publish a keepalive sink, null sink, raw helper source, duplicate physical Wave node, or another implementation object as an ordinary device. KDE, `wpctl status`, and PulseAudio-compatible listings form the visibility acceptance test. Low-level diagnostic tools may still show internal objects needed to inspect the graph.
 
-The host connects to the user's existing PipeWire instance and completes a registry round trip. It checks the admitted candidate's exact ALSA card number. A Device global must have the Wave:3 vendor and product values, and its `api.alsa.card` value must identify that card. A Node global matches through the card component of `api.alsa.path`. Node globals do not need vendor or product properties. Startup fails while any matching Device or Node global remains visible.
+The host connects to the user's existing `pipewire-0` instance and completes a registry round trip. It checks the admitted candidate's exact ALSA card number. A Device must have the Wave:3 vendor and product values, and its `api.alsa.card` value must identify that card. A Node matches through the card component of `api.alsa.path`. Nodes do not need vendor or product properties. The host binds registry objects and reads their complete properties; registry global properties alone do not carry the card identity on the reference desktop. Startup fails while any matching Device or Node remains visible.
 
 Endpoint plans come only from `librewave-core`. The default production adapter returns `EndpointStreamTransportUnavailable` before it opens ALSA or creates an endpoint, and it records the matching `GraphNotReady` reason. The opt-in composed host uses the same endpoint allowlist and one graph callback. It reports the graph ready only after both workers park, the bridge activates, and both workers resume. This path is disabled by default.
 
@@ -108,6 +108,7 @@ Run the integration gate only on a host with the PipeWire development files, `pi
 ```text
 LIBREWAVE_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux audio_host::pipewire_graph::tests::integration::private_pipewire_graph -- --ignored --exact --test-threads=1
 LIBREWAVE_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux audio_host::pipewire_graph::tests::integration::private_composed_audio_attempt -- --ignored --exact --test-threads=1
+LIBREWAVE_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux audio_host::pipewire_graph::tests::integration::private_existing_physical_node_blocks_ownership -- --ignored --exact --test-threads=1
 ```
 
 The default test suite does not start a daemon and does not silently skip this gate. CI does not run the gate yet because the current runner contract does not install the PipeWire daemon tools. Add it when CI supplies a fixed PipeWire runtime image and runs the command as a separate serial job.

@@ -179,7 +179,6 @@ fn pipewire_physical_objects_match_only_the_admitted_card() {
             2
         ));
     }
-    assert!(!is_candidate_physical_object(PhysicalObjectKind::Other, exact_device, 2));
 }
 
 #[test]

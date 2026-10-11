@@ -5,6 +5,7 @@ use crate::{UsbDeviceCandidate, WAVE3_USB};
 use pipewire as pw;
 use pw::types::ObjectType;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -17,7 +18,6 @@ const API_ALSA_PATH: &str = "api.alsa.path";
 pub(super) enum PhysicalObjectKind {
     Device,
     Node,
-    Other,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -42,7 +42,6 @@ pub(super) fn is_candidate_physical_object(
         PhysicalObjectKind::Node => {
             properties.alsa_path.and_then(parse_hw_card) == Some(expected_card)
         }
-        PhysicalObjectKind::Other => false,
     }
 }
 
@@ -66,6 +65,43 @@ fn parse_canonical_number(value: &str) -> Option<u32> {
         return None;
     }
     value.parse().ok()
+}
+
+#[derive(Clone, Debug)]
+struct PhysicalObjectSnapshot {
+    kind: PhysicalObjectKind,
+    vendor_id: Option<String>,
+    product_id: Option<String>,
+    alsa_card: Option<String>,
+    alsa_path: Option<String>,
+}
+
+impl PhysicalObjectSnapshot {
+    fn from_properties(
+        kind: PhysicalObjectKind,
+        properties: &pw::spa::utils::dict::DictRef,
+    ) -> Self {
+        Self {
+            kind,
+            vendor_id: properties.get(*pw::keys::DEVICE_VENDOR_ID).map(str::to_owned),
+            product_id: properties.get(*pw::keys::DEVICE_PRODUCT_ID).map(str::to_owned),
+            alsa_card: properties.get(API_ALSA_CARD).map(str::to_owned),
+            alsa_path: properties.get(API_ALSA_PATH).map(str::to_owned),
+        }
+    }
+
+    fn matches(&self, expected_card: u32) -> bool {
+        is_candidate_physical_object(
+            self.kind,
+            PhysicalObjectProperties {
+                vendor_id: self.vendor_id.as_deref(),
+                product_id: self.product_id.as_deref(),
+                alsa_card: self.alsa_card.as_deref(),
+                alsa_path: self.alsa_path.as_deref(),
+            },
+            expected_card,
+        )
+    }
 }
 
 #[derive(Debug, Default)]
@@ -105,12 +141,19 @@ impl PipeWireFacade for RealPipeWireFacade {
     }
 }
 
-#[derive(Debug)]
 struct PipeWireClient {
+    _registry_listener: pw::registry::Listener,
     registry: pw::registry::RegistryRc,
+    objects: Rc<RefCell<HashMap<u32, pw::registry::GlobalObject<pw::properties::PropertiesBox>>>>,
     core: pw::core::CoreRc,
     _context: pw::context::ContextRc,
     main_loop: pw::main_loop::MainLoopRc,
+}
+
+impl std::fmt::Debug for PipeWireClient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("PipeWireClient").finish_non_exhaustive()
+    }
 }
 
 impl PipeWireClient {
@@ -125,36 +168,101 @@ impl PipeWireClient {
             .map_err(|error| LinuxAudioError::PipeWire(error.to_string()))?;
         let registry =
             core.get_registry_rc().map_err(|error| LinuxAudioError::PipeWire(error.to_string()))?;
-        Ok(Self { registry, core, _context: context, main_loop })
+        // Registry globals are delivered once when the registry is created.
+        // Keep this listener for the entire connection so later checks also
+        // see objects that existed before the check began.
+        let objects = Rc::new(RefCell::new(HashMap::new()));
+        let observed = Rc::clone(&objects);
+        let removed = Rc::clone(&objects);
+        let registry_listener = registry
+            .add_listener_local()
+            .global(move |global| {
+                if matches!(global.type_, ObjectType::Device | ObjectType::Node) {
+                    observed.borrow_mut().insert(global.id, global.to_owned());
+                }
+            })
+            .global_remove(move |id| {
+                removed.borrow_mut().remove(&id);
+            })
+            .register();
+        Ok(Self {
+            _registry_listener: registry_listener,
+            registry,
+            objects,
+            core,
+            _context: context,
+            main_loop,
+        })
     }
 
     fn physical_object_visible(&self, expected_card: u32) -> Result<bool, LinuxAudioError> {
-        let exposed = Rc::new(Cell::new(false));
-        let exposed_callback = Rc::clone(&exposed);
-        let registry_listener = self
-            .registry
-            .add_listener_local()
-            .global(move |global| {
-                let Some(properties) = global.props else {
-                    return;
-                };
-                let kind = match global.type_ {
-                    ObjectType::Device => PhysicalObjectKind::Device,
-                    ObjectType::Node => PhysicalObjectKind::Node,
-                    _ => PhysicalObjectKind::Other,
-                };
-                let observed = PhysicalObjectProperties {
-                    vendor_id: properties.get(*pw::keys::DEVICE_VENDOR_ID),
-                    product_id: properties.get(*pw::keys::DEVICE_PRODUCT_ID),
-                    alsa_card: properties.get(API_ALSA_CARD),
-                    alsa_path: properties.get(API_ALSA_PATH),
-                };
-                if is_candidate_physical_object(kind, observed, expected_card) {
-                    exposed_callback.set(true);
+        self.roundtrip()?;
+        let observed = Rc::new(RefCell::new(HashMap::<u32, PhysicalObjectSnapshot>::new()));
+        let mut devices = Vec::new();
+        let mut device_listeners = Vec::new();
+        let mut nodes = Vec::new();
+        let mut node_listeners = Vec::new();
+        for object in self.objects.borrow().values() {
+            match object.type_ {
+                ObjectType::Device => {
+                    let device = self
+                        .registry
+                        .bind::<pw::device::Device, _>(object)
+                        .map_err(|error| LinuxAudioError::PipeWire(error.to_string()))?;
+                    let snapshots = Rc::clone(&observed);
+                    let listener = device
+                        .add_listener_local()
+                        .info(move |info| {
+                            if let Some(properties) = info.props() {
+                                snapshots.borrow_mut().insert(
+                                    info.id(),
+                                    PhysicalObjectSnapshot::from_properties(
+                                        PhysicalObjectKind::Device,
+                                        properties,
+                                    ),
+                                );
+                            }
+                        })
+                        .register();
+                    devices.push(device);
+                    device_listeners.push(listener);
                 }
-            })
-            .register();
+                ObjectType::Node => {
+                    let node = self
+                        .registry
+                        .bind::<pw::node::Node, _>(object)
+                        .map_err(|error| LinuxAudioError::PipeWire(error.to_string()))?;
+                    let snapshots = Rc::clone(&observed);
+                    let listener = node
+                        .add_listener_local()
+                        .info(move |info| {
+                            if let Some(properties) = info.props() {
+                                snapshots.borrow_mut().insert(
+                                    info.id(),
+                                    PhysicalObjectSnapshot::from_properties(
+                                        PhysicalObjectKind::Node,
+                                        properties,
+                                    ),
+                                );
+                            }
+                        })
+                        .register();
+                    nodes.push(node);
+                    node_listeners.push(listener);
+                }
+                _ => {}
+            }
+        }
+        self.roundtrip()?;
+        let exposed = observed.borrow().values().any(|object| object.matches(expected_card));
+        drop(node_listeners);
+        drop(device_listeners);
+        drop(nodes);
+        drop(devices);
+        Ok(exposed)
+    }
 
+    fn roundtrip(&self) -> Result<(), LinuxAudioError> {
         let done = Rc::new(Cell::new(false));
         let done_callback = Rc::clone(&done);
         let fatal_error = Rc::new(RefCell::new(None));
@@ -179,13 +287,12 @@ impl PipeWireClient {
             self.main_loop.loop_().iterate(PIPEWIRE_ITERATION);
         }
         drop(core_listener);
-        drop(registry_listener);
         if let Some(error) = fatal_error.take() {
             return Err(LinuxAudioError::PipeWire(error));
         }
         if !done.get() {
             return Err(LinuxAudioError::PipeWire("registry roundtrip timed out".to_owned()));
         }
-        Ok(exposed.get())
+        Ok(())
     }
 }
