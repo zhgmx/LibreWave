@@ -67,6 +67,7 @@ impl Fixture {
     ) -> super::model::Manifest {
         lifecycle
             .setup(&InstallRequest {
+                device_access: crate::lifecycle::model::DeviceAccess::Persistent,
                 identity: self.identity(revision),
                 cli_source: &self.cli,
                 daemon_source: &self.daemon,
@@ -125,6 +126,7 @@ fn upgrade_removes_the_old_exact_build_and_reports_identity_mismatch() {
     let current = fixture.identity("revision-2");
     let new = lifecycle
         .setup(&InstallRequest {
+            device_access: crate::lifecycle::model::DeviceAccess::Persistent,
             identity: current.clone(),
             cli_source: &fixture.cli,
             daemon_source: &fixture.daemon,
@@ -198,6 +200,7 @@ fn upgrade_refuses_modified_owned_paths_without_mutation() {
     let active = fs::read_link(&manifest.active_link).unwrap();
 
     let result = lifecycle.setup(&InstallRequest {
+        device_access: crate::lifecycle::model::DeviceAccess::Persistent,
         identity: fixture.identity("revision-2"),
         cli_source: &fixture.cli,
         daemon_source: &fixture.daemon,
@@ -227,6 +230,7 @@ fn upgrade_refuses_a_corrupt_carried_backup_without_mutation() {
     let installed_unit = fs::read(&unit).unwrap();
 
     let result = lifecycle.setup(&InstallRequest {
+        device_access: crate::lifecycle::model::DeviceAccess::Persistent,
         identity: fixture.identity("revision-2"),
         cli_source: &fixture.cli,
         daemon_source: &fixture.daemon,
@@ -251,6 +255,7 @@ fn setup_failure_rolls_back_files_links_directories_and_udev() {
     lifecycle.inject_failure_after_apply();
 
     let result = lifecycle.setup(&InstallRequest {
+        device_access: crate::lifecycle::model::DeviceAccess::Persistent,
         identity: fixture.identity("revision-1"),
         cli_source: &fixture.cli,
         daemon_source: &fixture.daemon,
@@ -272,6 +277,7 @@ fn foreign_udev_collision_fails_without_mutation() {
     write_file(&paths.udev_rule, b"foreign-rule");
     let mut lifecycle = fixture.lifecycle();
     let result = lifecycle.setup(&InstallRequest {
+        device_access: crate::lifecycle::model::DeviceAccess::Persistent,
         identity: fixture.identity("revision-1"),
         cli_source: &fixture.cli,
         daemon_source: &fixture.daemon,
@@ -292,6 +298,7 @@ fn first_install_refuses_an_unmanifested_planned_build_directory() {
     assert!(
         lifecycle
             .setup(&InstallRequest {
+                device_access: crate::lifecycle::model::DeviceAccess::Persistent,
                 identity: fixture.identity("revision-1"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
@@ -353,6 +360,7 @@ fn setup_rejects_a_symlink_at_the_fixed_udev_path_before_mutation() {
     assert_eq!(
         lifecycle
             .setup(&InstallRequest {
+                device_access: crate::lifecycle::model::DeviceAccess::Persistent,
                 identity: fixture.identity("revision-1"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
@@ -428,6 +436,7 @@ fn setup_recovers_when_the_manifest_switch_precedes_its_journal_phase() {
     lifecycle.inject_failure_after_manifest_switch();
     let identity = fixture.identity("revision-1");
     let result = lifecycle.setup(&InstallRequest {
+        device_access: crate::lifecycle::model::DeviceAccess::Persistent,
         identity,
         cli_source: &fixture.cli,
         daemon_source: &fixture.daemon,
@@ -502,6 +511,7 @@ fn corrupted_journal_cannot_escape_transaction_roots() {
     .unwrap();
 
     let result = lifecycle.setup(&InstallRequest {
+        device_access: crate::lifecycle::model::DeviceAccess::Persistent,
         identity: fixture.identity("revision-1"),
         cli_source: &fixture.cli,
         daemon_source: &fixture.daemon,
@@ -730,6 +740,7 @@ fn setup_and_uninstall_stop_before_mutation_for_runtime_owners() {
     assert!(
         blocked_setup
             .setup(&InstallRequest {
+                device_access: crate::lifecycle::model::DeviceAccess::Persistent,
                 identity: fixture.identity("revision-1"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
@@ -761,6 +772,7 @@ fn stale_wireplumber_policy_blocks_setup_before_mutation() {
     assert!(
         lifecycle
             .setup(&InstallRequest {
+                device_access: crate::lifecycle::model::DeviceAccess::Persistent,
                 identity: fixture.identity("revision-1"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
@@ -783,6 +795,7 @@ fn backup_parent_symlinks_cannot_escape_the_state_root() {
     assert!(
         lifecycle
             .setup(&InstallRequest {
+                device_access: crate::lifecycle::model::DeviceAccess::Persistent,
                 identity: fixture.identity("revision-1"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
@@ -809,6 +822,7 @@ fn transaction_parent_symlink_stops_upgrade_before_mutation() {
     assert!(
         lifecycle
             .setup(&InstallRequest {
+                device_access: crate::lifecycle::model::DeviceAccess::Persistent,
                 identity: fixture.identity("revision-2"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
@@ -857,6 +871,7 @@ fn foreign_transaction_content_is_never_removed_by_recovery() {
     assert!(
         lifecycle
             .setup(&InstallRequest {
+                device_access: crate::lifecycle::model::DeviceAccess::Persistent,
                 identity: fixture.identity("revision-1"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
@@ -881,6 +896,7 @@ fn unmanifested_empty_build_directory_is_reported_and_preserved() {
     assert!(
         lifecycle
             .setup(&InstallRequest {
+                device_access: crate::lifecycle::model::DeviceAccess::Persistent,
                 identity: next,
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
@@ -902,6 +918,7 @@ fn setup_refuses_a_destination_changed_after_preflight() {
     assert!(
         lifecycle
             .setup(&InstallRequest {
+                device_access: crate::lifecycle::model::DeviceAccess::Persistent,
                 identity: fixture.identity("revision-1"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
@@ -922,6 +939,7 @@ fn setup_refuses_a_source_binary_changed_after_initial_validation() {
     assert!(
         lifecycle
             .setup(&InstallRequest {
+                device_access: crate::lifecycle::model::DeviceAccess::Persistent,
                 identity: fixture.identity("revision-1"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
@@ -944,6 +962,7 @@ fn setup_never_overwrites_a_stale_original_backup() {
     assert!(
         lifecycle
             .setup(&InstallRequest {
+                device_access: crate::lifecycle::model::DeviceAccess::Persistent,
                 identity: fixture.identity("revision-1"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
@@ -1130,5 +1149,38 @@ fn setup_plan_returns_without_privilege_unit_probes_or_installed_binaries() {
     assert!(
         super::Options::parse(&["--plan"].map(str::to_owned), super::CommandKind::Uninstall)
             .is_err()
+    );
+}
+
+#[test]
+fn existing_access_plan_excludes_privileged_operations_and_validates_mode() {
+    let mut output = Vec::new();
+    let mut errors = Vec::new();
+    assert_eq!(
+        super::run(
+            &["librewavectl", "setup", "--plan", "--device-access", "existing"].map(str::to_owned),
+            &mut output,
+            &mut errors,
+        )
+        .unwrap(),
+        0
+    );
+    let plan = String::from_utf8(output).unwrap();
+    assert!(plan.contains("Use existing device access"));
+    assert!(!plan.contains("Privileged access rule"));
+    assert!(!plan.contains("Reload udev"));
+    assert!(
+        super::Options::parse(
+            &["--plan", "--device-access", "invalid"].map(str::to_owned),
+            CommandKind::Setup
+        )
+        .is_err()
+    );
+    assert!(
+        super::Options::parse(
+            &["--device-access", "existing"].map(str::to_owned),
+            CommandKind::Doctor
+        )
+        .is_err()
     );
 }

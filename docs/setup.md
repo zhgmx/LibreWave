@@ -26,8 +26,9 @@ The manifest is the source of truth for paths that LibreWave owns. It records:
 
 - Versioned executable files and stable links.
 - The inactive systemd user unit.
-- The exact Wave:3 udev access rule.
-- Original numeric USB ACLs and the exact connected node identities.
+- The selected device access mode.
+- The exact Wave:3 udev access rule when setup manages access.
+- Original numeric USB ACLs and exact node identities when setup manages access.
 - The active build directory.
 - User files that setup replaced.
 - Original file hashes and exact backup paths.
@@ -86,8 +87,9 @@ These packages are prerequisites for builds from source. They do not install or 
 
 ## Device access
 
-Device access is an installation step. It is not required for each application
-launch. Setup installs `/etc/udev/rules.d/70-librewave-wave3.rules`. The rule tags
+The default `persistent` mode manages device access during installation. It is
+not required for each application launch. Setup installs
+`/etc/udev/rules.d/70-librewave-wave3.rules`. The rule tags
 only normal-mode USB vendor `0fd9`, product `0070`, with `uaccess`.
 
 Automatic access requires systemd-udev, systemd-logind, and an active local
@@ -107,6 +109,19 @@ exact node still matches. Permission-record recovery for a new connection is
 separate from the persistent rule. Do not bypass the ownership checks to make
 cleanup succeed.
 
+For development with separately approved access, use
+`setup --device-access existing`. This mode installs the same binaries, links,
+manifest, and inactive unit. It does not install or refresh a udev rule, record
+USB ACLs, or request elevation. `start` still checks the current device access.
+`doctor` reports that installation checks cannot verify external access.
+Uninstall leaves those permissions alone. A temporary grant does not cover a
+replacement node after reconnect.
+
+Use the same access mode on each upgrade. To change modes, uninstall the current
+installation first. This prevents an upgrade from abandoning an owned access
+rule or treating a temporary grant as a persistent one. Use
+`setup --plan --device-access existing` to review this plan without changes.
+
 ## Source setup
 
 Build both runnable binaries before setup. A test build does not guarantee that the plain executable files are current.
@@ -124,8 +139,8 @@ Setup then:
 2. Reads the current manifest and any interrupted journal.
 3. Records exact backups for user files that it must replace.
 4. Stages the complete installation in a versioned build directory.
-5. Installs the inactive user unit and exact udev access rule.
-6. Reloads the udev rules and sends a change event only to connected normal-mode Wave:3 devices.
+5. Installs the inactive user unit and, in persistent mode, the exact udev access rule.
+6. In persistent mode, reloads udev rules and refreshes only connected normal-mode Wave:3 devices.
 7. Switches the active link atomically.
 8. Verifies and stores the new manifest.
 9. Removes superseded, unmodified LibreWave build files.
@@ -220,6 +235,9 @@ cargo xtask dev-uninstall
 
 `dev-install` and `dev-status` first ask Cargo to build the runnable `librewavectl` and `librewaved` binaries. `xtask` reads the compiler artifact messages, hashes those exact files, and invokes the exact CLI path that Cargo returned. It does not search `PATH` or call an older installed CLI.
 
+`cargo xtask dev-install --device-access existing` uses separately managed access.
+The default development install uses persistent access.
+
 `dev-install` records the source revision and dirty fingerprint. `dev-status` compares the current source identity and exact binary hashes with the manifest. A mismatch is an error. `dev-uninstall` builds only the current CLI and uses it for cleanup. Broken daemon work cannot prevent removal.
 
 ## Doctor checks
@@ -262,5 +280,12 @@ Setup never changes Gain Lock. Uninstall and unmanage do not restore a saved Gai
 ## Pre-release policy
 
 Development installations support only the current manifest, configuration, and IPC formats. The lifecycle refuses an unknown manifest or journal schema. Remove an incompatible pre-release installation explicitly before the next setup.
+
+The current mixer file uses schema 2. It includes software output controls.
+The daemon rejects schema 1 without changing the file. Setup preserves profiles
+and does not convert them. Before replacing old development state, stop the
+sole daemon, save the exact profile bytes and mode, and review a current-format
+replacement. Retain the backup with the matching old binary for rollback.
+Do not delete a profile to make startup succeed without reviewing its settings.
 
 Do not add compatibility readers, deprecated commands, dual writers, or fallback installation paths before the first public release.

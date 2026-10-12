@@ -82,7 +82,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
                 if journal.udev_refresh_pending {
                     self.udev.refresh_wave3_access()?;
                 }
-                self.udev.restore_access(&previous.usb_access)?;
+                self.restore_access(previous)?;
                 if journal.purge_profiles && checked_exists(&previous.profiles_path)? {
                     validate_purge_path(&previous.profiles_path, &self.paths.config_root)?;
                     fs::remove_dir_all(&previous.profiles_path)?;
@@ -174,7 +174,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
             }
         }
         if journal.previous.is_none() {
-            self.udev.restore_access(&next.usb_access)?;
+            self.restore_access(next)?;
         }
         match journal.previous.as_ref() {
             Some(previous) => self.write_manifest(previous)?,

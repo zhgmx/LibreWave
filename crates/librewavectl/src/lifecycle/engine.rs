@@ -4,7 +4,8 @@ use super::fs_ops::{
 };
 use super::hash;
 use super::model::{
-    BuildIdentity, Journal, MANIFEST_SCHEMA, Manifest, Operation, OwnedKind, OwnedPath, Phase,
+    BuildIdentity, DeviceAccess, Journal, MANIFEST_SCHEMA, Manifest, Operation, OwnedKind,
+    OwnedPath, Phase,
 };
 use super::system::{ProcessInspector, UdevSystem, UnitInspector};
 use super::validation::{validate_manifest, validate_purge_path};
@@ -78,6 +79,7 @@ fn env_path(name: &str, default: PathBuf) -> PathBuf {
 }
 
 pub struct InstallRequest<'a> {
+    pub device_access: DeviceAccess,
     pub identity: BuildIdentity,
     pub cli_source: &'a Path,
     pub daemon_source: &'a Path,
@@ -146,26 +148,18 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
         let previous = self.read_manifest()?;
         if let Some(previous) = previous.as_ref() {
             self.preflight_upgrade(previous)?;
-        }
-        self.preflight_installations(previous.as_ref())?;
-        let exact_udev = Wave3AudioPolicy::new().render_udev();
-        if let Some(existing) = self.udev.read(&self.paths.udev_rule)? {
-            let previously_owned = previous
-                .as_ref()
-                .and_then(|manifest| find_owned(manifest, &self.paths.udev_rule))
-                .is_some();
-            if existing != exact_udev.as_bytes() || !previously_owned {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!(
-                        "refused to replace the unowned or modified udev rule at {}",
-                        self.paths.udev_rule.display()
-                    ),
+            if previous.device_access != request.device_access {
+                return Err(io::Error::other(
+                    "device access mode differs from the installation; uninstall before changing it",
                 ));
             }
         }
+        self.preflight_installations(previous.as_ref())?;
+        self.preflight_access_rule(request.device_access, previous.as_ref())?;
         let mut next = self.build_manifest(request, previous.as_ref())?;
-        next.usb_access = if let Some(previous) = &previous {
+        next.usb_access = if request.device_access == DeviceAccess::Existing {
+            Vec::new()
+        } else if let Some(previous) = &previous {
             self.udev.verify_access(&previous.usb_access, AccessState::Granted)?;
             previous.usb_access.clone()
         } else {
@@ -215,7 +209,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
                 return Err(self.failed_setup(&journal, error));
             }
         }
-        if let Err(error) = self.udev.verify_access(&next.usb_access, AccessState::Granted) {
+        if let Err(error) = self.verify_access(&next, AccessState::Granted) {
             return Err(self.failed_setup(&journal, error));
         }
         journal.phase = Phase::Applied;
@@ -233,6 +227,30 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
         self.write_journal(&journal)?;
         remove_if_exists(&self.paths.journal())?;
         Ok(next)
+    }
+
+    fn preflight_access_rule(
+        &self,
+        access: DeviceAccess,
+        previous: Option<&Manifest>,
+    ) -> io::Result<()> {
+        let exact_udev = Wave3AudioPolicy::new().render_udev();
+        if access == DeviceAccess::Persistent
+            && let Some(existing) = self.udev.read(&self.paths.udev_rule)?
+        {
+            let previously_owned =
+                previous.and_then(|manifest| find_owned(manifest, &self.paths.udev_rule)).is_some();
+            if existing != exact_udev.as_bytes() || !previously_owned {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "refused to replace the unowned or modified udev rule at {}",
+                        self.paths.udev_rule.display()
+                    ),
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn failed_setup(&mut self, journal: &Journal, error: io::Error) -> io::Error {
@@ -279,7 +297,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
         if !modified.is_empty() {
             return Ok(UninstallOutcome::Modified(modified));
         }
-        self.udev.verify_access(&manifest.usb_access, AccessState::Restorable)?;
+        self.verify_access(&manifest, AccessState::Restorable)?;
         let mut journal = Journal {
             schema_version: MANIFEST_SCHEMA,
             operation: Operation::Uninstall,
@@ -310,7 +328,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
             journal.udev_refresh_pending = false;
             self.write_journal(&journal)?;
         }
-        self.udev.restore_access(&manifest.usb_access)?;
+        self.restore_access(&manifest)?;
         for owned in manifest.owned_paths.iter().rev() {
             if owned.path == self.paths.udev_rule {
                 continue;
@@ -398,12 +416,20 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
             "installation manifest",
             format!("Schema {} is valid.", manifest.schema_version),
         ));
-        match self.udev.verify_access(&manifest.usb_access, AccessState::Granted) {
-            Ok(()) => checks.push(pass(
-                "USB access permissions",
-                "The connected node ACL matches its owned grant.",
-            )),
-            Err(error) => checks.push(fail("USB access permissions", error.to_string())),
+        if manifest.device_access == DeviceAccess::Existing {
+            checks.push(Check {
+                state: CheckState::Blocked,
+                name: "USB access permissions".into(),
+                detail: "Access is externally managed. Start checks the connected device; setup and uninstall do not change its permissions.".into(),
+            });
+        } else {
+            match self.verify_access(&manifest, AccessState::Granted) {
+                Ok(()) => checks.push(pass(
+                    "USB access permissions",
+                    "The connected node ACL matches its owned grant.",
+                )),
+                Err(error) => checks.push(fail("USB access permissions", error.to_string())),
+            }
         }
         for owned in &manifest.owned_paths {
             match self.matches_owned(owned) {
@@ -452,6 +478,20 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
             }));
         }
         matches_entry(owned)
+    }
+
+    pub(super) fn verify_access(&self, manifest: &Manifest, state: AccessState) -> io::Result<()> {
+        if manifest.device_access == DeviceAccess::Persistent {
+            self.udev.verify_access(&manifest.usb_access, state)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn restore_access(&mut self, manifest: &Manifest) -> io::Result<()> {
+        if manifest.device_access == DeviceAccess::Persistent {
+            self.udev.restore_access(&manifest.usb_access)?;
+        }
+        Ok(())
     }
 
     fn restore_udev(&mut self, owned: &OwnedPath) -> io::Result<()> {
@@ -569,7 +609,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
 
     pub(super) fn verify_installed(&self, manifest: &Manifest) -> io::Result<()> {
         self.preflight_runtime()?;
-        self.udev.verify_access(&manifest.usb_access, AccessState::Granted)?;
+        self.verify_access(manifest, AccessState::Granted)?;
         for owned in &manifest.owned_paths {
             if !self.matches_owned(owned)? {
                 return Err(io::Error::other(format!(
@@ -602,7 +642,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
 
     pub(super) fn verify_uninstalled(&self, manifest: &Manifest) -> io::Result<()> {
         self.preflight_runtime()?;
-        self.udev.verify_access(&manifest.usb_access, AccessState::Restored)?;
+        self.verify_access(manifest, AccessState::Restored)?;
         for owned in &manifest.owned_paths {
             if !is_uninstalled_state(owned)? {
                 return Err(io::Error::other(format!(

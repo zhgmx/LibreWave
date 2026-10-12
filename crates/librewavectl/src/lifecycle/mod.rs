@@ -14,6 +14,7 @@ mod validation;
 
 use engine::{CheckState, InstallPaths, InstallRequest, Lifecycle, UninstallOutcome};
 use identity::IdentityRequest;
+use model::DeviceAccess;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use system::{ProductionProcessInspector, ProductionUdev, ProductionUnitInspector};
@@ -121,16 +122,13 @@ fn run_setup(
     lifecycle: &mut Lifecycle<ProductionUdev, ProductionUnitInspector, ProductionProcessInspector>,
     output: &mut impl Write,
 ) -> io::Result<i32> {
-    write_setup_plan(output, &lifecycle.paths)?;
+    write_setup_plan(output, &lifecycle.paths, options.device_access)?;
     if options.setup_mode == SetupMode::Plan {
         return Ok(0);
     }
     let binaries = current_binaries(options.daemon_path.as_deref())?;
     let identity = current_identity(options, &binaries)?;
-    writeln!(
-        output,
-        "LibreWave will install the current CLI, daemon, user unit, and exact Wave:3 access rule."
-    )?;
+    writeln!(output, "LibreWave will install the current CLI, daemon, and inactive user unit.")?;
     writeln!(
         output,
         "Setup leaves audio inactive. Use `start --experimental` after access and live-test approval."
@@ -140,6 +138,7 @@ fn run_setup(
         return Ok(0);
     }
     let manifest = lifecycle.setup(&InstallRequest {
+        device_access: options.device_access,
         identity,
         cli_source: &binaries.cli,
         daemon_source: &binaries.daemon,
@@ -149,20 +148,35 @@ fn run_setup(
     Ok(0)
 }
 
-fn write_setup_plan(output: &mut impl Write, paths: &InstallPaths) -> io::Result<()> {
+fn write_setup_plan(
+    output: &mut impl Write,
+    paths: &InstallPaths,
+    access: DeviceAccess,
+) -> io::Result<()> {
     writeln!(output, "Setup plan (no changes applied):")?;
     writeln!(output, "  Executable links: {}", paths.bin_root.display())?;
     writeln!(output, "  Inactive user unit: {}", paths.unit().display())?;
-    writeln!(output, "  Privileged access rule: {}", paths.udev_rule.display())?;
-    write!(
-        output,
-        "  {}",
-        librewave_platform_linux::audio_policy::Wave3AudioPolicy::new().render_udev()
-    )?;
-    writeln!(
-        output,
-        "  Reload udev rules and refresh only USB devices with vendor 0fd9 and product 0070."
-    )?;
+    if access == DeviceAccess::Existing {
+        writeln!(
+            output,
+            "  Use existing device access. Do not install a udev rule or change USB permissions."
+        )?;
+        writeln!(
+            output,
+            "  Start checks current access. A temporary grant ends when its node is replaced."
+        )?;
+    } else {
+        writeln!(output, "  Privileged access rule: {}", paths.udev_rule.display())?;
+        write!(
+            output,
+            "  {}",
+            librewave_platform_linux::audio_policy::Wave3AudioPolicy::new().render_udev()
+        )?;
+        writeln!(
+            output,
+            "  Reload udev rules and refresh only USB devices with vendor 0fd9 and product 0070."
+        )?;
+    }
     writeln!(output, "  Do not start the daemon or change WirePlumber configuration.")
 }
 
@@ -183,6 +197,10 @@ fn write_command_help(output: &mut impl Write, command: CommandKind) -> io::Resu
                 "  --source-root <PATH>       Source checkout used for build identity"
             )?;
             writeln!(output, "  --profile <debug|release> Rust build profile")?;
+            writeln!(
+                output,
+                "  --device-access <persistent|existing> Access mode (default: persistent)"
+            )?;
             writeln!(output, "  --target <TRIPLE>          Rust target triple")?;
             writeln!(output, "  --daemon-path <PATH>       Exact daemon executable to install")?;
             writeln!(output, "  --yes                      Skip the confirmation prompt")?;
@@ -237,6 +255,7 @@ enum SetupMode {
 
 struct Options {
     setup_mode: SetupMode,
+    device_access: DeviceAccess,
     yes: bool,
     purge: bool,
     expect_current: bool,
@@ -257,6 +276,7 @@ impl Options {
     fn parse(arguments: &[String], command: CommandKind) -> io::Result<Self> {
         let mut options = Self {
             setup_mode: SetupMode::Apply,
+            device_access: DeviceAccess::Persistent,
             yes: false,
             purge: false,
             expect_current: false,
@@ -269,6 +289,19 @@ impl Options {
         while index < arguments.len() {
             match arguments[index].as_str() {
                 "--plan" if command == CommandKind::Setup => options.setup_mode = SetupMode::Plan,
+                "--device-access" if command == CommandKind::Setup => {
+                    index += 1;
+                    options.device_access =
+                        match required_value(arguments, index, "--device-access")? {
+                            "persistent" => DeviceAccess::Persistent,
+                            "existing" => DeviceAccess::Existing,
+                            _ => {
+                                return Err(invalid(
+                                    "--device-access must be `persistent` or `existing`",
+                                ));
+                            }
+                        };
+                }
                 "--yes" if matches!(command, CommandKind::Setup | CommandKind::Uninstall) => {
                     options.yes = true;
                 }

@@ -576,6 +576,7 @@ fn setup_and_uninstall_refuse_recorded_audio_and_concurrent_ownership_operations
     assert!(
         installer
             .setup(&super::super::engine::InstallRequest {
+                device_access: crate::lifecycle::model::DeviceAccess::Persistent,
                 identity: fixture.identity("replacement"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon

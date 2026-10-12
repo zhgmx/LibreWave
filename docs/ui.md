@@ -7,7 +7,7 @@ requests through `librewaved`. The application does not open the USB device.
 ## Prerequisites
 
 Install the Rust toolchain and native build packages in [Setup](setup.md).
-For lifecycle controls, install matching CLI and daemon binaries with `librewavectl setup`. Setup includes an exact udev access operation that requires separate approval. In Settings, use **Show plan** on the **Setup** page to see the paths and access rule without changes. Audio startup still requires reviewed device access and a running PipeWire and WirePlumber session.
+For lifecycle controls, install matching CLI and daemon binaries with `librewavectl setup`. Setup uses persistent device access by default, which requires separate approval. Use `setup --device-access existing` for separately approved temporary access. In Settings, use **Show plan** on the **Setup** page to see the paths and access rule without changes. Audio startup still requires reviewed device access and a running PipeWire and WirePlumber session.
 
 ## Start the application
 

@@ -2,7 +2,8 @@ use super::artifacts::render_unit;
 use super::engine::InstallPaths;
 use super::hash;
 use super::model::{
-    Journal, MANIFEST_SCHEMA, Manifest, Operation, OwnedKind, OwnedPath, Phase, Snapshot,
+    DeviceAccess, Journal, MANIFEST_SCHEMA, Manifest, Operation, OwnedKind, OwnedPath, Phase,
+    Snapshot,
 };
 use librewave_platform_linux::audio_policy::Wave3AudioPolicy;
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,7 +25,7 @@ pub(super) fn validate_manifest(manifest: &Manifest, paths: &InstallPaths) -> io
     }
     let allowed = [&paths.data_root, &paths.state_root, &paths.config_root, &paths.bin_root];
     let mut unique = BTreeSet::new();
-    let expected_paths = BTreeMap::from([
+    let mut expected_paths = BTreeMap::from([
         (paths.data_root.clone(), OwnedKind::Directory),
         (paths.installations(), OwnedKind::Directory),
         (expected_build.clone(), OwnedKind::Directory),
@@ -37,6 +38,12 @@ pub(super) fn validate_manifest(manifest: &Manifest, paths: &InstallPaths) -> io
         (paths.bin_root.join("librewavectl"), OwnedKind::Symlink),
         (paths.bin_root.join("librewaved"), OwnedKind::Symlink),
     ]);
+    if manifest.device_access == DeviceAccess::Existing {
+        expected_paths.remove(&paths.udev_rule);
+        if !manifest.usb_access.is_empty() {
+            return Err(invalid_data("externally managed access cannot contain owned USB grants"));
+        }
+    }
     if manifest.identity.source_dirty != manifest.identity.dirty_fingerprint.is_some()
         || manifest.identity.dirty_fingerprint.as_deref().is_some_and(|value| !valid_hash(value))
         || !valid_hash(&manifest.identity.cli_sha256)
@@ -163,6 +170,11 @@ pub(super) fn validate_journal(journal: &Journal, paths: &InstallPaths) -> io::R
                 || journal.next.is_some()
                 || !journal.rollback_paths.is_empty()
                 || journal.udev_refresh_pending && journal.phase != Phase::Prepared
+                || journal.udev_refresh_pending
+                    && journal
+                        .previous
+                        .as_ref()
+                        .is_some_and(|manifest| manifest.device_access != DeviceAccess::Persistent)
                 || !matches!(journal.phase, Phase::Prepared | Phase::Applied | Phase::Committed)
             {
                 return Err(invalid_data("uninstall journal contains setup state"));

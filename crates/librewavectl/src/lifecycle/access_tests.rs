@@ -90,6 +90,7 @@ fn install(
 ) {
     lifecycle
         .setup(&InstallRequest {
+            device_access: crate::lifecycle::model::DeviceAccess::Persistent,
             identity: fixture.identity(revision),
             cli_source: &fixture.cli,
             daemon_source: &fixture.daemon,
@@ -119,6 +120,7 @@ fn failed_setup_restores_its_access_grant_with_the_rule() {
     assert!(
         lifecycle
             .setup(&InstallRequest {
+                device_access: crate::lifecycle::model::DeviceAccess::Persistent,
                 identity: fixture.identity("failure"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon
@@ -163,4 +165,132 @@ fn failed_acl_restoration_retains_records_and_binaries_and_resumes_idempotently(
     assert_eq!(lifecycle.udev.acl.borrow().as_str(), ORIGINAL);
     assert!(!lifecycle.paths.journal().exists());
     assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::NotInstalled);
+}
+
+/// Existing access is outside installation ownership. No permission operation,
+/// including read/snapshot/verification, belongs to this mode.
+struct ExternalAccess;
+impl UdevSystem for ExternalAccess {
+    fn read(&self, _: &Path) -> io::Result<Option<Vec<u8>>> {
+        panic!("unowned rule read")
+    }
+    fn install_and_refresh(&mut self, _: &Path, _: &[u8]) -> io::Result<()> {
+        panic!("access install")
+    }
+    fn remove_and_refresh(&mut self, _: &Path) -> io::Result<()> {
+        panic!("access removal")
+    }
+    fn refresh_wave3_access(&mut self) -> io::Result<()> {
+        panic!("access refresh")
+    }
+    fn snapshot_access(&self) -> io::Result<Vec<AccessSnapshot>> {
+        panic!("access snapshot")
+    }
+    fn verify_access(&self, _: &[AccessSnapshot], _: AccessState) -> io::Result<()> {
+        panic!("owned access verification")
+    }
+    fn restore_access(&mut self, _: &[AccessSnapshot]) -> io::Result<()> {
+        panic!("access restoration")
+    }
+}
+fn external(
+    fixture: &Fixture,
+) -> Lifecycle<ExternalAccess, TestUnitInspector, TestProcessInspector> {
+    Lifecycle::new(
+        test_paths(&fixture.root),
+        ExternalAccess,
+        TestUnitInspector { enabled: false, active: false },
+        TestProcessInspector::default(),
+    )
+}
+
+#[test]
+fn existing_access_install_upgrade_and_removal_preserve_external_permissions_and_profiles() {
+    let fixture = Fixture::new();
+    let mut lifecycle = external(&fixture);
+    let paths = lifecycle.paths.clone();
+    fs::create_dir_all(paths.udev_rule.parent().unwrap()).unwrap();
+    fs::write(&paths.udev_rule, "externally managed access").unwrap();
+    fs::create_dir_all(paths.profiles()).unwrap();
+    let profile = paths.profiles().join("mixer-state.json");
+    fs::write(&profile, "original profile").unwrap();
+    for revision in ["first", "second"] {
+        let manifest = lifecycle
+            .setup(&InstallRequest {
+                device_access: super::model::DeviceAccess::Existing,
+                identity: fixture.identity(revision),
+                cli_source: &fixture.cli,
+                daemon_source: &fixture.daemon,
+            })
+            .unwrap();
+        assert!(manifest.usb_access.is_empty());
+        assert!(!manifest.owned_paths.iter().any(|p| p.path == paths.udev_rule));
+        assert!(
+            lifecycle.doctor(None).iter().any(|c| c.name == "USB access permissions"
+                && c.state == super::engine::CheckState::Blocked)
+        );
+    }
+    assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed);
+    assert_eq!(fs::read(&paths.udev_rule).unwrap(), b"externally managed access");
+    assert_eq!(fs::read(profile).unwrap(), b"original profile");
+}
+
+#[test]
+fn existing_access_failed_setup_rolls_back_user_files_without_permission_operations() {
+    let fixture = Fixture::new();
+    let mut lifecycle = external(&fixture);
+    let unit = lifecycle.paths.unit();
+    fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    fs::write(&unit, "user unit").unwrap();
+    lifecycle.fail_after_apply = true;
+    assert!(
+        lifecycle
+            .setup(&InstallRequest {
+                device_access: super::model::DeviceAccess::Existing,
+                identity: fixture.identity("failed"),
+                cli_source: &fixture.cli,
+                daemon_source: &fixture.daemon,
+            })
+            .is_err()
+    );
+    assert_eq!(fs::read(unit).unwrap(), b"user unit");
+    assert!(!lifecycle.paths.manifest().exists());
+    assert!(!lifecycle.paths.journal().exists());
+}
+
+#[test]
+fn access_mode_changes_require_uninstall_and_cannot_drop_owned_grants() {
+    let fixture = Fixture::new();
+    let mut lifecycle = lifecycle(&fixture);
+    install(&fixture, &mut lifecycle, "persistent");
+    let before = fs::read(lifecycle.paths.manifest()).unwrap();
+    assert!(
+        lifecycle
+            .setup(&InstallRequest {
+                device_access: super::model::DeviceAccess::Existing,
+                identity: fixture.identity("existing"),
+                cli_source: &fixture.cli,
+                daemon_source: &fixture.daemon,
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("uninstall")
+    );
+    assert_eq!(fs::read(lifecycle.paths.manifest()).unwrap(), before);
+    assert_eq!(lifecycle.udev.acl.borrow().as_str(), GRANTED);
+    assert!(lifecycle.paths.udev_rule.exists());
+}
+
+#[test]
+fn existing_access_manifest_cannot_claim_a_rule_or_acl() {
+    let fixture = Fixture::new();
+    let mut lifecycle = lifecycle(&fixture);
+    install(&fixture, &mut lifecycle, "persistent");
+    let mut manifest = lifecycle.read_manifest().unwrap().unwrap();
+    manifest.device_access = super::model::DeviceAccess::Existing;
+    assert!(super::validation::validate_manifest(&manifest, &lifecycle.paths).is_err());
+    manifest.owned_paths.retain(|p| p.path != lifecycle.paths.udev_rule);
+    assert!(super::validation::validate_manifest(&manifest, &lifecycle.paths).is_err());
+    manifest.usb_access.clear();
+    super::validation::validate_manifest(&manifest, &lifecycle.paths).unwrap();
 }

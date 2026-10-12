@@ -1,7 +1,9 @@
 use super::engine::{InstallRequest, Lifecycle, find_owned};
 use super::fs_ops::{atomic_copy, atomic_symlink, atomic_write, matches_snapshot_destination};
 use super::hash;
-use super::model::{AudioOwnership, MANIFEST_SCHEMA, Manifest, OwnedKind, OwnedPath, Snapshot};
+use super::model::{
+    AudioOwnership, DeviceAccess, MANIFEST_SCHEMA, Manifest, OwnedKind, OwnedPath, Snapshot,
+};
 use super::system::{ProcessInspector, UdevSystem, UnitInspector};
 use super::validation::validate_systemd_path;
 use librewave_platform_linux::audio_policy::Wave3AudioPolicy;
@@ -40,6 +42,9 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
             symlink_entry(self.paths.bin_root.join("librewaved"), active.join("bin/librewaved")),
         ];
         let mut owned_paths = Vec::from(values);
+        if request.device_access == DeviceAccess::Existing {
+            owned_paths.retain(|entry| entry.path != self.paths.udev_rule);
+        }
         for entry in &mut owned_paths {
             if let Some(old) = previous.and_then(|manifest| find_owned(manifest, &entry.path)) {
                 entry.original.clone_from(&old.original);
@@ -56,6 +61,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
             wireplumber_policy_path: self.paths.wireplumber(),
             profiles_path: self.paths.profiles(),
             audio_ownership: AudioOwnership::ExperimentalOptIn,
+            device_access: request.device_access,
             owned_paths,
             usb_access: Vec::new(),
         })

@@ -18,9 +18,7 @@ fn run() -> io::Result<i32> {
     let mut arguments = env::args_os();
     let _program = arguments.next();
     let command = arguments.next().and_then(|value| value.into_string().ok());
-    if arguments.next().is_some() {
-        return Err(invalid("development commands do not accept extra arguments"));
-    }
+    let access = parse_access(command.as_deref(), &arguments.collect::<Vec<_>>())?;
     let lifecycle_command = match command.as_deref() {
         Some("dev-install") => "setup",
         Some("dev-status") => "doctor",
@@ -56,6 +54,7 @@ fn run() -> io::Result<i32> {
                 .arg("--daemon-path")
                 .arg(daemon)
                 .arg("--yes");
+            command.args(["--device-access", access]);
         }
         "doctor" => {
             let daemon = daemon
@@ -191,6 +190,21 @@ fn print_help() {
     println!("  dev-install    Build and install this checkout");
     println!("  dev-status     Build and compare this checkout with the installed build");
     println!("  dev-uninstall  Build and remove the development installation");
+    println!("  dev-install accepts --device-access persistent|existing (default: persistent).");
+}
+
+fn parse_access(command: Option<&str>, arguments: &[OsString]) -> io::Result<&'static str> {
+    match arguments {
+        [] => Ok("persistent"),
+        [flag, value] if command == Some("dev-install") && flag == "--device-access" => {
+            match value.to_str() {
+                Some("persistent") => Ok("persistent"),
+                Some("existing") => Ok("existing"),
+                _ => Err(invalid("--device-access must be persistent or existing")),
+            }
+        }
+        _ => Err(invalid("only dev-install accepts --device-access persistent|existing")),
+    }
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -200,6 +214,26 @@ fn invalid(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_install_accepts_an_explicit_access_mode() {
+        assert_eq!(parse_access(Some("dev-install"), &[]).expect("default"), "persistent");
+        assert_eq!(
+            parse_access(Some("dev-install"), &["--device-access".into(), "existing".into()])
+                .expect("external"),
+            "existing"
+        );
+        for command in ["dev-status", "dev-uninstall", "help"] {
+            assert!(
+                parse_access(Some(command), &["--device-access".into(), "existing".into()])
+                    .is_err()
+            );
+        }
+        assert!(
+            parse_access(Some("dev-install"), &["--device-access".into(), "temporary".into()])
+                .is_err()
+        );
+    }
 
     #[test]
     fn compiler_artifact_paths_are_used_exactly() {
