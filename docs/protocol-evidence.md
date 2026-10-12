@@ -52,6 +52,70 @@ Physical Wave:3 API 5.4 reads can report microphone gain between the reviewed 0.
 
 Physical write validation is limited to the Low-cut filter on Wave:3 API 5.4. Other writable fields still require physical validation. Each test plan must name the field, original value, requested value, readback, and safe restoration.
 
+## Wave:3 level LEDs
+
+The seven level LEDs do not have a pattern or count field in the recovered
+Wave:3 API 5.3 or 5.4 schemas. These APIs have three messages: `/config`
+(message 0, 16 bytes), `/status` (message 1, 8 bytes), and `/version`
+(message 10, 54 bytes). The two status fields are touch duration and touch
+signal. They are not audio meters or LED states.
+
+The configuration supplies these candidate display values:
+
+| Selected mode | Reported value | Reviewed range |
+| --- | --- | --- |
+| Microphone | `/config/input_gain` | 0 to 40 dB |
+| Headphone | `/config/headphone_volume` | -60 to 0 dB |
+| Mix | `/config/direct_monitor` | 0 to 100 percent |
+
+`/config/all_leds_off` is at byte 13. `/config/leds_flip` is at byte 14.
+The recovered flip description reverses the LEDs and knob for an inverted
+microphone. This does not establish the segment thresholds or mix direction.
+The reserved bytes at offsets 2 and 3 remain reserved. Do not interpret them
+as an LED pattern.
+
+The evidence is pinned to the WaveAPI framework from Wave Link 3.2.2 build
+2896, SHA-256 `0c9541ff37662b4e35538bd7040d0706783cce132d42fca2c531322e85149860`.
+A static x86-64 inspection of `LWT::Wave3Device::open(bool)` at VM address
+`0xb16120` confirms that it passes the three-entry `LWT::Wave3::known_apis`
+table at `0xc5bdc0` to `lookupSessionAPI`, then initializes tick handling.
+The normalized message and field catalogs describe those API entries.
+The framework was not loaded or executed during this inspection.
+
+The application executable from the same build, SHA-256
+`6435476d1c041831a09bc5501ec0820603c1b9f9b57cbe1025868405605d197c`,
+contains indicator paths for newer devices. Those paths are absent from the
+original Wave:3 schemas and cannot define its seven level LEDs. A bounded
+static search did not recover an original Wave:3 segment calculation.
+Hash matching identifies the analyzed inputs. It does not verify their vendor
+signatures or physical behavior.
+
+These facts support a device-side display derived from the selected value,
+rather than a reported segment pattern. This is an inference. The thresholds,
+rounding, zero and maximum patterns, mix direction, and effects of mute remain
+unverified. The application keeps the seven dots dark until those details have
+physical evidence. Software audio peaks cannot substitute for this evidence.
+
+### Physical observation plan
+
+Prerequisites: approve the observation separately. Keep LibreWave audio off,
+use one read-only daemon with an isolated profile, and leave headphones and
+hardware levels unchanged. Do not send hardware setting commands.
+
+1. Record the exact API, selector, raw gain, raw headphone level, raw monitor balance, and LED flags.
+2. Count the lit LEDs and record their positions in Microphone mode.
+3. Press the selector once and record the Headphone pattern and configuration.
+4. Press the selector once and record the Mix pattern and configuration.
+5. Press the selector once to return to Microphone mode.
+6. Verify the original selector and all reported values.
+
+Allow at most two minutes. Stop on disconnect, unsupported data, or an
+unintended level change. Preserve a changed physical value and report it;
+do not restore it with an unapproved USB write. This observation can identify
+which values affect the pattern, but it cannot establish every threshold.
+A later approved threshold sweep must name each physical value it can change,
+protect headphone listening levels, and review restoration before it starts.
+
 ## Generated catalog
 
 Generated protocol code must be reproducible from checked-in normalized evidence. A generator change and its output belong in the same commit.

@@ -202,7 +202,7 @@ The new lifecycle has isolated regression tests. Native GUI behavior and real-de
 
 Before a live run, review `setup --plan`, the selected fragment, the current installation manifest, and the saved hardware profile. Record the current configured and effective defaults, fragment bytes and mode, unit state, daemon path, product nodes, and hardware gain without recording a serial. Confirm the exact access grant separately. Existing read-only USB access is sufficient for takeover; the plan includes no hardware control write.
 
-1. Install the reviewed build after approving `/etc/udev/rules.d/70-librewave-wave3.rules` and its exact normal-mode Wave:3 refresh.
+1. Install the reviewed build with `setup --device-access existing` for separately approved access, or approve the persistent rule and its exact Wave:3 refresh first.
 2. Run `librewavectl start --experimental --suspend-config <absolute-fragment-path>`.
 3. Verify application audio, software microphone monitoring, independent mixes, and the four deliberate desktop endpoints.
 4. Run `librewavectl start --experimental` again.
@@ -222,6 +222,52 @@ Before a live run, review `setup --plan`, the selected fragment, the current ins
 18. Verify every manifest-owned path, service, access rule, process, and graph object.
 
 Stop immediately on unexpected hardware changes or a cleanup failure. Preserve the ownership files and use the normal stop path for recovery. Do not retire the existing workaround until this sequence passes. Sleep and login recovery require separate acceptance runs before production support.
+
+### Bounded existing-access validation
+
+This five-minute audio run checks setup, startup, mixer controls, application
+routing, and stop. It does not replace the complete recovery sequence above.
+Approve its installation, profile, desktop, and sound changes before it starts.
+Use the current signed build and its normal installation manifest.
+
+Record exact profile backups, fragment bytes and mode, configured and effective
+defaults, unit state, daemon ownership, USB node identity and permissions, and
+current hardware controls. Review a current-format profile before replacing
+old development state. Keep the hardware desired-state file unchanged.
+
+1. Install with `setup --device-access existing` and leave the unit disabled.
+2. Start the installed daemon with audio inactive.
+3. Add one temporary software input and disable the microphone's Monitor and Stream routes.
+4. Set both software outputs to muted at -30 dB before audio starts.
+5. Run `start --experimental --suspend-config <absolute-fragment-path>`.
+6. Check one daemon, the deliberate endpoints, and selected defaults.
+7. Start only disposable test-player streams and move them between System and the temporary input.
+8. Check input meters, linked and independent channel levels, and software output mute and level controls.
+9. Run `stop` before five minutes of active audio have elapsed.
+10. Verify restored defaults and fragment, released audio resources, and zero LibreWave nodes.
+11. Restore the test mixer settings and stop a daemon launched only for this test.
+
+Use silence for routing first. Any listening phase needs a separately stated
+signal ceiling and output ceiling. Software output controls cannot change the
+hardware headphone level or microphone gain. Keep test players' target and
+property restoration disabled during this first desktop run, so disposable
+assignments cannot affect an existing application's saved state. Remembered
+targets already have a private software test; desktop persistence needs a
+separate approved run.
+
+Start may suspend the one selected fragment, create
+`wireplumber.conf.d/80-librewave-wave3.conf`, restart WirePlumber, and select
+`librewave.system` and `librewave.microphone` as defaults. It does not restart
+PipeWire or enable the daemon at login. Stop restores only owned selections
+and preserves independent changes. A failure or deadline ends the test through
+the normal stop path. Retain ownership records if cleanup cannot be verified.
+Do not remove an unowned or modified file to force success.
+
+State the final installation choice in the approval. Retaining the user
+installation leaves the unit disabled, audio off, and the reviewed profile in
+place. Removal uses `uninstall` and restores the reviewed original profile only
+when it still matches the test-owned state. Existing access remains externally
+managed in either case. This run does not grant access to a replacement USB node.
 
 ## Development loop
 
