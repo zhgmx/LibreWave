@@ -37,8 +37,8 @@ pointer rests on them. Commands, paths, and command output use Geist Mono.
 When the daemon is unavailable, the stage dims the illustration and the mixer
 area shows one notice with **Start audio** and **Open Settings**. The main
 view does not expose socket diagnostics or invent device or channel state.
-Live meters, effects, and linked levels remain unavailable and have no
-controls. Additional inputs, output selection, and output level are also
+Live peak meters appear on input strips and output rows while audio runs.
+Effects and linked levels remain unavailable and have no controls. Additional inputs, output selection, and output level are also
 unavailable. The mixer shows where they go, as described in Mixer.
 
 ### Device stage
@@ -83,8 +83,11 @@ volume and software mixer levels.
 ### Mixer
 
 **Inputs** has one strip for each input. Only the Microphone and System inputs
-are currently supported. Each strip has a Monitor fader and a Stream fader
-with a dB scale between them. A line on each track marks 0 dB.
+are currently supported. Each strip has a stereo input peak meter, a Monitor fader, and a Stream fader
+with a dB scale between them. Input meters observe samples before the faders.
+Output meters observe each final mix after clipping. The meter scale is
+-60 to 0 dBFS. A source peak above full scale appears red. A dim track means
+that no recent reading is available, not measured silence. A line on each track marks 0 dB.
 
 Drag a fader or click its track to set the level. Select the level under a
 fader to reset it to 0 dB. The speaker button under each fader mutes that
@@ -141,8 +144,12 @@ status polling obtains the current profile.
 
 A fresh daemon leaves the mixer audio path inactive. A daemon restart reloads
 a previously accepted audio intent. Experimental start reports ready audio only
-after the host owns the audio path. Live meter values are not
-published over IPC. Physical write validation is limited to the Low-cut control
+after the host owns the audio path. The daemon publishes actual software
+peak and RMS values over a separate IPC request. The UI reads meters every
+100 ms while audio is active. Readings expire after 350 ms without a block.
+Meters report individual processed blocks, not a peak hold over the interval.
+Default tests check the signal path with fakes; live meter validation remains
+pending. Physical write validation is limited to the Low-cut control
 on Wave:3 API 5.4. Other hardware controls still require validation.
 Service launch, default restoration, service restart, and removal checks have
 passed on the reference Wave:3. Reconnect, sleep, and login recovery still need

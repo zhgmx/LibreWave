@@ -2,6 +2,7 @@ mod chrome;
 mod controls;
 mod device_art;
 mod hardware;
+mod meters;
 mod mixer;
 mod settings;
 mod stage;
@@ -80,6 +81,10 @@ struct SettingsModal {
 
 struct Shell {
     snapshot: Option<Snapshot>,
+    meters: Option<librewave_core::MeterFrame>,
+    meter_error: Option<String>,
+    meter_request_epoch: Option<u64>,
+    meters_received: Option<std::time::Instant>,
     pending: bool,
     in_flight_fader: Option<FaderEdit>,
     queued_fader: Option<FaderEdit>,
@@ -101,6 +106,10 @@ impl Shell {
     fn new(cx: &mut Context<Self>) -> Self {
         let mut shell = Self {
             snapshot: None,
+            meters: None,
+            meter_error: None,
+            meter_request_epoch: None,
+            meters_received: None,
             pending: false,
             in_flight_fader: None,
             queued_fader: None,
@@ -118,6 +127,15 @@ impl Shell {
             settings_trigger_focus: None,
         };
         shell.send(Command::GetStatus, cx);
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(100)).await;
+                if this.update(cx, Shell::poll_meters).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(STATUS_INTERVAL).await;
@@ -269,9 +287,13 @@ impl Shell {
         }
         match result {
             Ok(Response::Status { snapshot }) => {
+                let meters_cleared = snapshot.mixer.runtime
+                    != librewave_core::MixerRuntimeState::Active
+                    && self.meters.take().is_some();
                 let changed = self.snapshot.as_ref() != Some(&snapshot)
                     || self.connection_error.is_some()
-                    || self.hardware_state_stale;
+                    || self.hardware_state_stale
+                    || meters_cleared;
                 self.snapshot = Some(snapshot);
                 self.session_expectation = SessionExpectation::Connect;
                 self.connection_error = None;
@@ -280,11 +302,17 @@ impl Shell {
             }
             Ok(_) => {
                 self.snapshot = None;
+                self.meters = None;
+                self.meter_error = None;
+                self.meters_received = None;
                 self.connection_error =
                     Some("The daemon returned an unexpected status response.".to_owned());
             }
             Err(error) => {
                 self.snapshot = None;
+                self.meters = None;
+                self.meter_error = None;
+                self.meters_received = None;
                 self.connection_error = if self.session_expectation == SessionExpectation::Stopped {
                     None
                 } else {
@@ -343,6 +371,9 @@ impl Shell {
             }
         } else {
             self.snapshot = None;
+            self.meters = None;
+            self.meter_error = None;
+            self.meters_received = None;
             self.action_error = None;
             self.connection_error = if self.session_expectation == SessionExpectation::Stopped {
                 None
@@ -409,6 +440,9 @@ impl Shell {
                 if stopped {
                     self.session_expectation = SessionExpectation::Stopped;
                     self.snapshot = None;
+                    self.meters = None;
+                    self.meter_error = None;
+                    self.meters_received = None;
                     self.connection_error = None;
                 } else if starting {
                     self.session_expectation = SessionExpectation::Connect;
@@ -455,9 +489,13 @@ mod tests {
     use librewave_ipc::IpcError;
     use std::path::PathBuf;
 
-    fn shell_with(snapshot: Snapshot) -> Shell {
+    pub(super) fn shell_with(snapshot: Snapshot) -> Shell {
         Shell {
             snapshot: Some(snapshot),
+            meters: None,
+            meter_error: None,
+            meter_request_epoch: None,
+            meters_received: None,
             pending: false,
             in_flight_fader: None,
             queued_fader: None,

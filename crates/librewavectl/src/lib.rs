@@ -106,6 +106,23 @@ where
         [devices, set, id, generation, control, value] if devices == "devices" && set == "set" => {
             request_control_change(socket_path, id, generation, control, value, output, errors)
         }
+        [mixer, meters] if mixer == "mixer" && meters == "meters" => {
+            match request(socket_path, librewave_core::Command::GetMeters) {
+                Ok(Response::Meters { meters }) => {
+                    writeln!(
+                        output,
+                        "{}",
+                        serde_json::to_string_pretty(&meters).map_err(io::Error::other)?
+                    )?;
+                    Ok(0)
+                }
+                Ok(_) => {
+                    writeln!(errors, "error: daemon returned an unexpected meter response")?;
+                    Ok(1)
+                }
+                Err(error) => write_client_error(error, errors),
+            }
+        }
         [mixer, show] if mixer == "mixer" && show == "show" => {
             request_mixer(socket_path, output, errors)
         }
@@ -528,8 +545,8 @@ fn write_mixer<W: Write>(output: &mut W, mixer: &MixerSnapshot) -> io::Result<()
         MeterAvailability::Unavailable { reason } => {
             writeln!(output, "Meters: unavailable ({reason})")?;
         }
-        MeterAvailability::Unpublished => {
-            writeln!(output, "Meters: unavailable (not published over IPC)")?;
+        MeterAvailability::Available => {
+            writeln!(output, "Meters: available (use `mixer meters`)")?;
         }
     }
     writeln!(output, "Microphone source: {}", mixer.profile.microphone_source)?;
@@ -697,6 +714,10 @@ fn write_help<W: Write>(output: &mut W) -> io::Result<()> {
         output,
         "  devices set <id> <generation> <control> <value>  Set one Wave:3 hardware control"
     )?;
+    writeln!(
+        output,
+        "  mixer meters    Show software peak and RMS amplitudes in linear millionths"
+    )?;
     writeln!(output, "  mixer show      Show desired mixer state and runtime availability")?;
     writeln!(output, "  mixer set <source-id> <generation> <monitor|stream> <on|off> <level-db>")?;
     writeln!(output)?;
@@ -753,7 +774,7 @@ mod tests {
         write_status(&mut output, &snapshot()).expect("render status");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "Daemon: connected\nProtocol: 7\nState generation: 4\nDevices: 1\nMixer: generation 0, inactive, 2 sources\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
+            "Daemon: connected\nProtocol: 8\nState generation: 4\nDevices: 1\nMixer: generation 0, inactive, 2 sources\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
         );
     }
 
@@ -771,7 +792,7 @@ mod tests {
         let mut mixer = Vec::new();
         write_mixer(&mut mixer, &status.mixer).expect("render active mixer");
         let mixer = String::from_utf8(mixer).expect("UTF-8");
-        assert!(mixer.contains("Runtime: active\nMeters: unavailable (not published over IPC)\n"));
+        assert!(mixer.contains("Runtime: active\nMeters: available (use `mixer meters`)\n"));
     }
 
     #[test]

@@ -105,8 +105,11 @@ impl Render for Tip {
 }
 
 /// Names an icon-only control when the pointer rests on it.
-pub(super) fn tip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
-    move |_, cx| cx.new(|_| Tip(text.into())).into()
+pub(super) fn tip(
+    text: impl Into<SharedString>,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let text = text.into();
+    move |_, cx| cx.new(|_| Tip(text.clone())).into()
 }
 
 /// Adds pointer and keyboard activation to a focusable control.

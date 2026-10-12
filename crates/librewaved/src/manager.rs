@@ -375,6 +375,7 @@ impl Daemon {
             &profile,
             allow_start,
         );
+        supervisor.poll_meters();
         if supervisor.runtime() != previous_runtime
             && supervisor.runtime() == MixerRuntimeState::Active
         {
@@ -427,6 +428,14 @@ impl Daemon {
                 Ok(Response::ControlChanged { device })
             }
             Command::GetMixer => Ok(Response::Mixer { mixer: self.snapshot().mixer.clone() }),
+            Command::GetMeters => Ok(Response::Meters {
+                meters: self.audio.as_ref().map_or_else(
+                    || librewave_core::MeterSnapshot::Unavailable {
+                        reason: librewave_core::MixerInactiveReason::AudioHostEngineNotConnected,
+                    },
+                    AudioSupervisor::meter_snapshot,
+                ),
+            }),
             Command::StartExperimentalAudio => {
                 self.enable_experimental_audio()?;
                 Ok(Response::AudioStarting { mixer: self.snapshot().mixer.clone() })

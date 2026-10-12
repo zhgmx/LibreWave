@@ -4,7 +4,7 @@ use std::fmt;
 /// The maximum configured input count supported by one mixer.
 ///
 /// The bound covers four hardware inputs and eight software inputs.
-pub const MAX_SOURCES: usize = 12;
+pub const MAX_SOURCES: usize = librewave_core::MAX_MIXER_SOURCES;
 
 /// Frames per second in the portable mixer format.
 pub const SAMPLE_RATE_HZ: u32 = 48_000;

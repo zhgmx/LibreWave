@@ -1796,3 +1796,19 @@ fn managed_restoration_requires_explicit_inspection_after_automatic_adoption() {
     h.daemon.observe_controls(due);
     assert_eq!(h.calls.borrow().len(), 1, "polling never restores managed values");
 }
+
+#[test]
+fn inactive_meter_requests_do_not_read_hardware_save_or_advance_generations() {
+    let mut h = harness(DesiredState::default(), wave3_config(), vec![], vec![]);
+    let before = h.daemon.snapshot().clone();
+    for _ in 0..10 {
+        assert!(matches!(
+            h.daemon.handle(Command::GetMeters, librewave_core::Origin::Client),
+            Ok(Response::Meters { meters: librewave_core::MeterSnapshot::Unavailable { .. } })
+        ));
+    }
+    assert_eq!(h.daemon.snapshot(), &before);
+    assert!(h.calls.borrow().is_empty());
+    assert_eq!(*h.connections.borrow(), 0);
+    assert_eq!(*h.saves.borrow(), 0);
+}

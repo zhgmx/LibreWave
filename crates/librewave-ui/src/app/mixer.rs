@@ -121,8 +121,20 @@ impl Shell {
                         .flex()
                         .flex_col()
                         .gap(px(SPACE_SM))
-                        .child(output_row(MixTarget::Monitor, "headphones", "Wave:3 headphones"))
-                        .child(output_row(MixTarget::Stream, "system", "Source for applications")),
+                        .child(output_row(
+                            MixTarget::Monitor,
+                            "headphones",
+                            "Wave:3 headphones",
+                            self.meters.as_ref().map(|f| f.outputs[1]),
+                            self.meter_error.as_deref(),
+                        ))
+                        .child(output_row(
+                            MixTarget::Stream,
+                            "system",
+                            "Source for applications",
+                            self.meters.as_ref().map(|f| f.outputs[2]),
+                            self.meter_error.as_deref(),
+                        )),
                 ),
             )
     }
@@ -166,6 +178,18 @@ impl Shell {
                             .child(caption(if microphone { "Wave:3" } else { "Desktop audio" })),
                     ),
             )
+            .child(super::meters::bar(
+                &format!("input-{}", source.controls.source()),
+                self.meters.as_ref().and_then(|frame| {
+                    frame
+                        .sources
+                        .iter()
+                        .find(|meter| meter.source == source.controls.source())
+                        .map(|meter| meter.levels)
+                }),
+                INK,
+                self.meter_error.as_deref(),
+            ))
             .child(
                 div()
                     .flex()
@@ -295,10 +319,22 @@ fn add_input() -> Stateful<Div> {
 ///
 /// The daemon has no output selection or output level command. Both parts of
 /// the row are shown inactive.
-fn output_row(target: MixTarget, glyph: &'static str, destination: &'static str) -> Div {
+fn output_row(
+    target: MixTarget,
+    glyph: &'static str,
+    destination: &'static str,
+    levels: Option<librewave_core::StereoLevels>,
+    error: Option<&str>,
+) -> Div {
     let (color, mix_glyph, name) = mix_identity(target);
     let key = name.to_lowercase();
     card()
+        .child(div().w(px(40.)).flex_shrink_0().child(super::meters::bar(
+            &format!("output-{key}"),
+            levels,
+            color,
+            error,
+        )))
         .w_full()
         .p(px(SPACE_MD))
         .flex()

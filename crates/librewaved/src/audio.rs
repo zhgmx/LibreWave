@@ -1,4 +1,5 @@
 //! Opt-in control-side owner for one physical audio attempt.
+mod meters;
 
 use librewave_core::{
     AdmissionError, MixerInactiveReason, MixerProfile, MixerRuntimeState, ServiceState,
@@ -19,9 +20,13 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(2);
 pub(super) trait SupervisedAudioHost: AudioHost<Error = LinuxAudioError> {
     fn poll(&mut self) -> Result<(), LinuxAudioError>;
     fn stage_profile(&mut self, profile: &MixerProfile) -> Result<(), LinuxAudioError>;
+    fn take_meters(&mut self) -> Option<librewave_engine::BlockMeters>;
 }
 
 impl SupervisedAudioHost for ComposedAudioHost {
+    fn take_meters(&mut self) -> Option<librewave_engine::BlockMeters> {
+        Self::take_meters(self)
+    }
     fn poll(&mut self) -> Result<(), LinuxAudioError> {
         Self::poll(self)
     }
@@ -49,6 +54,9 @@ pub(super) struct AudioSupervisor<H = ComposedAudioHost> {
     retry_at: Instant,
     next_reconcile: Instant,
     invocations: Option<HostServiceInvocations>,
+    meter_sequence: u64,
+    meter_frame: Option<(librewave_core::MeterFrame, Instant)>,
+    next_meter_read: Instant,
 }
 
 impl AudioSupervisor {
@@ -74,6 +82,9 @@ impl<H: SupervisedAudioHost> AudioSupervisor<H> {
             retry_at: now,
             next_reconcile: now,
             invocations: None,
+            meter_sequence: 0,
+            meter_frame: None,
+            next_meter_read: now,
         }
     }
 
@@ -109,6 +120,7 @@ impl<H: SupervisedAudioHost> AudioSupervisor<H> {
 
     /// Cancel recovery before cleanup. A failed cleanup retains the sole owner.
     pub(super) fn stop(&mut self) -> Result<(), ()> {
+        self.meter_frame = None;
         self.enabled = false;
         if let Some(attempt) = self.attempt.as_mut()
             && let Err(error) = attempt.lifecycle.teardown(&mut attempt.host)
@@ -228,6 +240,7 @@ impl<H: SupervisedAudioHost> AudioSupervisor<H> {
         };
         let mut attempt =
             RunningAttempt { candidate: candidate.clone(), lifecycle: AudioLifecycle::new(), host };
+        self.meter_frame = None;
         match attempt.lifecycle.start(&mut attempt.host, Some(candidate)) {
             Ok(()) => {
                 self.next_reconcile = Instant::now() + RECONCILE_INTERVAL;

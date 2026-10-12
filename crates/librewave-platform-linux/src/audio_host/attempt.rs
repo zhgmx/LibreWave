@@ -229,7 +229,6 @@ pub struct ComposedAudioHost {
     graph: Option<Box<dyn GraphRuntime>>,
     graph_fault_reader: Option<CopySlotReader<super::clock_bridge::BridgeError>>,
     control: Option<ClockBridgeControl>,
-    #[allow(dead_code, reason = "retained for daemon meter snapshot integration")]
     meters: Option<MeterReader>,
     capture_frames: u64,
     last_capture: Option<Instant>,
@@ -240,6 +239,11 @@ pub struct ComposedAudioHost {
 }
 
 impl ComposedAudioHost {
+    /// Takes one actual processed-block observation without waiting.
+    pub fn take_meters(&mut self) -> Option<librewave_engine::BlockMeters> {
+        self.meters.as_mut().and_then(MeterReader::try_take)
+    }
+
     /// Constructs an inert host. Only [`crate::audio_lifecycle::AudioLifecycle::start`]
     /// can start its physical attempt.
     #[must_use]

@@ -10,6 +10,7 @@ use std::rc::Rc;
 #[derive(Default)]
 struct Control {
     events: RefCell<Vec<&'static str>>,
+    meters: RefCell<std::collections::VecDeque<librewave_engine::BlockMeters>>,
     creates: Cell<usize>,
     cleanup_failures: Cell<usize>,
     admission_error: RefCell<Option<LinuxAudioError>>,
@@ -72,6 +73,9 @@ impl AudioHost for FakeHost {
     }
 }
 impl SupervisedAudioHost for FakeHost {
+    fn take_meters(&mut self) -> Option<librewave_engine::BlockMeters> {
+        self.0.meters.borrow_mut().pop_front()
+    }
     fn poll(&mut self) -> Result<(), LinuxAudioError> {
         if self.0.progress_error.get() { Err(LinuxAudioError::TeardownFailed) } else { Ok(()) }
     }
@@ -218,4 +222,59 @@ fn missing_device_or_service_does_not_construct_an_audio_host() {
     );
     assert_eq!(reason(&audio), MixerInactiveReason::HostServicesUnavailable);
     assert_eq!(control.creates.get(), 0);
+}
+
+#[test]
+fn software_meter_values_expire_and_cannot_survive_stop_or_restart() {
+    use librewave_core::{MICROPHONE_SOURCE_ID, MeterSnapshot, SYSTEM_SOURCE_ID};
+    use librewave_engine::{InputBuffer, MixerConfig, MixerEngine, OutputBuffer};
+    let profile = MixerProfile::default();
+    let controls: Vec<_> = profile.sources.iter().map(|s| s.controls).collect();
+    let config =
+        MixerConfig::try_new(1, MICROPHONE_SOURCE_ID, &[MICROPHONE_SOURCE_ID, SYSTEM_SOURCE_ID])
+            .expect("meter engine config");
+    let (mut engine, _stager) = MixerEngine::new(config, &controls).expect("meter engine");
+    let mut microphone = [0.; 2];
+    let mut monitor = [0.; 2];
+    let mut stream = [0.; 2];
+    let report = engine
+        .process(
+            1,
+            &[
+                InputBuffer::new(MICROPHONE_SOURCE_ID, &[0.5, 0.25]),
+                InputBuffer::new(SYSTEM_SOURCE_ID, &[0.25, 0.5]),
+            ],
+            &mut [
+                OutputBuffer::new(EndpointId::Microphone, &mut microphone),
+                OutputBuffer::new(EndpointId::MonitorMix, &mut monitor),
+                OutputBuffer::new(EndpointId::StreamMix, &mut stream),
+            ],
+        )
+        .expect("real processed block");
+    let (mut audio, control) = supervisor();
+    let candidate = candidate();
+    tick(&mut audio, Some(&candidate), true);
+    let now = Instant::now();
+    assert_eq!(audio.meter_snapshot_at(now), MeterSnapshot::Waiting);
+    control.meters.borrow_mut().push_back(report.meters());
+    audio.poll_meters_at(now);
+    let MeterSnapshot::Live { frame } = audio.meter_snapshot_at(now) else {
+        panic!("live block");
+    };
+    assert_eq!(frame.sources[0].levels.peak_left, 500_000);
+    assert_eq!(frame.sources[0].levels.rms_right, 250_000);
+    assert_eq!(frame.outputs[1].peak_left, 750_000);
+    assert_eq!(frame.outputs[2].rms_right, 750_000);
+    assert!(control.meters.borrow().is_empty());
+    control.meters.borrow_mut().push_back(report.meters());
+    audio.poll_meters_at(now + Duration::from_millis(99));
+    assert_eq!(control.meters.borrow().len(), 1, "drain cadence is bounded");
+    audio.poll_meters_at(now + Duration::from_millis(100));
+    assert!(control.meters.borrow().is_empty());
+    assert_eq!(audio.meter_snapshot_at(now + Duration::from_millis(451)), MeterSnapshot::Waiting);
+    audio.stop().expect("stop");
+    assert!(matches!(audio.meter_snapshot(), MeterSnapshot::Unavailable { .. }));
+    audio.enable().expect("enable");
+    tick(&mut audio, Some(&candidate), true);
+    assert_eq!(audio.meter_snapshot(), MeterSnapshot::Waiting);
 }

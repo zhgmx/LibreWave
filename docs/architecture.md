@@ -71,6 +71,16 @@ A persistence-ambiguous connection stays retained and write-locked while configu
 
 Desired hardware state contains only controls that a client explicitly changed through LibreWave. It is stored under the profile directory in one strict pre-release schema. A command is recorded as pending before USB access. The daemon promotes it to managed state only after verified apply or an unchanged result. A pending command after a crash locks restoration for that topology.
 
+## Meter observation
+
+`GetMeters` returns software peak and RMS values separately from control snapshots.
+The existing real-time handoff holds one processed-block observation and never
+blocks the producer. The daemon consumes it every 100 ms. It converts amplitudes
+to linear millionths outside the audio callback and retains a transient frame.
+A reading older than 350 ms becomes unavailable. Stop and a new audio attempt
+clear the old frame. No meter value is saved or changes a device, mixer, or
+profile generation. The CLI exposes `librewavectl mixer meters`.
+
 ## Device adoption
 
 On first adoption, LibreWave reads the current device state as its observed baseline. It does not store every observed hardware field as desired state, and it does not reset the microphone to project defaults.

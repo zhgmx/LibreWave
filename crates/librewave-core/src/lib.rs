@@ -4,8 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 mod device_generation;
+mod meters;
 mod mixer;
 pub use device_generation::{DeviceGeneration, DeviceGenerationError};
+pub use meters::{MAX_MIXER_SOURCES, MeterFrame, MeterSnapshot, SourceLevels, StereoLevels};
 
 pub use mixer::{
     FaderGain, FaderGainError, MICROPHONE_SOURCE_ID, MeterAvailability, MixRoute, MixTarget,
@@ -475,6 +477,8 @@ pub enum Command {
     SetWave3Control { id: DeviceId, expected_generation: DeviceGeneration, control: Wave3Control },
     /// Return the complete current portable mixer snapshot.
     GetMixer,
+    /// Return the latest bounded software meter observation without changing profiles.
+    GetMeters,
     /// Enable the experimental audio owner in this daemon session.
     StartExperimentalAudio,
     /// Cancel audio recovery and release the daemon-owned audio resources.

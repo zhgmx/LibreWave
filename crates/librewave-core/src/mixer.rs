@@ -465,8 +465,8 @@ pub enum MeterAvailability {
     Unavailable {
         reason: MixerInactiveReason,
     },
-    /// The graph owns a meter reader, but IPC does not publish its values yet.
-    Unpublished,
+    /// The graph owns a meter stream. `GetMeters` reports block freshness.
+    Available,
 }
 
 /// The portable mixer portion of a daemon snapshot.
@@ -500,7 +500,7 @@ impl MixerSnapshot {
 
     #[must_use]
     pub fn active(profile: MixerProfile) -> Self {
-        Self { profile, runtime: MixerRuntimeState::Active, meters: MeterAvailability::Unpublished }
+        Self { profile, runtime: MixerRuntimeState::Active, meters: MeterAvailability::Available }
     }
 }
 
@@ -516,13 +516,13 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn active_runtime_does_not_claim_unpublished_meter_values() {
+    fn active_runtime_exposes_the_meter_stream_without_inventing_values() {
         let snapshot = MixerSnapshot::active(MixerProfile::default());
         assert_eq!(snapshot.runtime, MixerRuntimeState::Active);
-        assert_eq!(snapshot.meters, MeterAvailability::Unpublished);
+        assert_eq!(snapshot.meters, MeterAvailability::Available);
         let encoded = serde_json::to_value(&snapshot).expect("serialize active mixer");
         assert_eq!(encoded["runtime"], json!("Active"));
-        assert_eq!(encoded["meters"], json!("Unpublished"));
+        assert_eq!(encoded["meters"], json!("Available"));
     }
 
     #[test]

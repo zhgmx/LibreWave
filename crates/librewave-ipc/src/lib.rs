@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// The current local request/response protocol version.
-pub const PROTOCOL_VERSION: u16 = 7;
+pub const PROTOCOL_VERSION: u16 = 8;
 /// The maximum encoded JSON payload accepted by the local protocol.
 pub const MAX_FRAME_SIZE: usize = 1024 * 1024;
 
@@ -39,6 +39,8 @@ pub enum Response {
     ControlChanged { device: DeviceSnapshot },
     /// The complete current portable mixer snapshot.
     Mixer { mixer: MixerSnapshot },
+    /// Transient software meters, separate from control generations.
+    Meters { meters: librewave_core::MeterSnapshot },
     /// The mixer snapshot after an accepted route request.
     MixerRouteChanged { mixer: MixerSnapshot },
     /// Audio start was accepted. Readiness is reported by the mixer snapshot.
@@ -370,7 +372,7 @@ mod tests {
 
     #[test]
     fn semantic_control_command_and_stale_error_round_trip_at_version_seven() {
-        assert_eq!(PROTOCOL_VERSION, 7);
+        assert_eq!(PROTOCOL_VERSION, 8);
         let request = RequestEnvelope {
             version: PROTOCOL_VERSION,
             request_id: 4,
@@ -383,7 +385,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(request).expect("serialize semantic request"),
             json!({
-                "version": 7,
+                "version": 8,
                 "request_id": 4,
                 "command": {
                     "SetWave3Control": {
@@ -408,7 +410,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response.clone()).expect("serialize stale response"),
             json!({
-                "version": 7,
+                "version": 8,
                 "request_id": 4,
                 "result": {
                     "Err": {
@@ -425,7 +427,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response).expect("serialize control response"),
             json!({
-                "version": 7,
+                "version": 8,
                 "request_id": 4,
                 "result": {
                     "Ok": {
@@ -490,7 +492,7 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "version": 7,
+                "version": 8,
                 "request_id": 18,
                 "command": {
                     "SetMixerRoute": {
@@ -578,6 +580,43 @@ mod tests {
             let envelope = ResponseEnvelope::success(10, response);
             let frame = encode_response(&envelope).expect("valid lifecycle message");
             assert_eq!(decode_response(&frame[4..]).expect("valid lifecycle message"), envelope);
+        }
+    }
+}
+
+#[cfg(test)]
+mod meter_tests {
+    use super::*;
+    use librewave_core::{MeterFrame, MeterSnapshot, SourceLevels, StereoLevels};
+
+    #[test]
+    fn meter_requests_and_actual_frames_round_trip_without_profile_state() {
+        let request = RequestEnvelope {
+            version: PROTOCOL_VERSION,
+            request_id: 1,
+            command: Command::GetMeters,
+        };
+        let wire = encode_request(&request).expect("meter request");
+        assert_eq!(decode_request(&wire[4..]).expect("decode meter request"), request);
+        let level = StereoLevels {
+            peak_left: 500_000,
+            peak_right: 250_000,
+            rms_left: 500_000,
+            rms_right: 250_000,
+        };
+        for meters in [
+            MeterSnapshot::Waiting,
+            MeterSnapshot::Live {
+                frame: MeterFrame {
+                    sequence: 2,
+                    sources: vec![SourceLevels { source: SourceId::new(1), levels: level }],
+                    outputs: [level; 3],
+                },
+            },
+        ] {
+            let response = ResponseEnvelope::success(1, Response::Meters { meters });
+            let wire = encode_response(&response).expect("meter response");
+            assert_eq!(decode_response(&wire[4..]).expect("decode meter response"), response);
         }
     }
 }
