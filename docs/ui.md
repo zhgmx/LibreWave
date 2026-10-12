@@ -7,57 +7,71 @@ requests through `librewaved`. The application does not open the USB device.
 ## Prerequisites
 
 Install the Rust toolchain and native build packages in [Setup](setup.md).
-For lifecycle controls, install matching CLI and daemon binaries with `librewavectl setup`. Setup includes an exact udev access operation that requires separate approval. Use **Setup plan** to see the paths and access rule without changes. Audio startup still requires reviewed device access and a running PipeWire and WirePlumber session.
+For lifecycle controls, install matching CLI and daemon binaries with `librewavectl setup`. Setup includes an exact udev access operation that requires separate approval. In Settings, use **Show plan** on the **Setup** page to see the paths and access rule without changes. Audio startup still requires reviewed device access and a running PipeWire and WirePlumber session.
 
 ## Start the application
 
 1. Run `cargo run -p librewave`.
-2. Open **Settings** with the header button or Ctrl+,.
-3. Select **Start audio** in the experimental Audio section.
+2. Select **Start audio** in the title bar.
 
-The start action launches the installed daemon service and waits for ready audio and selected desktop defaults. If an existing WirePlumber fragment conflicts with ownership, use **Choose file…** to select the exact `.conf` file. The lifecycle backs it up and restores it on failure or stop. See [Setup](setup.md) for the full contract.
+The start action launches the installed daemon service and waits for ready audio and selected desktop defaults. If an existing WirePlumber fragment conflicts with ownership, open **Settings**, select **Audio**, and use **Choose file…** to select the exact `.conf` file. The lifecycle backs it up and restores it on failure or stop. See [Setup](setup.md) for the full contract.
 
-Use `cargo run -p librewave -- --settings` to open Settings at launch.
-Settings takes keyboard focus. Tab and Shift+Tab stay inside the panel.
-Escape, **Close**, or a click outside the panel closes it and restores the
-previous focus. Background mixer and hardware input are blocked while Settings
-is open.
-
-Select **Stop and restore** to release audio and restore desktop ownership. Closing the window keeps audio running. Lifecycle operations run on the background executor. The application prevents overlapping actions and preserves a restoration error while status polling continues. A deliberate stop clears the active snapshot and suppresses the expected disconnect error.
+While audio runs, the title bar shows **Audio running** and a **Stop** button. **Stop** releases audio and restores desktop ownership. Closing the window keeps audio running. Lifecycle operations run on the background executor. The application prevents overlapping actions and preserves a restoration error while status polling continues. A deliberate stop clears the active snapshot and suppresses the expected disconnect error.
 
 For device and mixer development without an installation, run `cargo run -p librewaved` separately. The application checks status every two seconds and removes old status after an unexpected disconnect. It shows a new snapshot when the daemon becomes available again. Opening the window does not read hardware controls. `LIBREWAVE_SOCKET` selects a development IPC socket; installed service lifecycle controls use the normal session socket.
 
-The main view fills the window with a slim header, a microphone area, input
-channel strips, and output rows. The microphone area shows the product,
-connection state, and hardware controls beside the mixer. At narrower window
-widths, it sits above the mixer. Each input has paired vertical Monitor and
-Stream faders.
-The application uses Geist type, neutral surfaces, mint Monitor icons, and
-blue Stream icons. The header shows whether audio is running, stopped, or
-disconnected. Only the Microphone and System inputs are currently supported.
+## Main view
 
-Audio setup and daemon connection options are in Settings. When the daemon is
-unavailable, the main view marks device status and outputs as unavailable.
-It does not expose socket diagnostics on the main canvas or invent device
-or channel state.
-Live meters, effects, linked levels, additional inputs, and output master
-controls remain unavailable and have no controls on the canvas. Connection
-status and the IPC socket are visible directly in Settings.
+The main view has a title bar, a device stage, and a mixer. The title bar is
+the only place on the main view that shows and changes the audio state. In a
+window too narrow for the stage and two input strips side by side, the stage
+sits above the mixer. The default window is 1200 by 820 px. The minimum is
+850 by 650 px.
 
-Shared layout values use 4, 8, 12, 16, and 24 px gaps. Captions, body text,
-and headings use 12, 14, and 16 px type. Buttons use a common 32 px height
-with visible focus, hover, selected, and disabled states.
+The application uses Geist type on dark surfaces. Surfaces differ by fill.
+Outlines show keyboard focus only. Monitor is mint and Stream is blue in every
+place they appear. Red marks a muted state or an error. Amber marks an
+experimental or read-only state. Icon-only buttons show their name when the
+pointer rests on them. Commands, paths, and command output use Geist Mono.
 
-In the microphone area, select **Read controls** to open the daemon's device connection and read the
+When the daemon is unavailable, the stage dims the illustration and the mixer
+area shows one notice with **Start audio** and **Open Settings**. The main
+view does not expose socket diagnostics or invent device or channel state.
+Live meters, effects, and linked levels remain unavailable and have no
+controls. Additional inputs, output selection, and output level are also
+unavailable. The mixer shows where they go, as described in Mixer.
+
+### Device stage
+
+The stage shows the Wave:3 illustration, its connection state, and the
+admitted API version. The build draws the illustration once, so it appears
+with the first frame. The lights are drawn over it from the daemon snapshot.
+
+The mode light shows the reported knob target. The ring is white when reported
+microphone mute is off and red when it is on. The light behind the
+illustration follows the ring. All lights are dark when controls have not been
+read, the device is disconnected, or hardware LEDs are disabled. The seven
+level dots stay dark because their hardware mapping is unverified.
+
+Select **Read controls** to open the daemon's device connection and read the
 Wave:3 configuration. This command can also restore hardware values that
-LibreWave saved earlier. The application shows the admitted API version,
-write access, hardware values, and transaction errors.
+LibreWave saved earlier. The application shows that caution under the button.
+After a read, the same command is the circular arrow beside the device name.
 
-The microphone illustration shows the reported knob mode and microphone mute.
-Its ring is red when microphone mute is on. LEDs are dark when controls have
-not been read, the device is disconnected, or hardware LEDs are disabled.
-The seven level dots stay dark because their hardware mapping is unverified.
-The illustration uses the daemon snapshot and does not read hardware.
+The hardware controls sit under the illustration:
+
+- **Input gain** and **Headphones** each show a level in dB and a bar for its
+  position in the reviewed range. Physical readings use two decimal places.
+  The **−** and **+** buttons change a level
+  by 0.5 dB. The bars are not draggable.
+- The icon button before each level mutes or unmutes it. A muted level is dim
+  and its button is red.
+- The **Clipguard**, **Low-cut**, and **Gain Lock** tiles are lit when the
+  option is on. Select a tile to change it.
+
+When the daemon reports locked write access, the stage shows the reason and
+disables every control. Transaction errors appear above the mixer and can be
+dismissed.
 
 Each enabled control sends one command with the observed device generation.
 The daemon checks the exact schema and complete baseline, then reads back a
@@ -65,10 +79,48 @@ successful write. A locked or unknown device cannot be changed. The
 microphone preamp and headphone hardware level are separate from desktop
 volume and software mixer levels.
 
-Each input has separate Monitor and Stream levels. Drag a fader or click its
-track to set the level. Select the displayed level to reset it to 0 dB. The
-**Mute** and **Unmute** buttons change that source in the Monitor and Stream
-mixes. Setting or resetting a level preserves its mute state.
+### Mixer
+
+**Inputs** has one strip for each input. Only the Microphone and System inputs
+are currently supported. Each strip has a Monitor fader and a Stream fader
+with a dB scale between them. A line on each track marks 0 dB.
+
+Drag a fader or click its track to set the level. Select the level under a
+fader to reset it to 0 dB. The speaker button under each fader mutes that
+input in that mix. A muted fader is grey and its button is red. Setting or
+resetting a level preserves its mute state. Levels changed while audio is
+stopped are saved.
+
+An **Add input** panel follows the last strip. The daemon has no command that
+adds an input, so the panel does nothing and says so when the pointer rests on
+it. The strips scroll sideways when they do not fit.
+
+**Outputs** is under the inputs and has one row for each mix. A row names the
+mix and where it goes. The Monitor mix plays in the Wave:3 headphones. The
+Stream mix is a source for other applications. The destination and the level
+slider in each row are inactive because the daemon has no command for them.
+Each says so when the pointer rests on it.
+
+## Settings
+
+Open **Settings** with the gear button or Ctrl+,. Use
+`cargo run -p librewave -- --settings` to open Settings at launch.
+Settings takes keyboard focus. Tab and Shift+Tab stay inside the dialog.
+Escape, the close button, or a click outside the dialog closes it and restores
+the previous focus. Mixer and hardware input are blocked while Settings is
+open.
+
+Settings has three pages:
+
+- **Audio** shows whether audio runs and why it is stopped. It has
+  **Start audio**, **Stop and restore**, and the WirePlumber conflict file.
+- **Setup** has **Show plan**, which lists the paths and the access rule that
+  setup installs without changes. It also names the `librewavectl setup`,
+  `doctor`, and `uninstall` commands.
+- **Connection** shows the daemon connection, the IPC socket, and the state of
+  PipeWire and WirePlumber.
+
+## Mixer requests
 
 Dragging keeps one request in flight and only the latest pending pointer level.
 After the daemon acknowledges a request, the next request uses its new mixer
@@ -93,14 +145,17 @@ published over IPC. Physical write validation is limited to the Low-cut control
 on Wave:3 API 5.4. Other hardware controls still require validation.
 Service launch, default restoration, service restart, and removal checks have
 passed on the reference Wave:3. Reconnect, sleep, and login recovery still need
-acceptance runs. GPUI tests check command mapping, state handling, modal
-focus containment, focus restoration, and backdrop dismissal. Native window
-captures check the connected mixer and Settings with audio stopped. These
+acceptance runs. GPUI tests check command mapping, pointer geometry, state
+handling, loaded Ready and Locked control layouts, initial keyboard focus,
+modal focus containment, restoration errors across Settings pages, and backdrop
+dismissal. Loaded-control layout tests use fixtures. Native captures check the
+daemon-connected view with controls not loaded and the Settings dialog. These
 captures do not validate native mouse or keyboard interaction, active audio,
 or cross-desktop behavior.
 Longer stability on the current startup and routing implementation also
 requires validation.
-The fader tracks support drag, click, and keyboard input. Linked
+The fader tracks support drag, click, and keyboard input. The hardware level
+bars are not draggable. Linked
 faders, application-specific inputs, effects, and output selection remain work
 for later increments.
 

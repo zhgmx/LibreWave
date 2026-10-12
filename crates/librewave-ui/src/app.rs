@@ -1,45 +1,31 @@
 mod chrome;
 mod controls;
 mod device_art;
+mod hardware;
 mod mixer;
+mod settings;
+mod stage;
 mod theme;
-use controls::{Tone, action_button};
-use theme::{
-    BODY, BODY_LINE, CAPTION, CAPTION_LINE, HEADING, HEADING_LINE, SPACE_LG, SPACE_MD, SPACE_SM,
-    SPACE_XL,
-};
 
 use mixer::FaderEdit;
+use settings::SettingsPane;
 
+#[cfg(test)]
+use hardware::stepped;
 #[cfg(test)]
 use mixer::{
     fader_fraction, route_key_command, route_position_command, route_step_command,
     route_toggle_command,
 };
 
-use gpui::{
-    App, Bounds, Context, Div, Stateful, Window, WindowBounds, WindowOptions, div, prelude::*, px,
-    rgb, size,
-};
-use librewave_core::{
-    Command, DeviceAdmissionSnapshot, DeviceGeneration, DeviceId, DeviceWriteAccess,
-    FixedPointValue, Snapshot, Wave3Control,
-};
+use gpui::{App, Bounds, Context, Window, WindowBounds, WindowOptions, prelude::*, px, size};
+use librewave_core::{Command, Snapshot};
 use librewave_ipc::{IpcErrorKind, Response};
 use librewave_platform_linux::ipc::{Client, ClientError, configured_socket_path};
 use std::time::Duration;
 
-// Neutral surfaces and semantic mix colors from the user's LibreWave mock.
-const BACKGROUND: u32 = 0x000A_0A0A;
-const PANEL: u32 = 0x0014_1414;
-const RAISED: u32 = 0x001F_1F1F;
-const BORDER: u32 = 0x0029_2929;
-const INK: u32 = 0x00ED_EDED;
-const MUTED: u32 = 0x00A1_A1A1;
-const ACCENT: u32 = 0x0082_DEB1;
-const STREAM: u32 = 0x007F_C5EB;
-const WARNING: u32 = 0x00FF_8C91;
 const STATUS_INTERVAL: Duration = Duration::from_secs(2);
+const TITLEBAR: f32 = 52.;
 
 /// Opens the optional desktop client.
 ///
@@ -49,7 +35,7 @@ const STATUS_INTERVAL: Duration = Duration::from_secs(2);
 pub fn run(view: LaunchView) {
     gpui_platform::application().with_assets(crate::assets::Assets).run(move |cx: &mut App| {
         cx.text_system().add_fonts(crate::assets::fonts()).expect("embedded Geist fonts must load");
-        let bounds = Bounds::centered(None, size(px(1240.), px(900.)), cx);
+        let bounds = Bounds::centered(None, size(px(1200.), px(820.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(850.), px(650.))),
@@ -107,6 +93,7 @@ struct Shell {
     lifecycle_message: Option<String>,
     session_expectation: SessionExpectation,
     settings_modal: Option<SettingsModal>,
+    settings_pane: SettingsPane,
     settings_trigger_focus: Option<gpui::FocusHandle>,
 }
 
@@ -127,6 +114,7 @@ impl Shell {
             lifecycle_message: None,
             session_expectation: SessionExpectation::Connect,
             settings_modal: None,
+            settings_pane: SettingsPane::Audio,
             settings_trigger_focus: None,
         };
         shell.send(Command::GetStatus, cx);
@@ -366,9 +354,13 @@ impl Shell {
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.settings_trigger_focus.is_none() {
-            self.settings_trigger_focus = Some(cx.focus_handle());
+            let focus = cx.focus_handle();
+            if window.focused(cx).is_none() {
+                focus.focus(window, cx);
+            }
+            self.settings_trigger_focus = Some(focus);
         }
-        self.mixer_frame(window.viewport_size().width < px(1050.), cx)
+        self.frame(window.viewport_size(), cx)
     }
 }
 
@@ -448,455 +440,12 @@ impl Shell {
         })
         .detach();
     }
-
-    fn lifecycle_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let enabled = !self.pending;
-        div()
-            .border_t_1()
-            .border_color(rgb(BORDER))
-            .pt(px(SPACE_XL))
-            .flex()
-            .flex_col()
-            .gap(px(SPACE_LG))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(HEADING))
-                            .line_height(px(HEADING_LINE))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .child("Audio"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(CAPTION))
-                            .line_height(px(CAPTION_LINE))
-                            .text_color(rgb(MUTED))
-                            .child("Experimental"),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(SPACE_SM))
-                    .child(action_button(
-                        "session-start",
-                        "Start audio",
-                        Tone::Primary,
-                        enabled,
-                        cx,
-                        |this, _, cx| {
-                            this.run_lifecycle(
-                                librewavectl::SessionAction::Start {
-                                    suspend_config: this.suspend_config.clone(),
-                                },
-                                cx,
-                            );
-                        },
-                    ))
-                    .child(action_button(
-                        "session-stop",
-                        "Stop and restore",
-                        Tone::Secondary,
-                        enabled,
-                        cx,
-                        |this, _, cx| this.run_lifecycle(librewavectl::SessionAction::Stop, cx),
-                    ))
-                    .child(action_button(
-                        "setup-plan",
-                        "Setup plan",
-                        Tone::Quiet,
-                        enabled,
-                        cx,
-                        |this, _, cx| {
-                            this.run_lifecycle(librewavectl::SessionAction::SetupPlan, cx);
-                        },
-                    )),
-            )
-            .child(self.audio_configuration(cx))
-            .when_some(self.lifecycle_message.clone(), |view, message| {
-                view.child(div().child(message))
-            })
-    }
-
-    fn audio_configuration(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let enabled = !self.pending;
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .child(div().text_color(rgb(MUTED)).child("Audio configuration"))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(SPACE_SM))
-                    .child(action_button(
-                        "choose-fragment",
-                        "Choose file…",
-                        Tone::Secondary,
-                        enabled,
-                        cx,
-                        |this, _, cx| this.choose_fragment(cx),
-                    ))
-                    .child(action_button(
-                        "clear-fragment",
-                        "Clear",
-                        Tone::Quiet,
-                        enabled && self.suspend_config.is_some(),
-                        cx,
-                        |this, _, cx| {
-                            this.suspend_config = None;
-                            cx.notify();
-                        },
-                    )),
-            )
-            .when_some(self.suspend_config.as_ref(), |view, path| {
-                view.child(
-                    div()
-                        .text_size(px(CAPTION))
-                        .line_height(px(CAPTION_LINE))
-                        .text_color(rgb(MUTED))
-                        .child(path.display().to_string()),
-                )
-            })
-    }
-
-    fn hardware_writable(&self, access: DeviceWriteAccess) -> bool {
-        matches!(access, DeviceWriteAccess::Ready)
-            && !self.pending
-            && !self.hardware_state_stale
-            && self.settings_modal.is_none()
-    }
-
-    #[allow(clippy::too_many_lines)]
-    fn device_panel(
-        &self,
-        device: Option<&librewave_core::DeviceSnapshot>,
-        stacked: bool,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let mut panel = div().w_full().flex().flex_col().gap(px(SPACE_MD));
-        let Some(device) = device else {
-            return panel
-                .child(
-                    div()
-                        .text_size(px(HEADING))
-                        .line_height(px(HEADING_LINE))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .child("Microphone"),
-                )
-                .child(div().text_color(rgb(MUTED)).child(if self.snapshot.is_some() {
-                    "No Wave:3 connected."
-                } else {
-                    "Device status unavailable."
-                }))
-                .into_any_element();
-        };
-        panel = panel
-            .child(
-                div()
-                    .text_size(px(HEADING))
-                    .line_height(px(HEADING_LINE))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .child("Wave:3"),
-            )
-            .child(
-                div()
-                    .text_size(px(CAPTION))
-                    .line_height(px(CAPTION_LINE))
-                    .text_color(rgb(MUTED))
-                    .child(device.connection.to_string()),
-            );
-        match &device.admission {
-            DeviceAdmissionSnapshot::NotInspected => {
-                panel = panel.child(
-                    div()
-                        .text_size(px(BODY))
-                        .line_height(px(BODY_LINE))
-                        .text_color(rgb(MUTED))
-                        .child("Controls not loaded."),
-                );
-            }
-            DeviceAdmissionSnapshot::Failed { error } => {
-                panel = panel.child(
-                    div()
-                        .text_size(px(BODY))
-                        .line_height(px(BODY_LINE))
-                        .text_color(rgb(WARNING))
-                        .child(error.to_string()),
-                );
-            }
-            DeviceAdmissionSnapshot::Admitted { api, config: None, .. } => {
-                panel = panel.child(
-                    div()
-                        .text_size(px(BODY))
-                        .line_height(px(BODY_LINE))
-                        .text_color(rgb(WARNING))
-                        .child(format!("API {api}: the configuration is unavailable.")),
-                );
-            }
-            DeviceAdmissionSnapshot::Admitted {
-                api,
-                generation,
-                write_access,
-                config: Some(config),
-            } => {
-                let writable = self.hardware_writable(*write_access)
-                    && device.connection == librewave_core::DeviceConnection::Connected;
-                panel = panel
-                    .child(
-                        div()
-                            .text_size(px(BODY))
-                            .line_height(px(BODY_LINE))
-                            .text_color(rgb(MUTED))
-                            .child(format!("API {api}  ·  Generation {generation}")),
-                    )
-                    .child(level_row(
-                        "Microphone gain",
-                        config.input_gain,
-                        0,
-                        40 * 256,
-                        Wave3Control::InputGain,
-                        device.id,
-                        *generation,
-                        writable,
-                        cx,
-                    ))
-                    .child(level_row(
-                        "Headphone level",
-                        config.headphone_volume,
-                        -60 * 256,
-                        0,
-                        Wave3Control::HeadphoneLevel,
-                        device.id,
-                        *generation,
-                        writable,
-                        cx,
-                    ))
-                    .child(toggle_row(
-                        "Microphone mute",
-                        config.input_mute,
-                        Wave3Control::MicrophoneMute,
-                        device.id,
-                        *generation,
-                        writable,
-                        cx,
-                    ))
-                    .child(toggle_row(
-                        "Headphone mute",
-                        config.headphone_mute,
-                        Wave3Control::HeadphoneMute,
-                        device.id,
-                        *generation,
-                        writable,
-                        cx,
-                    ))
-                    .child(toggle_row(
-                        "Clipguard",
-                        config.clipguard_enable,
-                        Wave3Control::Clipguard,
-                        device.id,
-                        *generation,
-                        writable,
-                        cx,
-                    ))
-                    .child(toggle_row(
-                        "Low-cut filter",
-                        config.lowcut_enable,
-                        Wave3Control::LowCut,
-                        device.id,
-                        *generation,
-                        writable,
-                        cx,
-                    ))
-                    .child(toggle_row(
-                        "Gain Lock",
-                        config.gain_lock,
-                        Wave3Control::GainLock,
-                        device.id,
-                        *generation,
-                        writable,
-                        cx,
-                    ));
-            }
-        }
-        let id = device.id;
-        let controls = panel
-            .child(
-                div()
-                    .text_size(px(CAPTION))
-                    .line_height(px(CAPTION_LINE))
-                    .text_color(rgb(MUTED))
-                    .child("Reading may restore saved device settings."),
-            )
-            .child(action_button(
-                "inspect",
-                "Read controls",
-                Tone::Primary,
-                !self.pending
-                    && self.settings_modal.is_none()
-                    && device.connection == librewave_core::DeviceConnection::Connected,
-                cx,
-                move |this, _, cx| {
-                    this.send(Command::InspectDevice { id }, cx);
-                },
-            ));
-        div()
-            .id("device-panel")
-            .debug_selector(|| "device-panel".to_owned())
-            .w_full()
-            .flex()
-            .when(stacked, gpui::Styled::flex_col)
-            .when(!stacked, gpui::Styled::items_center)
-            .gap(px(SPACE_XL))
-            .child(
-                div()
-                    .when(stacked, |view| view.w_full().h(px(270.)))
-                    .when(!stacked, |view| view.w(px(144.)).h(px(216.)))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        gpui::img(device_art::image(device.admission.config().filter(|_| {
-                            device.connection == librewave_core::DeviceConnection::Connected
-                        })))
-                        .when(stacked, |view| view.w(px(180.)).h(px(270.)))
-                        .when(!stacked, |view| view.w(px(144.)).h(px(216.))),
-                    ),
-            )
-            .child(controls.min_w_0().when(!stacked, gpui::Styled::flex_1))
-            .into_any_element()
-    }
-}
-
-fn control_button(
-    key: &str,
-    label: &str,
-    control: Option<Wave3Control>,
-    id: DeviceId,
-    generation: DeviceGeneration,
-    writable: bool,
-    cx: &mut Context<Shell>,
-) -> Stateful<Div> {
-    action_button(
-        key,
-        label,
-        Tone::Secondary,
-        writable && control.is_some(),
-        cx,
-        move |this, _, cx| {
-            if let Some(control) = control {
-                this.send(
-                    Command::SetWave3Control { id, expected_generation: generation, control },
-                    cx,
-                );
-            }
-        },
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn level_row(
-    label: &'static str,
-    value: FixedPointValue,
-    minimum: i32,
-    maximum: i32,
-    constructor: fn(FixedPointValue) -> Wave3Control,
-    id: DeviceId,
-    generation: DeviceGeneration,
-    writable: bool,
-    cx: &mut Context<Shell>,
-) -> impl IntoElement {
-    let down = stepped(value, -128, minimum, maximum).map(constructor);
-    let up = stepped(value, 128, minimum, maximum).map(constructor);
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .child(
-            div()
-                .text_size(px(BODY))
-                .line_height(px(BODY_LINE))
-                .child(format!("{label}: {:.2} dB", f64::from(value.raw) / 256.)),
-        )
-        .child(
-            div()
-                .flex()
-                .gap(px(SPACE_SM))
-                .child(control_button(
-                    &format!("{label}-down"),
-                    "−",
-                    down,
-                    id,
-                    generation,
-                    writable,
-                    cx,
-                ))
-                .child(control_button(
-                    &format!("{label}-up"),
-                    "+",
-                    up,
-                    id,
-                    generation,
-                    writable,
-                    cx,
-                )),
-        )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn toggle_row(
-    label: &'static str,
-    value: bool,
-    constructor: fn(bool) -> Wave3Control,
-    id: DeviceId,
-    generation: DeviceGeneration,
-    writable: bool,
-    cx: &mut Context<Shell>,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .child(div().text_size(px(BODY)).line_height(px(BODY_LINE)).child(label))
-        .child(action_button(
-            label,
-            if value { "On" } else { "Off" },
-            if value { Tone::Selected } else { Tone::Secondary },
-            writable,
-            cx,
-            move |this, _, cx| {
-                this.send(
-                    Command::SetWave3Control {
-                        id,
-                        expected_generation: generation,
-                        control: constructor(!value),
-                    },
-                    cx,
-                );
-            },
-        ))
-}
-
-fn stepped(
-    value: FixedPointValue,
-    delta: i32,
-    minimum: i32,
-    maximum: i32,
-) -> Option<FixedPointValue> {
-    const HALF_DB_RAW: i32 = 128;
-    let target = value.raw.checked_add(delta)?;
-    let raw = target.checked_add(HALF_DB_RAW / 2)?.div_euclid(HALF_DB_RAW) * HALF_DB_RAW;
-    (minimum..=maximum).contains(&raw).then_some(FixedPointValue { raw, ..value })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use librewave_core::{DeviceGeneration, DeviceId, DeviceWriteAccess, FixedPointValue};
     use librewave_core::{FaderGain, MixRoute, MixTarget, MixerGeneration, MixerRuntimeState};
     use librewave_core::{MixerProfile, MixerSnapshot, SYSTEM_SOURCE_ID};
     use librewave_ipc::IpcError;
@@ -918,7 +467,103 @@ mod tests {
             lifecycle_message: None,
             session_expectation: SessionExpectation::Connect,
             settings_modal: None,
+            settings_pane: SettingsPane::Audio,
             settings_trigger_focus: None,
+        }
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    fn snapshot_with_controls(write_access: DeviceWriteAccess) -> Snapshot {
+        use librewave_core::{
+            ApiVersion, DeviceAdmissionSnapshot, DeviceConnection, DeviceModel, DeviceSnapshot,
+            VolumeSelection, Wave3ConfigSnapshot,
+        };
+        let value = |raw| FixedPointValue { raw, fractional_bits: 8 };
+        let mut snapshot = Snapshot::empty();
+        snapshot.devices.push(DeviceSnapshot {
+            id: DeviceId(1),
+            model: DeviceModel::Wave3,
+            connection: DeviceConnection::Connected,
+            audio_cards: Vec::new(),
+            admission: DeviceAdmissionSnapshot::Admitted {
+                api: ApiVersion::new(5, 4),
+                generation: DeviceGeneration::new([1; 16], 7),
+                write_access,
+                config: Some(Wave3ConfigSnapshot {
+                    input_gain: value(4_726),
+                    input_mute: false,
+                    clipguard_enable: true,
+                    lowcut_enable: false,
+                    headphone_volume: value(-3_072),
+                    headphone_mute: true,
+                    direct_monitor: value(0),
+                    volume_select: VolumeSelection::Microphone,
+                    all_leds_off: false,
+                    leds_flip: false,
+                    gain_lock: false,
+                }),
+            },
+        });
+        snapshot
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
+    fn loaded_controls_fit_the_short_window_and_settings_remains_modal(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use librewave_core::DeviceWriteLockReason;
+        for access in [
+            DeviceWriteAccess::Ready,
+            DeviceWriteAccess::Locked { reason: DeviceWriteLockReason::NoOwnedConnection },
+        ] {
+            let (view, cx) = cx.add_window_view(|_, _| {
+                let mut shell = shell_with(snapshot_with_controls(access));
+                shell.action_error = Some("Restoration pending: retry Stop.".to_owned());
+                shell
+            });
+            for width in [1200., 850.] {
+                cx.simulate_resize(gpui::size(px(width), px(650.)));
+                let stage = cx.debug_bounds("device-stage").expect("stage");
+                for key in [
+                    "gain-down",
+                    "gain-up",
+                    "headphone-down",
+                    "headphone-up",
+                    "mute-microphone",
+                    "mute-headphones",
+                    "clipguard",
+                    "low-cut",
+                    "gain-lock",
+                ] {
+                    let control = cx.debug_bounds(key).expect(key);
+                    assert!(
+                        control.top() >= stage.top() && control.bottom() <= stage.bottom(),
+                        "{key} is outside the stage: {control:?} versus {stage:?}"
+                    );
+                }
+            }
+            cx.simulate_keystrokes("ctrl-,");
+            for page in ["pane-setup", "pane-connection", "pane-audio"] {
+                let bounds = cx.debug_bounds(page).expect(page);
+                cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+                assert!(cx.debug_bounds("action-error").is_some(), "error hidden on {page}");
+                cx.simulate_keystrokes("tab");
+                cx.update(|window, cx| {
+                    view.update(cx, |view, cx| {
+                        assert!(
+                            view.settings_modal
+                                .as_ref()
+                                .expect("modal")
+                                .focus
+                                .contains_focused(window, cx)
+                        );
+                        assert!(!view.hardware_writable(DeviceWriteAccess::Ready));
+                    });
+                });
+            }
+            cx.simulate_keystrokes("escape");
+            assert!(view.read_with(cx, |view, _| view.settings_modal.is_none()));
         }
     }
 
@@ -1301,13 +946,45 @@ mod tests {
 
     #[cfg(feature = "gpui-tests")]
     #[gpui::test]
+    fn connected_view_shows_the_stage_hardware_and_both_mixes(cx: &mut gpui::TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| shell_with(Snapshot::empty()));
+        let stage = cx.debug_bounds("device-stage").expect("stage bounds");
+        let mixer = cx.debug_bounds("mixer").expect("mixer bounds");
+        assert!(stage.size.width > px(0.) && stage.size.height > px(0.));
+        assert!(cx.debug_bounds("device-panel").is_some());
+        // The stage and the mixer never overlap in either layout.
+        assert!(mixer.left() >= stage.right() || mixer.top() >= stage.bottom());
+        // Each input has a fader for each mix.
+        assert!(cx.debug_bounds("add-input").is_some());
+        for fader in ["fader-1-monitor", "fader-1-stream", "fader-2-monitor", "fader-2-stream"] {
+            assert!(cx.debug_bounds(fader).is_some(), "{fader} is missing");
+        }
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
+    fn offline_view_offers_settings_instead_of_invented_state(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| {
+            let mut shell = shell_with(Snapshot::empty());
+            shell.snapshot = None;
+            shell
+        });
+        assert!(cx.debug_bounds("mixer").is_none());
+        assert!(cx.debug_bounds("fader-1-monitor").is_none());
+        let open = cx.debug_bounds("offline-settings").expect("settings action");
+        cx.simulate_click(open.center(), gpui::Modifiers::none());
+        assert!(view.read_with(cx, |view, _| view.settings_modal.is_some()));
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
     fn modal_backdrop_click_dismisses_without_activating_background(cx: &mut gpui::TestAppContext) {
         let (view, cx) = cx.add_window_view(|_, _| shell_with(Snapshot::empty()));
         let before = view.read_with(cx, |view, _| view.snapshot.clone());
         let settings = cx.debug_bounds("settings").expect("settings bounds");
         cx.simulate_click(settings.center(), gpui::Modifiers::none());
         assert!(view.read_with(cx, |view, _| view.settings_modal.is_some()));
-        // This point is outside the modal, over the first source strip.
+        // This point is outside the modal, over the device stage.
         cx.simulate_click(gpui::point(px(70.), px(180.)), gpui::Modifiers::none());
         view.read_with(cx, |view, _| {
             assert!(view.settings_modal.is_none());

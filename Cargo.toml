@@ -46,3 +46,8 @@ unsafe_op_in_unsafe_fn = "deny"
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 unwrap_used = "deny"
+
+# The vector rasterizer draws icons at run time and the device art at build time.
+[profile.dev.package]
+resvg = { opt-level = 3 }
+tiny-skia = { opt-level = 3 }

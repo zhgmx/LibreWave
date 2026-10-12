@@ -10,7 +10,7 @@ description = "Optional GPUI presentation shell for LibreWave"
 
 [features]
 default = []
-gpui = ["dep:gpui", "dep:gpui-platform", "dep:librewave-core", "dep:librewave-ipc", "dep:librewave-platform-linux", "dep:librewavectl"]
+gpui = ["dep:gpui", "dep:gpui-platform", "dep:librewave-core", "dep:librewave-ipc", "dep:librewave-platform-linux", "dep:librewavectl", "dep:image", "dep:resvg"]
 gpui-tests = ["gpui", "gpui/test-support"]
 
 [dependencies]
@@ -20,6 +20,10 @@ librewave-core = { path = "../librewave-core", optional = true }
 librewave-ipc = { path = "../librewave-ipc", optional = true }
 librewave-platform-linux = { path = "../librewave-platform-linux", optional = true }
 librewavectl = { path = "../librewavectl", optional = true }
+image = { version = "0.25", default-features = false, optional = true }
+
+[build-dependencies]
+resvg = { version = "0.45", default-features = false, optional = true }
 
 [lints]
 workspace = true

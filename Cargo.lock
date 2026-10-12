@@ -3263,10 +3263,12 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "gpui",
  "gpui_platform",
+ "image",
  "librewave-core",
  "librewave-ipc",
  "librewave-platform-linux",
  "librewavectl",
+ "resvg",
 ]
 
 [[package]]
