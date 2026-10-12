@@ -119,9 +119,10 @@ Layout changes remain unavailable until audio stops and cleanup completes.
 The CLI lists groups with `librewavectl apps list`. To move a group, use
 `librewavectl apps route desktop "org.example.Player" 3`, or replace `desktop`
 with `executable` for an executable identity from the list. The clients use
-the same daemon commands. Application grouping and routing passed a private
-software-session test. Native interaction and real desktop routing remain
-unverified. The list identifies applications, not individual browser tabs.
+the same daemon commands. Application grouping and routing passed private
+software tests and a bounded disposable-player desktop test. Native assignment
+and remembered-target recovery on the desktop remain unverified. The list
+identifies applications, not individual browser tabs.
 LibreWave sends the observed input serial as `target.object`. WirePlumber
 resolves it and stores the stable input name when target restoration is enabled.
 A private test confirmed restoration after stream recreation, input recreation,
@@ -142,8 +143,10 @@ The CLI accepts `librewavectl mixer output <generation> monitor on -6.5`.
 Replace `monitor` with `stream` for the other output, or use `off` to mute it.
 `librewavectl mixer faders <source> <generation> -6.5 -6.5` changes both channel
 faders atomically without changing mute states. These controls passed software
-tests and a bounded Wave:3 audio run through the CLI. Native interaction with
-the channel and output controls remains unverified.
+tests and a bounded Wave:3 audio run through the CLI. A native Wave:3 check
+verified channel fader movement, linked levels, separate mutes, and Monitor
+output level and mute. Native keyboard control and Stream output interaction
+remain unverified.
 
 ## Settings
 
@@ -202,7 +205,7 @@ dismissal. Loaded-control layout tests use fixtures. Native captures check the
 daemon-connected view before and after reading the real Wave:3 API 5.4 controls,
 the loaded device stage at the minimum window size, and the Settings dialog.
 The loaded-control review leaves audio inactive and hardware controls unchanged.
-The captures do not validate native mouse or keyboard interaction, active audio,
+The captures alone do not validate native mouse or keyboard interaction, active audio,
 or behavior on other desktops. A separate physical selector and touch-mute
 check confirmed automatic updates in the native UI with audio inactive.
 Possible knob rotation during that check leaves the cause of its small gain
@@ -213,7 +216,10 @@ Channel and output fader tracks support drag, click, and keyboard input.
 Hardware level bars are not draggable. A bounded Wave:3 run through the CLI
 verified linked and independent levels, separate mutes, software output mute
 and attenuation, and disposable application moves between System and a named
-input. Native interaction with these software controls remains pending.
+input. A native listening check confirmed headphone playback, channel fader
+movement, linked and independent levels, separate channel mutes, and Monitor
+output level and mute. Native keyboard control, application assignment, and
+Stream output interaction still need checks.
 Effects and output destination selection remain work for later increments.
 
 The Linux application uses upstream Zed GPUI and `gpui_platform` from
