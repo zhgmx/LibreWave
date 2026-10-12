@@ -10,7 +10,11 @@ The first test system uses Fedora 44, PipeWire 1.6, WirePlumber 0.5, KDE Plasma,
 
 Some Wave microphones produce silent capture when playback starts before capture. A local workaround confirmed the required order by keeping capture active through a null sink and creating replacement playback and capture endpoints. A sanitized read-only PipeWire inspection confirmed that the null sink appears in the ordinary sink list beside the replacement endpoints. That workaround is useful evidence, but it is not the product design. A Lua script owns its lifecycle.
 
-LibreWave uses one physical audio owner. `librewaved` will open the Wave:3 ALSA capture PCM directly, consume capture frames, confirm that capture is active, and then open the playback PCM. WirePlumber must not create or reserve the admitted physical card. PipeWire will carry only the product endpoints that `librewave-core` defines.
+LibreWave uses one physical audio owner. Before each audio attempt, the daemon
+performs a fresh configuration read through its claimed control connection.
+The lifecycle passes a validated, borrowed candidate to capture startup.
+The audio backend opens no USB handle. Admission failure blocks PCM startup;
+restart and retry repeat the same fresh check. `librewaved` will open the Wave:3 ALSA capture PCM directly, consume capture frames, confirm that capture is active, and then open the playback PCM. WirePlumber must not create or reserve the admitted physical card. PipeWire will carry only the product endpoints that `librewave-core` defines.
 
 `librewave-platform-linux` contains the policy artifacts, ordered lifecycle, and direct host. The host uses `alsa` 0.12.1 and `pipewire` 0.9.2. The PipeWire Rust crate does not wrap `pw_filter`. A small C shim includes the installed PipeWire headers and owns only the ABI-sensitive filter event, hook, and process-position layouts. Rust owns graph policy, lifecycle, validation, and processing. `StartExperimentalAudio` connects this code to the daemon supervisor through IPC. Setup does not activate it.
 

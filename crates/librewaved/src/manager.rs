@@ -339,6 +339,19 @@ impl Daemon {
         if self.audio.as_ref().is_none_or(|audio| !audio.needs_tick()) {
             return;
         }
+        let Some(mut supervisor) = self.audio.take() else {
+            return;
+        };
+        self.supervise_audio(&mut supervisor, allow_start);
+        self.audio = Some(supervisor);
+        self.update_mixer_runtime(librewave_core::Origin::Recovery);
+    }
+
+    fn supervise_audio<H: crate::audio::SupervisedAudioHost>(
+        &mut self,
+        supervisor: &mut AudioSupervisor<H>,
+        allow_start: bool,
+    ) {
         self.poll_services();
         let now = Instant::now();
         if allow_start && now >= self.next_audio_inventory {
@@ -354,18 +367,31 @@ impl Daemon {
         let pipewire = audio.pipewire.clone();
         let wireplumber = audio.wireplumber.clone();
         let profile = self.snapshot().mixer.profile.clone();
-        let Some(supervisor) = self.audio.as_mut() else {
-            return;
-        };
         let previous_runtime = supervisor.runtime();
-        supervisor.tick(
-            candidate.as_ref(),
-            &pipewire,
-            &wireplumber,
-            &self.audio_invocations,
-            &profile,
+        let invocations = self.audio_invocations.clone();
+        supervisor.tick(crate::audio::ReconcileContext {
+            candidate: candidate.as_ref(),
+            pipewire: &pipewire,
+            wireplumber: &wireplumber,
+            invocations: &invocations,
+            profile: &profile,
             allow_start,
-        );
+            admission: &mut |candidate| {
+                self.admit_audio_candidate(candidate, librewave_core::Origin::Recovery).map_err(
+                    |error| match error.kind {
+                        IpcErrorKind::AudioAccess { error } => {
+                            librewave_platform_linux::audio_host::LinuxAudioError::DeviceAdmission(
+                                error,
+                            )
+                        }
+                        _ => librewave_platform_linux::audio_host::LinuxAudioError::AudioAttempt {
+                            phase: "daemon admission",
+                            reason: error.message,
+                        },
+                    },
+                )
+            },
+        });
         supervisor.poll_meters();
         if supervisor.runtime() != previous_runtime
             && supervisor.runtime() == MixerRuntimeState::Active
@@ -382,7 +408,6 @@ impl Daemon {
                 Err(error) => eprintln!("librewaved: desktop default recovery pending: {error}"),
             }
         }
-        self.update_mixer_runtime(librewave_core::Origin::Recovery);
     }
 
     /// Executes one client command through the daemon's single state path.

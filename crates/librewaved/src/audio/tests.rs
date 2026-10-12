@@ -8,19 +8,21 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 #[derive(Default)]
-struct Control {
+pub(crate) struct Control {
     application_revision: Cell<u64>,
     application_moves: Cell<usize>,
-    events: RefCell<Vec<&'static str>>,
+    pub(crate) events: RefCell<Vec<&'static str>>,
     meters: RefCell<std::collections::VecDeque<librewave_engine::BlockMeters>>,
-    creates: Cell<usize>,
+    pub(crate) creates: Cell<usize>,
     cleanup_failures: Cell<usize>,
     admission_error: RefCell<Option<LinuxAudioError>>,
     physical_error: Cell<bool>,
-    progress_error: Cell<bool>,
+    pub(crate) progress_error: Cell<bool>,
+    pub(crate) claim: Option<Rc<Cell<usize>>>,
+    pub(crate) admission_reads: Option<Rc<Cell<usize>>>,
 }
 
-struct FakeHost(Rc<Control>);
+pub(crate) struct FakeHost(pub(crate) Rc<Control>);
 
 impl AudioHost for FakeHost {
     type Error = LinuxAudioError;
@@ -32,9 +34,18 @@ impl AudioHost for FakeHost {
         self.0.events.borrow_mut().push("physical check");
         if self.0.physical_error.get() { Err(LinuxAudioError::PhysicalNodeExposed) } else { Ok(()) }
     }
-    fn start_capture(&mut self, _: &UsbDeviceCandidate) -> Result<CaptureConsumption, Self::Error> {
+    fn start_capture(
+        &mut self,
+        _: librewave_platform_linux::audio_lifecycle::AudioAdmission<'_>,
+    ) -> Result<CaptureConsumption, Self::Error> {
         if let Some(error) = self.0.admission_error.borrow_mut().take() {
             return Err(error);
+        }
+        if let Some(claim) = &self.0.claim {
+            assert_eq!(claim.get(), 1, "capture lost the sole daemon control claim");
+        }
+        if let Some(reads) = &self.0.admission_reads {
+            assert!(reads.get() > 0, "capture bypassed fresh admission");
         }
         self.0.events.borrow_mut().push("capture");
         Ok(CaptureConsumption::new())
@@ -133,14 +144,15 @@ fn tick(
     candidate: Option<&UsbDeviceCandidate>,
     allow_start: bool,
 ) {
-    audio.tick(
+    audio.tick(ReconcileContext {
         candidate,
-        &ServiceState::Available,
-        &ServiceState::Available,
-        &HostServiceInvocations::default(),
-        &MixerProfile::default(),
+        pipewire: &ServiceState::Available,
+        wireplumber: &ServiceState::Available,
+        invocations: &HostServiceInvocations::default(),
+        profile: &MixerProfile::default(),
         allow_start,
-    );
+        admission: &mut |_| Ok(()),
+    });
 }
 fn reason(audio: &AudioSupervisor<FakeHost>) -> MixerInactiveReason {
     let MixerRuntimeState::Inactive { reason } = audio.runtime() else {
@@ -287,14 +299,17 @@ fn missing_device_or_service_does_not_construct_an_audio_host() {
     let (mut audio, control) = supervisor();
     tick(&mut audio, None, true);
     assert_eq!(reason(&audio), MixerInactiveReason::NoSingleDevice);
-    audio.tick(
-        Some(&candidate()),
-        &ServiceState::Unavailable { reason: librewave_core::ServiceFailureReason::NotRunning },
-        &ServiceState::Available,
-        &HostServiceInvocations::default(),
-        &MixerProfile::default(),
-        true,
-    );
+    audio.tick(ReconcileContext {
+        candidate: Some(&candidate()),
+        pipewire: &ServiceState::Unavailable {
+            reason: librewave_core::ServiceFailureReason::NotRunning,
+        },
+        wireplumber: &ServiceState::Available,
+        invocations: &HostServiceInvocations::default(),
+        profile: &MixerProfile::default(),
+        allow_start: true,
+        admission: &mut |_| Ok(()),
+    });
     assert_eq!(reason(&audio), MixerInactiveReason::HostServicesUnavailable);
     assert_eq!(control.creates.get(), 0);
 }

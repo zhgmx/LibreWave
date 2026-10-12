@@ -4,16 +4,18 @@ mod connection;
 
 pub use connection::Wave3UsbConnection;
 
+use librewave_core::{AdmissionError, FixedPointValue, VolumeSelection, Wave3ConfigSnapshot};
+#[cfg(test)]
 use librewave_core::{
-    AdmissionError, DeviceAdmissionSnapshot, DeviceGeneration, DeviceWriteAccess,
-    DeviceWriteLockReason, FixedPointValue, VolumeSelection, Wave3ConfigSnapshot,
+    DeviceAdmissionSnapshot, DeviceGeneration, DeviceWriteAccess, DeviceWriteLockReason,
 };
-use librewave_device::{
-    ReadOnlyTransport, SessionError, SetupPacket, TransportError, Wave3Session, probe_wave3,
-};
+#[cfg(test)]
+use librewave_device::{ReadOnlyTransport, SetupPacket, Wave3Session, probe_wave3};
+use librewave_device::{SessionError, TransportError};
 use librewave_protocol::{SemanticValue, Wave3ConfigField};
-use rusb::{Context, Device, DeviceHandle, UsbContext};
+use rusb::{Device, UsbContext};
 use std::fmt;
+#[cfg(test)]
 use std::time::Duration;
 
 const WAVE3_CONTROL_CLASS: u8 = 0xff;
@@ -109,79 +111,10 @@ impl std::error::Error for UsbProbeError {
     }
 }
 
-/// Opens the admitted Wave:3 candidate at its exact Linux USB topology and
-/// performs a read-only admission probe.
-///
-/// The topology is the libusb bus number and port-number chain. The current USB
-/// bus address is not part of the match. After the location matches, the probe
-/// checks the normal-mode USB identity and the `0xff/0xf0/0x00` interface.
-/// The selected `0xff/0xf0/0x00` interface must have no active kernel driver.
-/// This function never claims an interface and never enables automatic driver
-/// detachment. The USB handle and context close when the function returns.
-///
-/// # Errors
-///
-/// Returns a classified discovery, descriptor, transport, API, or schema
-/// failure.
-pub fn probe_wave3_usb(
-    candidate: &super::UsbDeviceCandidate,
-) -> Result<Wave3Session, UsbProbeError> {
-    if candidate.identity != super::DeviceIdentity::wave3() {
-        return Err(UsbProbeError::NotFound);
-    }
-    let location =
-        UsbLocation::parse(candidate.topology.as_str()).map_err(UsbProbeError::Topology)?;
-    let context = Context::new().map_err(transport_probe_error)?;
-    let devices = context.devices().map_err(transport_probe_error)?;
-    let device = select_device_at_location(devices.iter(), &location)?;
-
-    let descriptor = device.device_descriptor().map_err(|error| match error {
-        rusb::Error::BadDescriptor => UsbProbeError::Descriptor(DescriptorError::Malformed),
-        _ => transport_probe_error(error),
-    })?;
-    if !is_reviewed_wave3(descriptor.vendor_id(), descriptor.product_id()) {
-        return Err(UsbProbeError::Descriptor(DescriptorError::IdentityMismatch {
-            vendor_id: descriptor.vendor_id(),
-            product_id: descriptor.product_id(),
-        }));
-    }
-
-    let configuration = device.active_config_descriptor().map_err(|error| match error {
-        rusb::Error::BadDescriptor => UsbProbeError::Descriptor(DescriptorError::Malformed),
-        _ => transport_probe_error(error),
-    })?;
-    let interfaces: Vec<_> = configuration
-        .interfaces()
-        .flat_map(|interface| {
-            interface.descriptors().map(|descriptor| InterfaceObservation {
-                number: descriptor.interface_number(),
-                class: descriptor.class_code(),
-                subclass: descriptor.sub_class_code(),
-                protocol: descriptor.protocol_code(),
-            })
-        })
-        .collect();
-    let interface = select_control_interface(interfaces).map_err(UsbProbeError::Descriptor)?;
-
-    let handle = device.open().map_err(transport_probe_error)?;
-    if handle.kernel_driver_active(interface).map_err(transport_probe_error)? {
-        return Err(UsbProbeError::Session(SessionError::Transport(TransportError::Busy)));
-    }
-
-    let mut transport = RusbReadOnlyTransport { handle };
-    probe_wave3(&mut transport, interface).map_err(UsbProbeError::Session)
-}
-
-/// Runs the read-only probe for one current inventory candidate and converts
-/// the result into the portable admission snapshot.
-#[must_use]
-pub fn inspect_wave3_usb(candidate: &super::UsbDeviceCandidate) -> DeviceAdmissionSnapshot {
-    admission_snapshot(probe_wave3_usb(candidate))
-}
-
 /// Converts a probe result without exposing Linux topology or USB serial data.
 #[must_use]
-pub fn admission_snapshot(result: Result<Wave3Session, UsbProbeError>) -> DeviceAdmissionSnapshot {
+#[cfg(test)]
+fn admission_snapshot(result: Result<Wave3Session, UsbProbeError>) -> DeviceAdmissionSnapshot {
     match result {
         Ok(session) => match wave3_config_snapshot(session.config()) {
             Ok(config) => DeviceAdmissionSnapshot::Admitted {
@@ -288,30 +221,6 @@ fn boolean(
     match config.get(field).map_err(|_| Wave3SnapshotError)? {
         SemanticValue::Boolean(value) => Ok(value),
         _ => Err(Wave3SnapshotError),
-    }
-}
-
-struct RusbReadOnlyTransport {
-    handle: DeviceHandle<Context>,
-}
-
-impl ReadOnlyTransport for RusbReadOnlyTransport {
-    fn read_control(
-        &mut self,
-        setup: SetupPacket,
-        response: &mut [u8],
-        timeout: Duration,
-    ) -> Result<usize, TransportError> {
-        self.handle
-            .read_control(
-                setup.request_type,
-                setup.request,
-                setup.value,
-                setup.index,
-                response,
-                timeout,
-            )
-            .map_err(map_rusb_error)
     }
 }
 

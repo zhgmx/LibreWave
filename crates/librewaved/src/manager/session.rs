@@ -15,11 +15,38 @@ impl Daemon {
                 message: "connect exactly one supported Wave:3 before takeover".to_owned(),
             });
         }
-        let id = *self
+        let candidate = self
             .candidates
-            .keys()
+            .values()
             .next()
-            .ok_or_else(|| internal_error("no candidate after admission count check".into()))?;
+            .ok_or_else(|| internal_error("no candidate after admission count check".into()))?
+            .clone();
+        self.admit_audio_candidate(&candidate, origin).map_err(|mut error| {
+            error.message.push_str("; no desktop ownership was changed");
+            error
+        })?;
+        Ok(Response::AudioAccessChecked)
+    }
+    pub(super) fn admit_audio_candidate(
+        &mut self,
+        candidate: &librewave_platform_linux::UsbDeviceCandidate,
+        origin: librewave_core::Origin,
+    ) -> Result<(), IpcError> {
+        // Reconcile identity and ALSA correlation again at the attempt boundary.
+        // A stale inventory candidate must never authorize a replacement device.
+        ignore_reconciliation_event(self.refresh_inventory(origin));
+        let id = self
+            .candidates
+            .iter()
+            .find_map(|(id, current)| {
+                (self.candidates.len() == 1 && current == candidate).then_some(*id)
+            })
+            .ok_or_else(|| IpcError {
+                kind: IpcErrorKind::AudioAccess {
+                    error: librewave_core::AdmissionError::Disconnected,
+                },
+                message: "the audio candidate changed before fresh admission".into(),
+            })?;
         // Observation already owns the claimed vendor interface. Reuse that
         // connection for a fresh read, or acquire the first connection when
         // observation has not run. A second unclaimed probe cannot access an
@@ -32,14 +59,13 @@ impl Daemon {
         };
         if let Some(error) = error {
             return Err(IpcError {
-                message: format!(
-                    "read-only Wave:3 admission failed: {error}; no desktop ownership was changed"
-                ),
+                message: format!("read-only Wave:3 admission failed: {error}"),
                 kind: IpcErrorKind::AudioAccess { error },
             });
         }
-        Ok(Response::AudioAccessChecked)
+        Ok(())
     }
+
     pub(super) fn read_desktop_defaults(&mut self) -> Result<Response, IpcError> {
         let defaults = self
             .desktop_defaults

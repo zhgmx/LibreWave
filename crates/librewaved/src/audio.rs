@@ -68,6 +68,18 @@ struct RunningAttempt<H> {
 
 type HostFactory<H> = dyn FnMut(ClockAttemptEpoch, &MixerProfile) -> Result<H, LinuxAudioError>;
 
+/// One serialized reconciliation turn. Admission borrows the control owner;
+/// it is called for each new attempt and is never retained by the audio host.
+pub(super) struct ReconcileContext<'a> {
+    pub candidate: Option<&'a UsbDeviceCandidate>,
+    pub pipewire: &'a ServiceState,
+    pub wireplumber: &'a ServiceState,
+    pub invocations: &'a HostServiceInvocations,
+    pub profile: &'a MixerProfile,
+    pub allow_start: bool,
+    pub admission: &'a mut dyn FnMut(&UsbDeviceCandidate) -> Result<(), LinuxAudioError>,
+}
+
 /// Lives on the daemon thread. No graph or ALSA handle crosses into IPC clients.
 pub(super) struct AudioSupervisor<H = ComposedAudioHost> {
     attempt: Option<RunningAttempt<H>>,
@@ -127,7 +139,7 @@ impl<H: SupervisedAudioHost> AudioSupervisor<H> {
         )?;
         Ok(self.applications())
     }
-    fn with_factory(
+    pub(super) fn with_factory(
         factory: impl FnMut(ClockAttemptEpoch, &MixerProfile) -> Result<H, LinuxAudioError> + 'static,
     ) -> Self {
         let now = Instant::now();
@@ -197,15 +209,16 @@ impl<H: SupervisedAudioHost> AudioSupervisor<H> {
 
     /// Reconciles an exact candidate and service state. A failed cleanup keeps
     /// the old owner and blocks a replacement attempt.
-    pub(super) fn tick(
-        &mut self,
-        candidate: Option<&UsbDeviceCandidate>,
-        pipewire: &ServiceState,
-        wireplumber: &ServiceState,
-        invocations: &HostServiceInvocations,
-        profile: &MixerProfile,
-        allow_start: bool,
-    ) {
+    pub(super) fn tick(&mut self, context: ReconcileContext<'_>) {
+        let ReconcileContext {
+            candidate,
+            pipewire,
+            wireplumber,
+            invocations,
+            profile,
+            allow_start,
+            admission,
+        } = context;
         let now = Instant::now();
         if !self.enabled {
             if self.attempt.is_some() && now >= self.retry_at {
@@ -269,7 +282,7 @@ impl<H: SupervisedAudioHost> AudioSupervisor<H> {
         if !allow_start || self.attempt.is_some() || now < self.retry_at {
             return;
         }
-        self.start_attempt(candidate, profile, invocations);
+        self.start_attempt(candidate, profile, invocations, admission);
     }
 
     fn start_attempt(
@@ -277,6 +290,7 @@ impl<H: SupervisedAudioHost> AudioSupervisor<H> {
         candidate: &UsbDeviceCandidate,
         profile: &MixerProfile,
         invocations: &HostServiceInvocations,
+        admission: &mut dyn FnMut(&UsbDeviceCandidate) -> Result<(), LinuxAudioError>,
     ) {
         let now = Instant::now();
         let Ok(epoch) = ClockAttemptEpoch::try_new(self.next_epoch) else {
@@ -300,7 +314,7 @@ impl<H: SupervisedAudioHost> AudioSupervisor<H> {
         let mut attempt =
             RunningAttempt { candidate: candidate.clone(), lifecycle: AudioLifecycle::new(), host };
         self.meter_frame = None;
-        match attempt.lifecycle.start(&mut attempt.host, Some(candidate)) {
+        match attempt.lifecycle.start(&mut attempt.host, Some(candidate), admission) {
             Ok(()) => {
                 self.next_reconcile = Instant::now() + RECONCILE_INTERVAL;
                 self.invocations = Some(invocations.clone());
@@ -357,4 +371,4 @@ fn host_failure_reason(error: &LinuxAudioError) -> MixerInactiveReason {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

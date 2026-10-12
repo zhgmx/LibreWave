@@ -73,20 +73,6 @@ trait GraphRuntime {
     fn teardown(&mut self) -> Result<(), LinuxAudioError>;
 }
 
-trait AdmissionGate {
-    fn admit(&mut self, candidate: &UsbDeviceCandidate) -> Result<(), LinuxAudioError>;
-}
-
-struct ReadOnlyAdmission;
-
-impl AdmissionGate for ReadOnlyAdmission {
-    fn admit(&mut self, candidate: &UsbDeviceCandidate) -> Result<(), LinuxAudioError> {
-        crate::probe_wave3_usb(candidate)
-            .map(|_| ())
-            .map_err(|error| LinuxAudioError::DeviceAdmission(crate::admission_error(error)))
-    }
-}
-
 trait GraphFactory {
     fn activate(
         &mut self,
@@ -241,7 +227,6 @@ pub struct ComposedAudioHost {
     pipewire: Box<dyn PipeWireFacade>,
     alsa: Box<dyn AlsaFacade>,
     graph_factory: Box<dyn GraphFactory>,
-    admission: Box<dyn AdmissionGate>,
     policy: AudioAttemptPolicy,
     profile: MixerProfile,
     selected: Option<SelectedPcmCard>,
@@ -293,7 +278,8 @@ impl ComposedAudioHost {
     }
 
     /// Constructs an inert host. Only [`crate::audio_lifecycle::AudioLifecycle::start`]
-    /// can start its physical attempt.
+    /// can start its physical attempt. Each capture start requires the lifecycle's
+    /// fresh, borrowed control-owner admission; this host never opens USB.
     #[must_use]
     #[allow(
         clippy::large_types_passed_by_value,
@@ -307,7 +293,6 @@ impl ComposedAudioHost {
             Box::new(RealPipeWireFacade::default()),
             Box::new(RealAlsaFacade::new(physical)),
             Box::new(RealGraphFactory),
-            Box::new(ReadOnlyAdmission),
         )
     }
 
@@ -321,13 +306,11 @@ impl ComposedAudioHost {
         pipewire: Box<dyn PipeWireFacade>,
         alsa: Box<dyn AlsaFacade>,
         graph_factory: Box<dyn GraphFactory>,
-        admission: Box<dyn AdmissionGate>,
     ) -> Self {
         Self {
             pipewire,
             alsa,
             graph_factory,
-            admission,
             policy,
             profile,
             selected: None,
@@ -542,9 +525,9 @@ impl AudioHost for ComposedAudioHost {
 
     fn start_capture(
         &mut self,
-        candidate: &UsbDeviceCandidate,
+        admission: crate::audio_lifecycle::AudioAdmission<'_>,
     ) -> Result<CaptureConsumption, Self::Error> {
-        self.admission.admit(candidate)?;
+        let candidate = admission.candidate();
         let parts = ClockBridgeParts::new(self.policy.physical, &self.profile, self.policy.bridge)
             .map_err(|error| attempt_error("bridge construction", error))?;
         let selected = self.alsa.select(candidate)?;
@@ -848,21 +831,10 @@ pub(in crate::audio_host) mod tests {
 
     struct FakePipeWire(Calls);
 
-    struct FakeAdmission(Calls);
-
-    impl AdmissionGate for FakeAdmission {
-        fn admit(&mut self, _candidate: &UsbDeviceCandidate) -> Result<(), LinuxAudioError> {
-            record(&self.0, "read-only admission");
+    fn admit(calls: &Calls) -> impl FnMut(&UsbDeviceCandidate) -> Result<(), LinuxAudioError> + '_ {
+        |_| {
+            record(calls, "read-only admission");
             Ok(())
-        }
-    }
-
-    struct DenyingAdmission(Calls, librewave_core::AdmissionError);
-
-    impl AdmissionGate for DenyingAdmission {
-        fn admit(&mut self, _candidate: &UsbDeviceCandidate) -> Result<(), LinuxAudioError> {
-            record(&self.0, "read-only admission rejected");
-            Err(LinuxAudioError::DeviceAdmission(self.1.clone()))
         }
     }
 
@@ -1077,7 +1049,6 @@ pub(in crate::audio_host) mod tests {
             Box::new(FakePipeWire(Arc::clone(calls))),
             Box::new(FakeAlsa { calls: Arc::clone(calls), physical, mode }),
             Box::new(FailingGraph(Arc::clone(calls))),
-            Box::new(FakeAdmission(Arc::clone(calls))),
         )
     }
 
@@ -1094,10 +1065,9 @@ pub(in crate::audio_host) mod tests {
             Box::new(FakePipeWire(Arc::clone(&calls))),
             Box::new(FakeAlsa { calls: Arc::clone(&calls), physical, mode: CaptureMode::Nominal }),
             Box::new(RealGraphFactory),
-            Box::new(FakeAdmission(Arc::clone(&calls))),
         );
         let mut lifecycle = crate::audio_lifecycle::AudioLifecycle::new();
-        let result = lifecycle.start(&mut host, Some(&candidate()));
+        let result = lifecycle.start(&mut host, Some(&candidate()), &mut admit(&calls));
         assert!(result.is_ok(), "private composition startup failed: {result:?}");
         assert_eq!(lifecycle.state(), crate::audio_lifecycle::LifecycleState::Ready);
         for _ in 0..8 {
@@ -1106,7 +1076,7 @@ pub(in crate::audio_host) mod tests {
         assert_eq!(host.resource_state().published_endpoints, DELIBERATE_ENDPOINTS);
         assert!(calls.lock().expect("calls").contains(&"start playback"));
         lifecycle
-            .recover_after_host_restart(&mut host, Some(&candidate()))
+            .recover_after_host_restart(&mut host, Some(&candidate()), &mut admit(&calls))
             .expect("rebuild composed attempt after host restart");
         for _ in 0..8 {
             host.poll().expect("recovered composition progress");
@@ -1183,7 +1153,7 @@ pub(in crate::audio_host) mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mut host = host(CaptureMode::ImmediateFault, &calls);
         let mut lifecycle = crate::audio_lifecycle::AudioLifecycle::new();
-        assert!(lifecycle.start(&mut host, Some(&candidate())).is_err());
+        assert!(lifecycle.start(&mut host, Some(&candidate()), &mut admit(&calls)).is_err());
         assert_eq!(
             *calls.lock().expect("calls"),
             [
@@ -1222,11 +1192,14 @@ pub(in crate::audio_host) mod tests {
                     mode: CaptureMode::Nominal,
                 }),
                 Box::new(FailingGraph(Arc::clone(&calls))),
-                Box::new(DenyingAdmission(Arc::clone(&calls), error.clone())),
             );
             let mut lifecycle = crate::audio_lifecycle::AudioLifecycle::new();
-            assert!(matches!(lifecycle.start(&mut host, Some(&candidate())),
-            Err(crate::audio_lifecycle::LifecycleError::Host { source: LinuxAudioError::DeviceAdmission(observed), .. }) if observed == error));
+            let mut rejected = |_: &UsbDeviceCandidate| {
+                record(&calls, "read-only admission rejected");
+                Err(LinuxAudioError::DeviceAdmission(error.clone()))
+            };
+            assert!(matches!(lifecycle.start(&mut host, Some(&candidate()), &mut rejected),
+            Err(crate::audio_lifecycle::LifecycleError::Host { state: crate::audio_lifecycle::DegradedState::DeviceAdmissionFailed, source: LinuxAudioError::DeviceAdmission(observed) }) if observed == error));
             assert_eq!(
                 *calls.lock().expect("calls"),
                 ["verify hidden", "read-only admission rejected", "disconnect PipeWire",]
@@ -1239,7 +1212,7 @@ pub(in crate::audio_host) mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mut host = host(CaptureMode::PrimeThenWait, &calls);
         let mut lifecycle = crate::audio_lifecycle::AudioLifecycle::new();
-        assert!(lifecycle.start(&mut host, Some(&candidate())).is_err());
+        assert!(lifecycle.start(&mut host, Some(&candidate()), &mut admit(&calls)).is_err());
         assert_eq!(
             *calls.lock().expect("calls"),
             [

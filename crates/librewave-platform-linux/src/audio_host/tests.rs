@@ -278,7 +278,9 @@ fn production_host_refuses_before_alsa_until_graph_composition_exists() {
         FakePipeWire { calls: Arc::clone(&calls), connected: false, fail_disconnect: false };
     let mut host = LinuxAudioHost::with_facade(Box::new(pipewire));
     let mut lifecycle = AudioLifecycle::new();
-    let error = lifecycle.start(&mut host, Some(&candidate())).expect_err("Stage 2 is not ready");
+    let error = lifecycle
+        .start(&mut host, Some(&candidate()), &mut |_| Ok(()))
+        .expect_err("Stage 2 is not ready");
     assert!(matches!(
         error,
         LifecycleError::Host {

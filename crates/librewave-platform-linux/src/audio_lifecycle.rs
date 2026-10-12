@@ -53,6 +53,28 @@ pub struct CaptureObservation {
     pub frames_consumed: u64,
 }
 
+/// A fresh admission for one capture-start boundary.
+///
+/// Only the lifecycle can create this context, after the borrowed control-owner
+/// gate succeeds. It cannot be cloned or constructed from cached client state.
+///
+/// ```compile_fail
+/// use librewave_platform_linux::{UsbDeviceCandidate, audio_lifecycle::AudioAdmission};
+/// fn bypass(candidate: &UsbDeviceCandidate) -> AudioAdmission<'_> {
+///     AudioAdmission { candidate }
+/// }
+/// ```
+pub struct AudioAdmission<'a> {
+    candidate: &'a UsbDeviceCandidate,
+}
+impl<'a> AudioAdmission<'a> {
+    /// Returns the exact candidate validated at this attempt boundary.
+    #[must_use]
+    pub const fn candidate(&self) -> &'a UsbDeviceCandidate {
+        self.candidate
+    }
+}
+
 /// A host operation used by the lifecycle state machine.
 ///
 /// Implementations own all host mutation. The Linux implementation opens only
@@ -80,7 +102,7 @@ pub trait AudioHost {
     /// Returns the host-specific error when capture cannot start.
     fn start_capture(
         &mut self,
-        candidate: &UsbDeviceCandidate,
+        admission: AudioAdmission<'_>,
     ) -> Result<CaptureConsumption, Self::Error>;
 
     /// Observes whether physical capture is active and making progress.
@@ -138,6 +160,8 @@ pub trait AudioHost {
 pub enum DegradedState {
     /// No admitted device was detected.
     NoAdmittedDevice,
+    /// The control owner could not freshly admit this exact candidate.
+    DeviceAdmissionFailed,
     /// The admitted device has no usable physical ALSA card.
     PhysicalDeviceUnavailable,
     /// Raw physical nodes are exposed as ordinary desktop endpoints.
@@ -221,6 +245,10 @@ impl AudioLifecycle {
 
     /// Runs the one normal capture-first startup path.
     ///
+    /// The borrowed admission gate must validate the exact current candidate
+    /// through its control owner. It runs on every attempt after physical-node
+    /// verification and before capture opens. No validation result is retained.
+    ///
     /// # Errors
     ///
     /// Returns [`LifecycleError::Unavailable`] when no usable admitted device
@@ -229,6 +257,7 @@ impl AudioLifecycle {
         &mut self,
         host: &mut H,
         candidate: Option<&UsbDeviceCandidate>,
+        admission: &mut dyn FnMut(&UsbDeviceCandidate) -> Result<(), H::Error>,
     ) -> Result<(), LifecycleError<H::Error>> {
         if !self.cleanup_complete {
             return Err(LifecycleError::AlreadyActive);
@@ -249,7 +278,10 @@ impl AudioLifecycle {
         self.run_host_step(host, DegradedState::PhysicalNodesExposed, |host| {
             host.verify_physical_nodes_hidden(candidate, &HIDDEN_PHYSICAL_NODES)
         })?;
-        let capture = match host.start_capture(candidate) {
+        if let Err(source) = admission(candidate) {
+            return self.host_failure(host, DegradedState::DeviceAdmissionFailed, source);
+        }
+        let capture = match host.start_capture(AudioAdmission { candidate }) {
             Ok(capture) => capture,
             Err(source) => {
                 return self.host_failure(host, DegradedState::CaptureStartFailed, source);
@@ -314,12 +346,13 @@ impl AudioLifecycle {
         &mut self,
         host: &mut H,
         candidate: Option<&UsbDeviceCandidate>,
+        admission: &mut dyn FnMut(&UsbDeviceCandidate) -> Result<(), H::Error>,
     ) -> Result<(), LifecycleError<H::Error>> {
         if !self.cleanup_complete {
             self.teardown(host)?;
         }
         self.state = LifecycleState::Degraded(DegradedState::HostRestarted);
-        self.start(host, candidate)
+        self.start(host, candidate, admission)
     }
 
     /// Handles device removal and leaves the lifecycle waiting for a new
@@ -469,7 +502,7 @@ mod tests {
 
         fn start_capture(
             &mut self,
-            _candidate: &UsbDeviceCandidate,
+            _admission: AudioAdmission<'_>,
         ) -> Result<CaptureConsumption, Self::Error> {
             self.call(Operation::StartCapture)?;
             Ok(CaptureConsumption::new())
@@ -539,7 +572,7 @@ mod tests {
     fn happy_path_is_capture_first_and_publishes_only_deliberate_endpoints() {
         let mut lifecycle = AudioLifecycle::new();
         let mut host = FakeHost::default();
-        lifecycle.start(&mut host, Some(&candidate())).expect("startup succeeds");
+        lifecycle.start(&mut host, Some(&candidate()), &mut |_| Ok(())).expect("startup succeeds");
         assert_eq!(lifecycle.state(), LifecycleState::Ready);
         assert_eq!(host.calls, STARTUP_OPERATIONS);
     }
@@ -557,7 +590,7 @@ mod tests {
         for (operation, state) in expected {
             let mut lifecycle = AudioLifecycle::new();
             let mut host = FakeHost { fail_at: Some(operation), ..FakeHost::default() };
-            let result = lifecycle.start(&mut host, Some(&candidate()));
+            let result = lifecycle.start(&mut host, Some(&candidate()), &mut |_| Ok(()));
             assert!(
                 matches!(result, Err(LifecycleError::Host { state: actual, .. }) if actual == state)
             );
@@ -574,7 +607,7 @@ mod tests {
         ] {
             let mut lifecycle = AudioLifecycle::new();
             let mut host = FakeHost { capture_observation: observation, ..FakeHost::default() };
-            let result = lifecycle.start(&mut host, Some(&candidate()));
+            let result = lifecycle.start(&mut host, Some(&candidate()), &mut |_| Ok(()));
             assert!(matches!(
                 result,
                 Err(LifecycleError::Unavailable(DegradedState::CaptureNotConfirmed))
@@ -588,7 +621,7 @@ mod tests {
     fn absent_or_unusable_device_does_not_touch_the_host() {
         let mut lifecycle = AudioLifecycle::new();
         let mut host = FakeHost::default();
-        let result = lifecycle.start(&mut host, None);
+        let result = lifecycle.start(&mut host, None, &mut |_| Ok(()));
         assert!(matches!(
             result,
             Err(LifecycleError::Unavailable(DegradedState::NoAdmittedDevice))
@@ -596,7 +629,7 @@ mod tests {
         assert!(host.calls.is_empty());
 
         let no_alsa = UsbDeviceCandidate { alsa_cards: Vec::new(), ..candidate() };
-        let result = lifecycle.start(&mut host, Some(&no_alsa));
+        let result = lifecycle.start(&mut host, Some(&no_alsa), &mut |_| Ok(()));
         assert!(matches!(
             result,
             Err(LifecycleError::Unavailable(DegradedState::PhysicalDeviceUnavailable))
@@ -605,11 +638,46 @@ mod tests {
     }
 
     #[test]
+    fn startup_and_recovery_require_new_admission_before_capture() {
+        let mut lifecycle = AudioLifecycle::new();
+        let mut host = FakeHost::default();
+        let device = candidate();
+        let reads = std::cell::Cell::new(0);
+        let reject = std::cell::Cell::new(false);
+        let mut admission = |current: &UsbDeviceCandidate| {
+            assert_eq!(current, &device);
+            reads.set(reads.get() + 1);
+            if reject.get() { Err(FakeError(Operation::StartCapture)) } else { Ok(()) }
+        };
+        lifecycle.start(&mut host, Some(&device), &mut admission).expect("admitted startup");
+        assert_eq!(reads.get(), 1);
+        assert!(matches!(
+            lifecycle.start(&mut host, Some(&device), &mut admission),
+            Err(LifecycleError::AlreadyActive)
+        ));
+        assert_eq!(reads.get(), 1, "repeated active startup cannot touch admission");
+        host.calls.clear();
+        reject.set(true);
+        assert!(matches!(
+            lifecycle.recover_after_host_restart(&mut host, Some(&device), &mut admission),
+            Err(LifecycleError::Host { state: DegradedState::DeviceAdmissionFailed, .. })
+        ));
+        assert_eq!(reads.get(), 2);
+        assert_eq!(
+            host.calls,
+            [Operation::Teardown, Operation::VerifyPhysicalNodesHidden, Operation::Teardown]
+        );
+        reject.set(false);
+        lifecycle.start(&mut host, Some(&device), &mut admission).expect("new admitted attempt");
+        assert_eq!(reads.get(), 3);
+    }
+
+    #[test]
     fn teardown_is_idempotent_and_recovery_reuses_the_same_order() {
         let mut lifecycle = AudioLifecycle::new();
         let mut host = FakeHost::default();
         let device = candidate();
-        lifecycle.start(&mut host, Some(&device)).expect("startup succeeds");
+        lifecycle.start(&mut host, Some(&device), &mut |_| Ok(())).expect("startup succeeds");
         lifecycle.teardown(&mut host).expect("teardown succeeds");
         lifecycle.teardown(&mut host).expect("repeated teardown succeeds");
         assert_eq!(
@@ -630,7 +698,9 @@ mod tests {
         );
 
         host.calls.clear();
-        lifecycle.recover_after_host_restart(&mut host, Some(&device)).expect("recovery succeeds");
+        lifecycle
+            .recover_after_host_restart(&mut host, Some(&device), &mut |_| Ok(()))
+            .expect("recovery succeeds");
         assert_eq!(lifecycle.state(), LifecycleState::Ready);
         assert_eq!(host.calls, STARTUP_OPERATIONS);
     }
@@ -640,13 +710,13 @@ mod tests {
         let mut lifecycle = AudioLifecycle::new();
         let mut host = FakeHost::default();
         let device = candidate();
-        lifecycle.start(&mut host, Some(&device)).expect("startup succeeds");
+        lifecycle.start(&mut host, Some(&device), &mut |_| Ok(())).expect("startup succeeds");
         lifecycle.handle_device_disconnect(&mut host).expect("disconnect succeeds");
         assert_eq!(lifecycle.state(), LifecycleState::Degraded(DegradedState::DeviceDisconnected));
         let calls = host.calls.len();
         lifecycle.handle_device_disconnect(&mut host).expect("repeated disconnect succeeds");
         assert_eq!(host.calls.len(), calls);
-        lifecycle.start(&mut host, Some(&device)).expect("reconnect succeeds");
+        lifecycle.start(&mut host, Some(&device), &mut |_| Ok(())).expect("reconnect succeeds");
         assert_eq!(lifecycle.state(), LifecycleState::Ready);
     }
 
@@ -658,7 +728,9 @@ mod tests {
             fail_cleanup: true,
             ..FakeHost::default()
         };
-        let error = lifecycle.start(&mut host, Some(&candidate())).expect_err("startup fails");
+        let error = lifecycle
+            .start(&mut host, Some(&candidate()), &mut |_| Ok(()))
+            .expect_err("startup fails");
         assert_eq!(
             error,
             LifecycleError::Cleanup {
@@ -685,7 +757,9 @@ mod tests {
             capture_observation: CaptureObservation { active: false, frames_consumed: 1 },
             ..FakeHost::default()
         };
-        let error = lifecycle.start(&mut host, Some(&candidate())).expect_err("startup fails");
+        let error = lifecycle
+            .start(&mut host, Some(&candidate()), &mut |_| Ok(()))
+            .expect_err("startup fails");
         assert_eq!(
             error,
             LifecycleError::Cleanup {

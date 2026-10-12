@@ -364,7 +364,7 @@ impl AudioHost for LinuxAudioHost {
 
     fn start_capture(
         &mut self,
-        _candidate: &UsbDeviceCandidate,
+        _admission: crate::audio_lifecycle::AudioAdmission<'_>,
     ) -> Result<CaptureConsumption, Self::Error> {
         self.not_ready = Some(GraphNotReady::EndpointStreamTransportUnavailable);
         Err(LinuxAudioError::EndpointStreamTransportUnavailable)

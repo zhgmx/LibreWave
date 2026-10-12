@@ -65,6 +65,19 @@ The daemon keeps one admitted Linux USB connection for each managed Wave:3. `lib
 
 Host-service observations run on one read-only probe worker. The daemon collects completed results without waiting for that worker. Before the first result, service state is `not probed`. Each probe command has a 100 ms deadline and a 32 KiB limit for each output pipe. Timeout or cancellation terminates the probe process group and reaps the child. A failed status probe reports unavailable service state. A failed invocation probe reports no invocation identity.
 
+Audio startup and recovery borrow the daemon's control owner for admission.
+After checking that physical PipeWire nodes are hidden, each attempt reconciles
+the exact inventory candidate and reads its complete configuration through the
+retained claimed USB handle. If no connection exists, the daemon opens and
+admits one through the same connection factory used by observation. A stale
+candidate or failed read stops the attempt before any PCM opens.
+
+The lifecycle creates a non-cloneable `AudioAdmission` context only after this
+fresh check succeeds. Capture startup consumes that context. The audio backend
+has no USB reader or handle and cannot release the daemon's control claim.
+No admission result is cached for a later attempt. Configuration changes found
+at this boundary update the normal device generation before IPC resumes.
+
 An unchanged configuration read does not advance the snapshot generation or device generation. A changed read replaces the portable observed configuration, advances the device generation, and records `Device` as the origin. The read does not send a hardware write or change sparse desired state. A malformed read drops the retained connection and reports a failed admission. A disconnect also drops the connection and reports the device as disconnected.
 
 A persistence-ambiguous connection stays retained and write-locked while configuration reads continue. A connection locked by failed or unverified restoration needs a new admission probe. Inspection drops that connection and uses the normal reopen, admission, and reconciliation path.

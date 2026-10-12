@@ -2044,3 +2044,6 @@ fn audio_access_reports_retained_read_and_initial_admission_failures_without_tak
         assert_eq!(*h.saves.borrow(), 0);
     }
 }
+
+#[path = "manager/admission_tests.rs"]
+mod audio_admission;
