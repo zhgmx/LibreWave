@@ -281,6 +281,11 @@ Setup never changes Gain Lock. Uninstall and unmanage do not restore a saved Gai
 
 Development installations support only the current manifest, configuration, and IPC formats. The lifecycle refuses an unknown manifest or journal schema. Remove an incompatible pre-release installation explicitly before the next setup.
 
+Run `librewaved --check-config` to validate profiles without starting a service,
+opening hardware, recovering a pending write, or changing files. Experimental
+start invokes this check through the verified installed daemon before its first
+service or desktop change. An error names the incompatible profile path.
+
 The current mixer file uses schema 2. It includes software output controls.
 The daemon rejects schema 1 without changing the file. Setup preserves profiles
 and does not convert them. Before replacing old development state, stop the

@@ -1342,7 +1342,7 @@ fn controls_to_restore(
     controls
 }
 
-fn profile_state_path(file_name: &str) -> Result<PathBuf, PersistenceError> {
+pub(crate) fn profile_state_path(file_name: &str) -> Result<PathBuf, PersistenceError> {
     if let Some(config) = std::env::var_os("XDG_CONFIG_HOME") {
         return Ok(PathBuf::from(config).join("librewave/profiles").join(file_name));
     }
@@ -1355,7 +1355,7 @@ fn profile_state_path(file_name: &str) -> Result<PathBuf, PersistenceError> {
     Ok(PathBuf::from(home).join(".config/librewave/profiles").join(file_name))
 }
 
-fn validate_desired_state(state: &DesiredState) -> Result<(), PersistenceError> {
+pub(crate) fn validate_desired_state(state: &DesiredState) -> Result<(), PersistenceError> {
     for (topology, device) in state.devices() {
         librewave_platform_linux::validate_usb_topology(topology).map_err(|error| {
             PersistenceError::InvalidState(format!(

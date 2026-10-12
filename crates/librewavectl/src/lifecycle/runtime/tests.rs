@@ -68,6 +68,9 @@ impl Host {
     }
 }
 impl RuntimeHost for Host {
+    fn check_config(&mut self, _: &Manifest, _: &Path) -> io::Result<()> {
+        self.event("check profiles")
+    }
     fn verify_ipc_released(&mut self) -> io::Result<()> {
         if self.stale_socket { Err(io::Error::other("stale daemon socket")) } else { Ok(()) }
     }
@@ -605,4 +608,48 @@ fn doctor_checks_the_recorded_runtime_and_reports_modified_ownership_files() {
             .iter()
             .any(|check| check.state == super::super::engine::CheckState::Fail)
     );
+}
+
+#[test]
+fn incompatible_profiles_fail_before_service_or_desktop_mutation() {
+    let (_fixture, paths, fragment) = fixture();
+    let mut host = Host::new();
+    let prior = host.defaults.clone();
+    host.failure = Some("check profiles".into());
+    assert!(start(&paths, Some(&fragment), &mut host).is_err());
+    assert_eq!(host.events, ["check profiles"]);
+    assert_eq!(host.defaults, prior);
+    assert!(!host.active);
+    restored(&paths, &fragment, &host);
+}
+
+#[test]
+fn existing_access_start_still_checks_access_and_restores_after_failure() {
+    let (fixture, paths, fragment) = fixture();
+    let mut installer = fixture.lifecycle();
+    installer.uninstall(false).unwrap();
+    installer
+        .setup(&super::super::engine::InstallRequest {
+            device_access: crate::lifecycle::model::DeviceAccess::Existing,
+            identity: fixture.identity("existing"),
+            cli_source: &fixture.cli,
+            daemon_source: &fixture.daemon,
+        })
+        .unwrap();
+    let mut host = Host::new();
+    host.access_fails = true;
+    let prior = host.defaults.clone();
+    assert!(start(&paths, Some(&fragment), &mut host).is_err());
+    assert!(host.events.iter().any(|e| e == "request CheckAudioAccess"));
+    assert!(
+        !host.events.iter().any(|e| e == "service RestartWirePlumber" || e == "request StartAudio")
+    );
+    assert_eq!(host.defaults, prior);
+    assert!(!host.active);
+    restored(&paths, &fragment, &host);
+    host.access_fails = false;
+    start(&paths, Some(&fragment), &mut host).unwrap();
+    stop(&paths, &mut host).unwrap();
+    assert_eq!(host.defaults, prior);
+    restored(&paths, &fragment, &host);
 }

@@ -271,26 +271,7 @@ impl FileMixerStateStore {
 
 impl MixerStateStore for FileMixerStateStore {
     fn load(&mut self) -> Result<MixerProfile, PersistenceError> {
-        let Some(value): Option<serde_json::Value> = load_json(&self.path)? else {
-            return Ok(MixerProfile::default());
-        };
-        let schema = value
-            .get("schema")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|v| u16::try_from(v).ok())
-            .ok_or_else(|| {
-                PersistenceError::InvalidState("mixer state has no valid schema".into())
-            })?;
-        if schema != MIXER_STATE_SCHEMA {
-            return Err(PersistenceError::UnsupportedSchema(schema));
-        }
-        let file: MixerStateFile =
-            serde_json::from_value(value).map_err(PersistenceError::Invalid)?;
-        let profile = MixerProfile::from(file);
-        profile.validate().map_err(|error| {
-            PersistenceError::InvalidState(format!("mixer state is invalid: {error}"))
-        })?;
-        Ok(profile)
+        decode_mixer_state(load_json(&self.path)?)
     }
 
     fn save(&mut self, profile: &MixerProfile) -> Result<(), PersistenceError> {
@@ -301,8 +282,62 @@ impl MixerStateStore for FileMixerStateStore {
     }
 }
 
+fn decode_mixer_state(value: Option<serde_json::Value>) -> Result<MixerProfile, PersistenceError> {
+    let Some(value): Option<serde_json::Value> = value else {
+        return Ok(MixerProfile::default());
+    };
+    let schema = value
+        .get("schema")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| u16::try_from(v).ok())
+        .ok_or_else(|| PersistenceError::InvalidState("mixer state has no valid schema".into()))?;
+    if schema != MIXER_STATE_SCHEMA {
+        return Err(PersistenceError::UnsupportedSchema(schema));
+    }
+    let file: MixerStateFile = serde_json::from_value(value).map_err(PersistenceError::Invalid)?;
+    let profile = MixerProfile::from(file);
+    profile.validate().map_err(|error| {
+        PersistenceError::InvalidState(format!("mixer state is invalid: {error}"))
+    })?;
+    Ok(profile)
+}
+
+/// Validates persisted profiles without recovery, writes, or device access.
+pub(crate) fn check_profiles(root: &Path) -> Result<(), PersistenceError> {
+    let device = root.join("device-state.json");
+    let mixer = root.join("mixer-state.json");
+    let audio = root.join("audio-state.json");
+    for path in [&device, &mixer, &audio] {
+        match fs::symlink_metadata(pending_path(path)) {
+            Ok(metadata) => validate_metadata(&pending_path(path), &metadata)
+                .map_err(|e| profile_error(path, &PersistenceError::Io(e)))?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let state: DesiredState =
+        read_json(&device).map_err(|e| profile_error(&device, &e))?.unwrap_or_default();
+    if state.schema != DESIRED_STATE_SCHEMA {
+        return Err(profile_error(&device, &PersistenceError::UnsupportedSchema(state.schema)));
+    }
+    crate::manager::validate_desired_state(&state).map_err(|e| profile_error(&device, &e))?;
+    decode_mixer_state(read_json(&mixer).map_err(|e| profile_error(&mixer, &e))?)
+        .map_err(|e| profile_error(&mixer, &e))?;
+    let state: crate::audio_session::AudioSession =
+        read_json(&audio).map_err(|e| profile_error(&audio, &e))?.unwrap_or_default();
+    state.validate().map_err(|e| profile_error(&audio, &e))
+}
+
+fn profile_error(path: &Path, error: &PersistenceError) -> PersistenceError {
+    PersistenceError::InvalidState(format!("{}: {error}", path.display()))
+}
+
 pub(super) fn load_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, PersistenceError> {
     recover_pending(path)?;
+    read_json(path)
+}
+
+fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, PersistenceError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -449,6 +484,61 @@ mod tests {
     use serde_json::json;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn profile_check_preserves_missing_current_old_and_pending_state() {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos();
+        let root = std::env::temp_dir().join(format!("librewave-config-check-{nonce}"));
+        check_profiles(&root).expect("missing profiles use defaults");
+        assert!(!root.exists(), "validation must not create a directory");
+        let path = root.join("mixer-state.json");
+        let mut store = FileMixerStateStore::new(path.clone());
+        store.save(&MixerProfile::default()).expect("fixture");
+        let current = fs::read(&path).expect("read fixture");
+        let mode = fs::metadata(&path).expect("metadata").mode();
+        check_profiles(&root).expect("current schema");
+        assert_eq!(fs::read(&path).expect("read"), current);
+        assert_eq!(fs::metadata(&path).expect("metadata").mode(), mode);
+        let mut old: serde_json::Value = serde_json::from_slice(&current).expect("json");
+        old["schema"] = json!(1);
+        old.as_object_mut().expect("object").remove("outputs");
+        let original = serde_json::to_vec(&old).expect("json");
+        fs::write(&path, &original).expect("old fixture");
+        let error = check_profiles(&root).expect_err("old schema must be explicit").to_string();
+        assert!(error.contains("mixer-state.json") && error.contains("schema 1"));
+        assert_eq!(fs::read(&path).expect("preserved"), original);
+        fs::write(&path, &current).expect("current fixture");
+        let pending = pending_path(&path);
+        fs::write(&pending, b"interrupted write").expect("pending fixture");
+        fs::set_permissions(&pending, fs::Permissions::from_mode(0o600)).expect("private pending");
+        check_profiles(&root).expect("validate committed state without recovering pending write");
+        assert_eq!(fs::read(&pending).expect("preserved pending"), b"interrupted write");
+        assert_eq!(fs::read(&path).expect("preserved"), current);
+        fs::set_permissions(&pending, fs::Permissions::from_mode(0o644)).expect("unsafe fixture");
+        assert!(check_profiles(&root).is_err());
+        assert_eq!(fs::read(&pending).expect("preserved unsafe pending"), b"interrupted write");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn profile_check_uses_startup_hardware_intent_and_audio_validators() {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos();
+        let root = std::env::temp_dir().join(format!("librewave-config-invalid-{nonce}"));
+        let path = root.join("device-state.json");
+        let mut store = FileDesiredStateStore::new(path.clone());
+        let mut desired = DesiredState::default();
+        desired.stage("invalid-topology".into(), Wave3Control::Clipguard(true)).expect("fixture");
+        store.save(&desired).expect("fixture");
+        let error = check_profiles(&root).expect_err("invalid topology").to_string();
+        assert!(error.contains("device-state.json") && error.contains("topology"));
+        fs::remove_file(path).expect("remove fixture");
+        let audio = root.join("audio-state.json");
+        save_json(&audio, &json!({"schema":1,"enabled":false,"selected":true,"defaults":null}))
+            .expect("fixture");
+        let error = check_profiles(&root).expect_err("invalid audio intent").to_string();
+        assert!(error.contains("audio-state.json") && error.contains("restoration baseline"));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
 
     #[test]
     fn file_store_round_trips_only_the_current_strict_schema() {

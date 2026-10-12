@@ -45,6 +45,7 @@ struct RuntimeManifest {
 }
 
 pub(super) trait RuntimeHost {
+    fn check_config(&mut self, manifest: &Manifest, config_root: &Path) -> io::Result<()>;
     fn unit(&mut self) -> io::Result<UnitState>;
     fn verify_process(&mut self, manifest: &Manifest, running: bool) -> io::Result<()>;
     fn verify_ipc_released(&mut self) -> io::Result<()>;
@@ -60,6 +61,23 @@ pub(super) trait RuntimeHost {
 
 struct ProductionHost;
 impl RuntimeHost for ProductionHost {
+    fn check_config(&mut self, manifest: &Manifest, config_root: &Path) -> io::Result<()> {
+        let result =
+            std::process::Command::new(manifest.active_build_directory.join("bin/librewaved"))
+                .arg("--check-config")
+                .env("XDG_CONFIG_HOME", config_root)
+                .output()?;
+        if !result.status.success() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "profile validation failed before startup: {}",
+                    String::from_utf8_lossy(&result.stderr).trim()
+                ),
+            ));
+        }
+        Ok(())
+    }
     fn verify_ipc_released(&mut self) -> io::Result<()> {
         if checked_exists(&configured_socket_path())? {
             return Err(io::Error::other(format!(
@@ -266,6 +284,7 @@ pub(super) fn start(
             ));
         }
     }
+    host.check_config(&manifest, &paths.config_root)?;
     let mut record = RuntimeManifest {
         schema_version: 1,
         installation: manifest.identity.stable_key(),

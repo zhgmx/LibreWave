@@ -120,3 +120,14 @@ pub fn run(socket_path: impl Into<PathBuf>) -> std::io::Result<()> {
 pub fn socket_path() -> PathBuf {
     librewave_platform_linux::ipc::configured_socket_path()
 }
+
+/// Checks the selected profile files without starting a service or opening hardware.
+///
+/// # Errors
+///
+/// Returns the exact profile path and validation error. Pending writes are preserved.
+pub fn check_config() -> Result<(), PersistenceError> {
+    let mut root = manager::profile_state_path("mixer-state.json")?;
+    root.pop();
+    persistence::check_profiles(&root)
+}
