@@ -635,6 +635,67 @@ mod tests {
 
     #[cfg(feature = "gpui-tests")]
     #[gpui::test]
+    fn microphone_dots_follow_snapshots_and_the_knob_face_is_centered_in_the_ring(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use librewave_core::VolumeSelection;
+        const DOTS: [&str; 7] = [
+            "device-level-0",
+            "device-level-1",
+            "device-level-2",
+            "device-level-3",
+            "device-level-4",
+            "device-level-5",
+            "device-level-6",
+        ];
+        let (view, cx) =
+            cx.add_window_view(|_, _| shell_with(snapshot_with_controls(DeviceWriteAccess::Ready)));
+        for selector in &DOTS[..3] {
+            assert!(cx.debug_bounds(selector).is_some());
+        }
+        assert!(cx.debug_bounds("device-level-3").is_none());
+        let ring = cx.debug_bounds("knob-ring").expect("observed ring");
+        let cap = cx.debug_bounds("knob-face").expect("foreground cap");
+        assert!(cap.top() > ring.top() && cap.bottom() < ring.bottom());
+        assert!(cap.left() > ring.left() && cap.right() < ring.right());
+        assert!((cap.center().x - ring.center().x).abs() < px(0.5));
+        assert!((cap.center().y - ring.center().y).abs() < px(0.5));
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                let mut snapshot = snapshot_with_controls(DeviceWriteAccess::Ready);
+                let librewave_core::DeviceAdmissionSnapshot::Admitted {
+                    config: Some(config), ..
+                } = &mut snapshot.devices[0].admission
+                else {
+                    panic!("loaded fixture");
+                };
+                config.input_gain.raw = 10240;
+                view.snapshot = Some(snapshot);
+                cx.notify();
+            });
+        });
+        for selector in DOTS {
+            assert!(cx.debug_bounds(selector).is_some());
+        }
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                let librewave_core::DeviceAdmissionSnapshot::Admitted {
+                    config: Some(config), ..
+                } = &mut view.snapshot.as_mut().expect("snapshot").devices[0].admission
+                else {
+                    panic!("loaded fixture");
+                };
+                config.volume_select = VolumeSelection::Headphone;
+                cx.notify();
+            });
+        });
+        for selector in DOTS {
+            assert!(cx.debug_bounds(selector).is_none());
+        }
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
     fn loaded_controls_fit_the_short_window_and_settings_remains_modal(
         cx: &mut gpui::TestAppContext,
     ) {

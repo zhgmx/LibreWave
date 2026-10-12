@@ -1,5 +1,5 @@
 //! The device stage: the microphone illustration with its hardware controls.
-use super::controls::{Tone, dot, icon_button};
+use super::controls::{Tone, dot, icon_button, tip};
 use super::device_art::{self, Glow};
 use super::theme::{
     BODY, BODY_LINE, DISPLAY, DISPLAY_LINE, FAINT, INK, MONITOR, MUTED, SPACE_SM, SPACE_XL,
@@ -7,7 +7,7 @@ use super::theme::{
 };
 use super::{Shell, TITLEBAR};
 use gpui::{Context, Div, FontWeight, IntoElement, div, img, prelude::*, px, rgb};
-use librewave_core::{Command, DeviceConnection, DeviceSnapshot, Wave3ConfigSnapshot};
+use librewave_core::{ApiVersion, Command, DeviceConnection, DeviceSnapshot, Wave3ConfigSnapshot};
 
 pub(super) const STAGE_WIDTH: f32 = 420.;
 const PADDING: f32 = 28.;
@@ -31,7 +31,8 @@ impl Shell {
         let config = device.filter(|_| connected).and_then(|device| device.admission.config());
         let art_height =
             if compact { ART_COMPACT } else { art_height_for_viewport(viewport_height) };
-        let art = artwork(config, connected, art_height);
+        let api = device.and_then(|device| device.admission.admitted_api());
+        let art = artwork(config, api, connected, art_height);
         let heading = self.stage_heading(device, config.is_some(), cx);
         let controls = self.hardware_controls(device, cx);
         let stage = div()
@@ -127,12 +128,18 @@ fn art_height_for_viewport(viewport_height: f32) -> f32 {
     (viewport_height - STAGE_FIXED).clamp(ART_MIN, ART_MAX)
 }
 
-fn artwork(config: Option<&Wave3ConfigSnapshot>, connected: bool, height: f32) -> Div {
+fn artwork(
+    config: Option<&Wave3ConfigSnapshot>,
+    api: Option<ApiVersion>,
+    connected: bool,
+    height: f32,
+) -> impl IntoElement {
     let width = height * 2. / 3.;
     // The light is centered on the capsule. Nothing clips it, so it fades out
     // over the stage and the mixer behind their panels.
     let glow = height * 2.6;
     div()
+        .id("device-artwork")
         .w(px(width))
         .h(px(height))
         .flex_shrink_0()
@@ -150,8 +157,10 @@ fn artwork(config: Option<&Wave3ConfigSnapshot>, connected: bool, height: f32) -
                 .size_full()
                 .when(!connected, |view| view.opacity(0.35))
                 .child(img(device_art::base()).size_full())
-                .children(device_art::lights(config, width)),
+                .children(device_art::lights(config, api, width))
+                .child(device_art::knob_face(width)),
         )
+        .when_some(device_art::level_hint(config, api), |view, hint| view.tooltip(tip(hint)))
 }
 
 #[cfg(test)]

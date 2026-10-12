@@ -17,7 +17,8 @@
     "source_revision": "bb60565216ad50ec233bfc0c059734506ea83c24",
     "method": "Coarse samples and binary search on the 0.5 dB grid, with rising intermediate probes approached from 0 dB. The falling boundary sequence began at 40 dB and approached lower values from above.",
     "limitations": "Counts only. Fractional cutoffs, physical positions, other APIs and modes, flip and mute behavior are not established.",
-    "documentation": "docs/protocol-evidence.md"
+    "documentation": "docs/protocol-evidence.md",
+    "edge_method": "Separate seventh-dot check at 38.0 through 40.0 dB, including three visits to 40.0 dB and falling confirmations. The operator reported fully lit counts and whether the rightmost dot was off, dim, fully lit, or blinking."
   },
   "observations": [
     {
@@ -253,6 +254,80 @@
     {
       "gain_raw": 640,
       "lit_count": 0,
+      "direction": "falling"
+    }
+  ],
+  "edge_verification": [
+    {
+      "gain_raw": 9728,
+      "fully_lit_count": 6,
+      "last_led": "off",
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 9856,
+      "fully_lit_count": 6,
+      "last_led": "off",
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 9984,
+      "fully_lit_count": 6,
+      "last_led": "off",
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 10112,
+      "fully_lit_count": 6,
+      "last_led": "off",
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 10240,
+      "fully_lit_count": 7,
+      "last_led": "fully_lit",
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 10112,
+      "fully_lit_count": 6,
+      "last_led": "off",
+      "direction": "falling"
+    },
+    {
+      "gain_raw": 9984,
+      "fully_lit_count": 6,
+      "last_led": "off",
+      "direction": "falling"
+    },
+    {
+      "gain_raw": 9856,
+      "fully_lit_count": 6,
+      "last_led": "off",
+      "direction": "falling"
+    },
+    {
+      "gain_raw": 10240,
+      "fully_lit_count": 7,
+      "last_led": "fully_lit",
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 9984,
+      "fully_lit_count": 6,
+      "last_led": "off",
+      "direction": "falling"
+    },
+    {
+      "gain_raw": 10240,
+      "fully_lit_count": 7,
+      "last_led": "fully_lit",
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 10112,
+      "fully_lit_count": 6,
+      "last_led": "off",
       "direction": "falling"
     }
   ]

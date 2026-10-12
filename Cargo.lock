@@ -3269,6 +3269,7 @@ dependencies = [
  "librewave-platform-linux",
  "librewavectl",
  "resvg",
+ "serde_json",
 ]
 
 [[package]]

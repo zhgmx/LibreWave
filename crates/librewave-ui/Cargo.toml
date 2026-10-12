@@ -25,5 +25,8 @@ image = { version = "0.25", default-features = false, optional = true }
 [build-dependencies]
 resvg = { version = "0.45", default-features = false, optional = true }
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [lints]
 workspace = true

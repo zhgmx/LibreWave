@@ -130,10 +130,14 @@
     <circle cx="534" cy="483" r="3" fill="url(#level-0)"/><circle cx="548" cy="483" r="3" fill="url(#level-1)"/><circle cx="562" cy="483" r="3" fill="url(#level-2)"/><circle cx="576" cy="483" r="3" fill="url(#level-3)"/><circle cx="589" cy="483" r="3" fill="url(#level-4)"/><circle cx="603" cy="483" r="3" fill="url(#level-5)"/><circle cx="617" cy="483" r="3" fill="url(#level-6)"/>
   </g>
   <!-- Recessed dial, polished rim, and luminous white ring. -->
-  <circle cx="576" cy="536" r="36" fill="#07090d" fill-opacity=".5"/>
+  <circle cx="576" cy="534" r="36" fill="#07090d" fill-opacity=".5"/>
   <circle cx="576" cy="534" r="32" fill="url(#metal)" stroke="#080b10" stroke-width="2"/>
   <circle cx="576" cy="534" r="30" stroke="url(#silver)" stroke-width="1.5"/>
   <circle cx="576" cy="534" r="28" stroke="url(#mute-ring)" stroke-width="2.5"/>
-  <circle cx="576" cy="534" r="26.5" fill="url(#top)" stroke="#69727f" stroke-width="1"/>
-  <path d="M555 526a22 22 0 0 1 33-10" stroke="#9aa4b0" stroke-opacity=".3" stroke-width="1"/>
+  <!-- The head-on cap shares the backlight center. The build extracts this
+       same group for the foreground layer, so the glow cannot cover the face. -->
+  <g id="knob-face">
+    <circle cx="576" cy="534" r="26.5" fill="url(#top)" stroke="#69727f" stroke-width="1"/>
+    <path d="M555 526a22 22 0 0 1 33-10" stroke="#9aa4b0" stroke-opacity=".3" stroke-width="1"/>
+  </g>
 </svg>

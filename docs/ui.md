@@ -52,11 +52,15 @@ The mode light shows the reported knob target. The ring is white when reported
 microphone mute is off and red when it is on. The light behind the
 illustration follows the ring. All lights are dark when controls are
 unavailable, the device is disconnected, or hardware LEDs are disabled.
-The seven level dots stay dark because their hardware mapping is unverified.
+The knob face is drawn in front of the ring. In Microphone mode on API 5.4,
+the level dots follow the measured gain brackets. The seventh dot lights at
+40 dB; it stays dark at 39.5 dB. Unmeasured fractional transition intervals,
+other modes and APIs, and muted or flipped patterns stay dark. Hover over the
+illustration to see when the level mapping is unverified.
 
 The daemon reads the Wave:3 configuration every 500 ms while connected.
-The mode light, mute ring, and controls follow its observed state. Polling
-never changes hardware values. Select **Read controls** to retry admission.
+The mode light, mute ring, level dots, and controls follow its observed state.
+Polling never changes hardware values. Select **Read controls** to retry admission.
 This command can also restore hardware values that LibreWave saved earlier. The application shows that caution under the button.
 After a read, the same command is the circular arrow beside the device name.
 

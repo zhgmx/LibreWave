@@ -95,7 +95,8 @@ rather than a reported segment pattern. This is an inference. A physical
 Wave:3 API 5.4 test now brackets Microphone-mode count transitions on the
 reviewed 0.5 dB write grid. Fractional thresholds, LED positions, the other
 modes, flip behavior, and effects of mute remain unverified. The application
-keeps the seven dots dark until the behavior it draws has physical evidence.
+uses the measured count brackets in Microphone mode. It leaves the dots dark
+inside unmeasured fractional transition intervals and for unverified states.
 Software audio peaks cannot substitute for this evidence.
 
 ### Observed Microphone-mode LED counts
@@ -121,6 +122,12 @@ tested boundary. At 0 dB, no level LED was lit. At 40 dB, all seven were lit.
 | 5 | 26.5 dB: 4 | 27.0 dB: 5 |
 | 6 | 32.5 dB: 5 | 33.0 dB: 6 |
 | 7 | 39.5 dB: 6 | 40.0 dB: 7 |
+
+A separate 12-observation check confirmed the last dot. At 38.0, 38.5, 39.0,
+and 39.5 dB, six dots were fully lit and the rightmost dot was off. At all
+three visits to 40.0 dB, seven dots were fully lit and the rightmost dot was
+fully lit. No dim or blinking state was reported. Gain returned to the
+approved 15.5 dB level, and every other hardware field stayed unchanged.
 
 These are transition brackets, not exact fractional thresholds. Do not infer
 the seventh transition from the spacing of the first six. The sanitized
