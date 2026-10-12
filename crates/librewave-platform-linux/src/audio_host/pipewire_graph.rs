@@ -1003,7 +1003,8 @@ mod tests {
                 .expect("integration mixer config");
                 let controls = [profile.sources[0].controls, profile.sources[1].controls];
                 let (engine, _control) =
-                    MixerEngine::new(config, &controls).expect("integration mixer controls");
+                    MixerEngine::new(config, &controls, librewave_core::OutputControls::default())
+                        .expect("integration mixer controls");
                 let samples = maximum_frames * 2;
                 Self {
                     engine,

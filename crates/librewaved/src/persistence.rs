@@ -12,7 +12,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 const DESIRED_STATE_SCHEMA: u16 = 1;
-const MIXER_STATE_SCHEMA: u16 = 1;
+const MIXER_STATE_SCHEMA: u16 = 2;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -228,6 +228,7 @@ struct MixerStateFile {
     generation: MixerGeneration,
     microphone_source: SourceId,
     sources: Vec<MixerSourceSnapshot>,
+    outputs: librewave_core::OutputControls,
 }
 
 impl From<MixerProfile> for MixerStateFile {
@@ -237,6 +238,7 @@ impl From<MixerProfile> for MixerStateFile {
             generation: profile.generation,
             microphone_source: profile.microphone_source,
             sources: profile.sources,
+            outputs: profile.outputs,
         }
     }
 }
@@ -247,6 +249,7 @@ impl From<MixerStateFile> for MixerProfile {
             generation: file.generation,
             microphone_source: file.microphone_source,
             sources: file.sources,
+            outputs: file.outputs,
         }
     }
 }
@@ -268,11 +271,21 @@ impl FileMixerStateStore {
 
 impl MixerStateStore for FileMixerStateStore {
     fn load(&mut self) -> Result<MixerProfile, PersistenceError> {
-        let file: MixerStateFile =
-            load_json(&self.path)?.unwrap_or_else(|| MixerProfile::default().into());
-        if file.schema != MIXER_STATE_SCHEMA {
-            return Err(PersistenceError::UnsupportedSchema(file.schema));
+        let Some(value): Option<serde_json::Value> = load_json(&self.path)? else {
+            return Ok(MixerProfile::default());
+        };
+        let schema = value
+            .get("schema")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u16::try_from(v).ok())
+            .ok_or_else(|| {
+                PersistenceError::InvalidState("mixer state has no valid schema".into())
+            })?;
+        if schema != MIXER_STATE_SCHEMA {
+            return Err(PersistenceError::UnsupportedSchema(schema));
         }
+        let file: MixerStateFile =
+            serde_json::from_value(value).map_err(PersistenceError::Invalid)?;
         let profile = MixerProfile::from(file);
         profile.validate().map_err(|error| {
             PersistenceError::InvalidState(format!("mixer state is invalid: {error}"))
@@ -519,7 +532,8 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "schema": 1,
+                "schema": 2,
+                "outputs": {"monitor":{"enabled":true,"fader":{"half_decibel_steps":0}},"stream":{"enabled":true,"fader":{"half_decibel_steps":0}}},
                 "generation": 0,
                 "microphone_source": 1,
                 "sources": [
@@ -566,17 +580,20 @@ mod tests {
 
         fs::write(
             &path,
-            br#"{"schema":1,"generation":0,"microphone_source":1,"sources":[],"old":true}"#,
+            br#"{"schema":2,"generation":0,"microphone_source":1,"sources":[],"outputs":{"monitor":{"enabled":true,"fader":{"half_decibel_steps":0}},"stream":{"enabled":true,"fader":{"half_decibel_steps":0}}},"old":true}"#,
         )
         .expect("write unknown field");
         assert!(matches!(store.load(), Err(PersistenceError::Invalid(_))));
 
         fs::write(
             &path,
-            br#"{"schema":1,"profile":{"generation":0,"microphone_source":1,"sources":[]}}"#,
+            br#"{"schema":2,"profile":{"generation":0,"microphone_source":1,"sources":[]}}"#,
         )
         .expect("write obsolete nested profile");
         assert!(matches!(store.load(), Err(PersistenceError::Invalid(_))));
+        fs::write(&path, br#"{"schema":1,"generation":47,"microphone_source":1,"sources":[]}"#)
+            .expect("obsolete schema fixture");
+        assert!(matches!(store.load(), Err(PersistenceError::UnsupportedSchema(1))));
         fs::remove_dir_all(root).expect("remove mixer-state fixture");
     }
 

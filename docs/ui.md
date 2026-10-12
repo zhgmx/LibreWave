@@ -95,6 +95,11 @@ input in that mix. A muted fader is grey and its button is red. Setting or
 resetting a level preserves its mute state. Levels changed while audio is
 stopped are saved.
 
+The plugs button links the two fader levels in the current window. With the
+levels linked, changing either fader sets both to the selected level in one
+daemon transaction. Each mix keeps its own mute state. Unlinking permits
+independent levels again. The link preference lasts until the window closes.
+
 An **Add input** panel follows the last strip. Stop audio before adding or
 removing an input. **Add input** creates the next free software input. The
 small close button on a software input removes it. The daemon saves each
@@ -119,9 +124,18 @@ unverified. The list identifies applications, not individual browser tabs.
 
 **Outputs** is under the inputs and has one row for each mix. A row names the
 mix and where it goes. The Monitor mix plays in the Wave:3 headphones. The
-Stream mix is a source for other applications. The destination and the level
-slider in each row are inactive because the daemon has no command for them.
-Each says so when the pointer rests on it.
+Stream mix is a source for other applications. Drag or click the horizontal
+level control to change a software output. Arrow keys change it by 0.5 dB.
+Home and End select the level limits. The speaker button mutes that output,
+and the dB button resets it to 0 dB while preserving mute. Output controls are
+saved even when audio is stopped. They do not change hardware headphone level
+or microphone gain. Destination selection remains unavailable.
+
+The CLI accepts `librewavectl mixer output <generation> monitor on -6.5`.
+Replace `monitor` with `stream` for the other output, or use `off` to mute it.
+`librewavectl mixer faders <source> <generation> -6.5 -6.5` changes both channel
+faders atomically without changing mute states. These controls passed software
+tests. Their native interaction and live audio behavior remain unverified.
 
 ## Settings
 

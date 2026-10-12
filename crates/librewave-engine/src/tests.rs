@@ -95,7 +95,7 @@ fn config(max_frames: usize) -> MixerConfig {
 }
 
 fn engine_with(initial: &[SourceControls], max_frames: usize) -> (MixerEngine, ControlStager) {
-    match MixerEngine::new(config(max_frames), initial) {
+    match MixerEngine::new(config(max_frames), initial, librewave_core::OutputControls::default()) {
         Ok(engine) => engine,
         Err(error) => panic!("test controls are invalid: {error}"),
     }
@@ -209,7 +209,12 @@ fn fader_gain_rejects_invalid_ranges_steps_and_nonfinite_values() {
 fn controls_require_each_configured_source_exactly_once() {
     let config = config(8);
     assert_eq!(
-        MixerEngine::new(config, &[default_controls()[0]]).map(|_| ()),
+        MixerEngine::new(
+            config,
+            &[default_controls()[0]],
+            librewave_core::OutputControls::default()
+        )
+        .map(|_| ()),
         Err(ControlMappingError::ControlCount { expected: 2, actual: 1 })
     );
     let unknown = SourceId::new(99);
@@ -217,14 +222,51 @@ fn controls_require_each_configured_source_exactly_once() {
         MixerEngine::new(
             config,
             &[default_controls()[0], controls(unknown, true, 0.0, true, 0.0),],
+            librewave_core::OutputControls::default()
         )
         .map(|_| ()),
         Err(ControlMappingError::UnknownSource(unknown))
     );
     assert_eq!(
-        MixerEngine::new(config, &[default_controls()[0], default_controls()[0]]).map(|_| ()),
+        MixerEngine::new(
+            config,
+            &[default_controls()[0], default_controls()[0]],
+            librewave_core::OutputControls::default()
+        )
+        .map(|_| ()),
         Err(ControlMappingError::DuplicateSource(MICROPHONE))
     );
+}
+
+#[test]
+fn output_controls_attenuate_the_complete_sum_before_clipping_and_keep_microphone_independent() {
+    use librewave_core::{MixTarget, OutputControls};
+    let initial = default_controls();
+    let (mut engine, mut stager) = engine_with(&initial, 2);
+    let outputs = OutputControls::default()
+        .with_route(
+            MixTarget::Monitor,
+            MixRoute::new(true, FaderGain::from_decibels(-6.0).expect("gain")),
+        )
+        .with_route(MixTarget::Stream, MixRoute::new(false, FaderGain::MAX));
+    stager.try_stage(&initial, outputs).expect("coherent output controls");
+    let order = [EndpointId::Microphone, EndpointId::MonitorMix, EndpointId::StreamMix];
+    let (result, data) =
+        run_two(&mut engine, 1, &[0.75, 0.75], &[0.75, 0.75], [MICROPHONE, APPLICATION], order);
+    let report = report(result);
+    assert!(report.control_update_applied());
+    assert_eq!(output(&data, order, EndpointId::Microphone), &[0.75, 0.75]);
+    assert_eq!(output(&data, order, EndpointId::StreamMix), &[0.0, 0.0]);
+    let expected = 1.5 * 10.0_f32.powf(-6.0 / 20.0);
+    for sample in output(&data, order, EndpointId::MonitorMix) {
+        assert!((*sample - expected).abs() < 1e-6);
+    }
+    assert!(
+        (report.meters().endpoint(EndpointId::MonitorMix).expect("meter").left().peak() - expected)
+            .abs()
+            < 1e-6
+    );
+    assert_eq!(report.meters().source(MICROPHONE).expect("input meter").left().peak(), 0.75);
 }
 
 #[test]
@@ -332,7 +374,7 @@ fn zero_frames_return_zero_meters_and_preserve_a_pending_update() {
         controls(APPLICATION, false, 0.0, false, 0.0),
     ];
     let (mut engine, mut stager) = engine_with(&initial, 2);
-    assert_eq!(stager.try_stage(&next), Ok(()));
+    assert_eq!(stager.try_stage(&next, librewave_core::OutputControls::default()), Ok(()));
     let order = [EndpointId::Microphone, EndpointId::MonitorMix, EndpointId::StreamMix];
     let (zero_result, zero_outputs) =
         run_two(&mut engine, 0, &[], &[], [MICROPHONE, APPLICATION], order);
@@ -341,7 +383,10 @@ fn zero_frames_return_zero_meters_and_preserve_a_pending_update() {
     assert_eq!(zero.meters().endpoint(EndpointId::Microphone), Some(StereoMeter::ZERO));
     assert_eq!(zero.meters().endpoint(EndpointId::MonitorMix), Some(StereoMeter::ZERO));
     assert!(zero_outputs.iter().all(Vec::is_empty));
-    assert_eq!(stager.try_stage(&initial), Err(StageError::Full));
+    assert_eq!(
+        stager.try_stage(&initial, librewave_core::OutputControls::default()),
+        Err(StageError::Full)
+    );
 
     let (result, data) =
         run_two(&mut engine, 1, &[0.5, -0.5], &[0.0, 0.0], [MICROPHONE, APPLICATION], order);
@@ -360,7 +405,7 @@ fn rejected_block_preserves_outputs_active_controls_and_pending_update() {
         controls(APPLICATION, false, 0.0, false, 0.0),
     ];
     let (mut engine, mut stager) = engine_with(&initial, 1);
-    assert_eq!(stager.try_stage(&next), Ok(()));
+    assert_eq!(stager.try_stage(&next, librewave_core::OutputControls::default()), Ok(()));
     let silent = [0.0; 2];
     for invalid_sample in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
         let invalid = [invalid_sample, 0.0];
@@ -382,7 +427,10 @@ fn rejected_block_preserves_outputs_active_controls_and_pending_update() {
         assert_eq!(monitor, [7.0; 2]);
         assert_eq!(stream, [7.0; 2]);
     }
-    assert_eq!(stager.try_stage(&initial), Err(StageError::Full));
+    assert_eq!(
+        stager.try_stage(&initial, librewave_core::OutputControls::default()),
+        Err(StageError::Full)
+    );
 
     let order = [EndpointId::Microphone, EndpointId::MonitorMix, EndpointId::StreamMix];
     let (result, data) =
@@ -556,15 +604,18 @@ fn handoff_is_bounded_and_applies_complete_snapshots_at_block_boundaries() {
     let second =
         [controls(MICROPHONE, false, 0.0, true, 0.0), controls(APPLICATION, true, 0.0, false, 0.0)];
     let (mut engine, mut stager) = engine_with(&initial, 1);
-    assert_eq!(stager.try_stage(&first), Ok(()));
-    assert_eq!(stager.try_stage(&second), Err(StageError::Full));
+    assert_eq!(stager.try_stage(&first, librewave_core::OutputControls::default()), Ok(()));
+    assert_eq!(
+        stager.try_stage(&second, librewave_core::OutputControls::default()),
+        Err(StageError::Full)
+    );
     let order = [EndpointId::MonitorMix, EndpointId::StreamMix, EndpointId::Microphone];
     let (result, data) =
         run_two(&mut engine, 1, &[0.25, -0.25], &[0.5, -0.5], [MICROPHONE, APPLICATION], order);
     assert!(report(result).control_update_applied());
     assert_eq!(output(&data, order, EndpointId::MonitorMix), &[0.25, -0.25]);
     assert_eq!(output(&data, order, EndpointId::StreamMix), &[0.5, -0.5]);
-    assert_eq!(stager.try_stage(&second), Ok(()));
+    assert_eq!(stager.try_stage(&second, librewave_core::OutputControls::default()), Ok(()));
     let (result, data) =
         run_two(&mut engine, 1, &[0.25, -0.25], &[0.5, -0.5], [APPLICATION, MICROPHONE], order);
     assert!(report(result).control_update_applied());
@@ -609,7 +660,7 @@ fn spsc_handoff_publishes_coherent_snapshots_between_threads() {
             controls(MICROPHONE, microphone_enabled, 0.0, false, 0.0),
             controls(APPLICATION, !microphone_enabled, 0.0, false, 0.0),
         ];
-        assert_eq!(stager.try_stage(&snapshot), Ok(()));
+        assert_eq!(stager.try_stage(&snapshot, librewave_core::OutputControls::default()), Ok(()));
         assert!(ready_sender.send(microphone_enabled).is_ok());
         assert!(result_receiver.recv().is_ok());
     }
@@ -619,50 +670,61 @@ fn spsc_handoff_publishes_coherent_snapshots_between_threads() {
 
 #[test]
 fn repeated_processing_is_deterministic_and_has_no_allocator_operations() {
-    let (mut engine, _stager) = engine_with(&default_controls(), 8);
-    let microphone = [0.125_f32; 16];
-    let application = [-0.0625_f32; 16];
-    let inputs =
-        [InputBuffer::new(MICROPHONE, &microphone), InputBuffer::new(APPLICATION, &application)];
-    let mut microphone_output = [0.0_f32; 16];
-    let mut monitor_output = [0.0_f32; 16];
-    let mut stream_output = [0.0_f32; 16];
-
-    {
-        let mut outputs = [
-            OutputBuffer::new(EndpointId::Microphone, &mut microphone_output),
-            OutputBuffer::new(EndpointId::MonitorMix, &mut monitor_output),
-            OutputBuffer::new(EndpointId::StreamMix, &mut stream_output),
+    for output_controls in [
+        librewave_core::OutputControls::default(),
+        librewave_core::OutputControls::default()
+            .with_route(librewave_core::MixTarget::Monitor, route(true, -6.5))
+            .with_route(librewave_core::MixTarget::Stream, route(false, 12.0)),
+    ] {
+        let (mut engine, _stager) =
+            MixerEngine::new(config(8), &default_controls(), output_controls)
+                .expect("complete controls");
+        let microphone = [0.125_f32; 16];
+        let application = [-0.0625_f32; 16];
+        let inputs = [
+            InputBuffer::new(MICROPHONE, &microphone),
+            InputBuffer::new(APPLICATION, &application),
         ];
-        report(engine.process(8, &inputs, &mut outputs));
-    }
-    let expected_microphone = microphone_output;
-    let expected_monitor = monitor_output;
-    let expected_stream = stream_output;
+        let mut microphone_output = [0.0_f32; 16];
+        let mut monitor_output = [0.0_f32; 16];
+        let mut stream_output = [0.0_f32; 16];
 
-    let (checksum, allocator_operations) = count_allocator_operations(|| {
-        let mut checksum = 0.0_f32;
-        for _ in 0..1_000 {
+        {
             let mut outputs = [
-                OutputBuffer::new(EndpointId::StreamMix, &mut stream_output),
                 OutputBuffer::new(EndpointId::Microphone, &mut microphone_output),
                 OutputBuffer::new(EndpointId::MonitorMix, &mut monitor_output),
+                OutputBuffer::new(EndpointId::StreamMix, &mut stream_output),
             ];
-            let current = report(engine.process(8, &inputs, &mut outputs));
-            checksum += current
-                .meters()
-                .endpoint(EndpointId::MonitorMix)
-                .expect("monitor output meter")
-                .left()
-                .rms();
+            report(engine.process(8, &inputs, &mut outputs));
         }
-        checksum
-    });
-    assert_eq!(allocator_operations, 0);
-    assert!(checksum > 0.0);
-    assert_eq!(microphone_output, expected_microphone);
-    assert_eq!(monitor_output, expected_monitor);
-    assert_eq!(stream_output, expected_stream);
+        let expected_microphone = microphone_output;
+        let expected_monitor = monitor_output;
+        let expected_stream = stream_output;
+
+        let (checksum, allocator_operations) = count_allocator_operations(|| {
+            let mut checksum = 0.0_f32;
+            for _ in 0..1_000 {
+                let mut outputs = [
+                    OutputBuffer::new(EndpointId::StreamMix, &mut stream_output),
+                    OutputBuffer::new(EndpointId::Microphone, &mut microphone_output),
+                    OutputBuffer::new(EndpointId::MonitorMix, &mut monitor_output),
+                ];
+                let current = report(engine.process(8, &inputs, &mut outputs));
+                checksum += current
+                    .meters()
+                    .endpoint(EndpointId::MonitorMix)
+                    .expect("monitor output meter")
+                    .left()
+                    .rms();
+            }
+            checksum
+        });
+        assert_eq!(allocator_operations, 0);
+        assert!(checksum > 0.0);
+        assert_eq!(microphone_output, expected_microphone);
+        assert_eq!(monitor_output, expected_monitor);
+        assert_eq!(stream_output, expected_stream);
+    }
 }
 
 #[test]

@@ -153,13 +153,13 @@ mod tests {
             target: librewave_core::MixTarget::Stream,
             fader: librewave_core::FaderGain::MIN,
         };
-        shell.queued_fader = Some(edit);
+        shell.queued_fader = Some(edit.into());
         shell.request_epoch = 1;
         assert!(!shell.apply_meter_result(0, Ok(response.clone())));
         assert!(shell.meters.is_none());
         assert!(shell.apply_meter_result(1, Ok(response.clone())));
         assert_eq!(shell.snapshot, Some(snapshot));
-        assert_eq!(shell.queued_fader, Some(edit));
+        assert_eq!(shell.queued_fader, Some(edit.into()));
         let received = shell.meters_received.expect("meter receipt");
         assert!(!shell.expire_meters(received + std::time::Duration::from_millis(350)));
         assert!(shell.expire_meters(received + std::time::Duration::from_millis(351)));

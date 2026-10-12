@@ -1877,3 +1877,88 @@ fn failed_input_saves_leave_the_retained_layout_unchanged() {
         assert_eq!(*saves.borrow(), 1);
     }
 }
+
+#[test]
+fn paired_faders_and_software_outputs_use_one_durable_profile_revision() {
+    use librewave_core::SYSTEM_SOURCE_ID;
+    let (mut daemon, retained, saves) = mixer_daemon(vec![]);
+    let muted = MixRoute::new(false, FaderGain::UNITY);
+    daemon
+        .handle(
+            Command::SetMixerRoute {
+                expected_generation: MixerGeneration(0),
+                source: SYSTEM_SOURCE_ID,
+                target: MixTarget::Stream,
+                route: muted,
+            },
+            librewave_core::Origin::Client,
+        )
+        .expect("mute stream route");
+    let level = FaderGain::from_decibels(-6.5).expect("level");
+    daemon
+        .handle(
+            Command::SetMixerFaders {
+                expected_generation: MixerGeneration(1),
+                source: SYSTEM_SOURCE_ID,
+                monitor: level,
+                stream: level,
+            },
+            librewave_core::Origin::Client,
+        )
+        .expect("paired faders");
+    let controls = retained.borrow().source(SYSTEM_SOURCE_ID).expect("source").controls;
+    assert!(controls.monitor().enabled());
+    assert!(!controls.stream().enabled());
+    assert_eq!(controls.monitor().fader(), level);
+    assert_eq!(controls.stream().fader(), level);
+    assert_eq!(retained.borrow().generation, MixerGeneration(2));
+    let before = daemon.snapshot().clone();
+    let command = Command::SetMixerOutput {
+        expected_generation: MixerGeneration(2),
+        target: MixTarget::Monitor,
+        route: MixRoute::new(false, level),
+    };
+    daemon.handle(command, librewave_core::Origin::Client).expect("output mute");
+    assert_eq!(retained.borrow().outputs.route(MixTarget::Monitor), MixRoute::new(false, level));
+    assert_eq!(
+        retained.borrow().outputs.route(MixTarget::Stream),
+        librewave_core::OutputControls::default().route(MixTarget::Stream)
+    );
+    assert_eq!(daemon.snapshot().devices, before.devices);
+    assert_eq!(daemon.snapshot().mixer.profile.sources, before.mixer.profile.sources);
+    assert_eq!(*saves.borrow(), 3);
+    assert!(matches!(
+        daemon
+            .handle(command, librewave_core::Origin::Client)
+            .expect_err("stale output request")
+            .kind,
+        IpcErrorKind::StaleMixerGeneration { .. }
+    ));
+    assert_eq!(*saves.borrow(), 3);
+}
+
+#[test]
+fn output_and_paired_fader_save_failures_do_not_advance_retained_state() {
+    use librewave_core::SYSTEM_SOURCE_ID;
+    for action in [SaveAction::Before, SaveAction::After] {
+        for command in [
+            Command::SetMixerFaders {
+                expected_generation: MixerGeneration(0),
+                source: SYSTEM_SOURCE_ID,
+                monitor: FaderGain::MIN,
+                stream: FaderGain::MAX,
+            },
+            Command::SetMixerOutput {
+                expected_generation: MixerGeneration(0),
+                target: MixTarget::Stream,
+                route: MixRoute::new(false, FaderGain::MIN),
+            },
+        ] {
+            let (mut daemon, _, saves) = mixer_daemon(vec![action]);
+            let before = daemon.snapshot().clone();
+            assert!(daemon.handle(command, librewave_core::Origin::Client).is_err());
+            assert_eq!(daemon.snapshot(), &before);
+            assert_eq!(*saves.borrow(), 1);
+        }
+    }
+}

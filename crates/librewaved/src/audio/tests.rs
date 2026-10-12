@@ -308,7 +308,9 @@ fn software_meter_values_expire_and_cannot_survive_stop_or_restart() {
     let config =
         MixerConfig::try_new(1, MICROPHONE_SOURCE_ID, &[MICROPHONE_SOURCE_ID, SYSTEM_SOURCE_ID])
             .expect("meter engine config");
-    let (mut engine, _stager) = MixerEngine::new(config, &controls).expect("meter engine");
+    let (mut engine, _stager) =
+        MixerEngine::new(config, &controls, librewave_core::OutputControls::default())
+            .expect("meter engine");
     let mut microphone = [0.; 2];
     let mut monitor = [0.; 2];
     let mut stream = [0.; 2];

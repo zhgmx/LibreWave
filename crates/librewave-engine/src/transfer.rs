@@ -1,5 +1,5 @@
 use crate::config::{MAX_SOURCES, MixerConfig};
-use librewave_core::{MixRoute, SourceControls, SourceId};
+use librewave_core::{MixRoute, MixTarget, OutputControls, SourceControls, SourceId};
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::sync::Arc;
@@ -30,8 +30,13 @@ impl ControlStager {
     ///
     /// Returns a mapping error for an incoherent source-control set or
     /// [`StageError::Full`] while a snapshot is pending.
-    pub fn try_stage(&mut self, controls: &[SourceControls]) -> Result<(), StageError> {
-        let snapshot = compile_snapshot(&self.config, controls).map_err(StageError::Controls)?;
+    pub fn try_stage(
+        &mut self,
+        controls: &[SourceControls],
+        outputs: OutputControls,
+    ) -> Result<(), StageError> {
+        let snapshot =
+            compile_snapshot(&self.config, controls, outputs).map_err(StageError::Controls)?;
         self.slot
             .state
             .compare_exchange(EMPTY, WRITING, Ordering::Acquire, Ordering::Relaxed)
@@ -126,18 +131,21 @@ pub(crate) struct RuntimeRoute {
 pub(crate) struct ControlSnapshot {
     pub(crate) monitor: [RuntimeRoute; MAX_SOURCES],
     pub(crate) stream: [RuntimeRoute; MAX_SOURCES],
+    pub(crate) outputs: [RuntimeRoute; 2],
 }
 
 impl ControlSnapshot {
     const EMPTY: Self = Self {
         monitor: [RuntimeRoute { coefficient: 0.0 }; MAX_SOURCES],
         stream: [RuntimeRoute { coefficient: 0.0 }; MAX_SOURCES],
+        outputs: [RuntimeRoute { coefficient: 0.0 }; 2],
     };
 }
 
 pub(crate) fn compile_snapshot(
     config: &MixerConfig,
     controls: &[SourceControls],
+    outputs: OutputControls,
 ) -> Result<ControlSnapshot, ControlMappingError> {
     if controls.len() != config.sources().len() {
         return Err(ControlMappingError::ControlCount {
@@ -147,6 +155,10 @@ pub(crate) fn compile_snapshot(
     }
 
     let mut snapshot = ControlSnapshot::EMPTY;
+    snapshot.outputs = [
+        compile_route(outputs.route(MixTarget::Monitor)),
+        compile_route(outputs.route(MixTarget::Stream)),
+    ];
     let mut present = [false; MAX_SOURCES];
     for controls in controls {
         let Some(index) = config.source_index(controls.source()) else {

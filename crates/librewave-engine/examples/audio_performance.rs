@@ -64,8 +64,11 @@ fn measure_mixer(
     let route = MixRoute::new(true, FaderGain::UNITY);
     let controls: Vec<_> =
         sources.iter().map(|&id| SourceControls::new(id, route, route)).collect();
-    let (mut engine, _stager) =
-        MixerEngine::new(MixerConfig::try_new(frames, sources[0], &sources)?, &controls)?;
+    let (mut engine, _stager) = MixerEngine::new(
+        MixerConfig::try_new(frames, sources[0], &sources)?,
+        &controls,
+        librewave_core::OutputControls::default(),
+    )?;
     // Exact binary fractions keep the expected sum independent of rounding.
     let signal = vec![0.03125; frames * CHANNELS];
     let inputs: Vec<_> = sources.iter().map(|&id| InputBuffer::new(id, &signal)).collect();

@@ -489,7 +489,57 @@ impl Daemon {
                     self.set_mixer_route(expected_generation, source, target, route, origin)?;
                 Ok(Response::MixerChanged { mixer })
             }
+            Command::SetMixerFaders { expected_generation, source, monitor, stream } => {
+                self.set_mixer_faders(expected_generation, source, monitor, stream, origin)
+            }
+            Command::SetMixerOutput { expected_generation, target, route } => {
+                self.set_mixer_output(expected_generation, target, route, origin)
+            }
         }
+    }
+
+    fn set_mixer_faders(
+        &mut self,
+        expected_generation: MixerGeneration,
+        source: SourceId,
+        monitor: librewave_core::FaderGain,
+        stream: librewave_core::FaderGain,
+        origin: librewave_core::Origin,
+    ) -> Result<Response, IpcError> {
+        self.check_mixer_generation(expected_generation)?;
+        let current = &self.snapshot().mixer.profile;
+        let controls = current
+            .source(source)
+            .ok_or_else(|| IpcError {
+                kind: IpcErrorKind::MixerSourceNotFound { id: source },
+                message: format!("mixer source {source} is not configured"),
+            })?
+            .controls;
+        let mixer = if controls.monitor().fader() == monitor && controls.stream().fader() == stream
+        {
+            self.snapshot().mixer.clone()
+        } else {
+            let next = current.with_faders(source, monitor, stream).map_err(mixer_profile_error)?;
+            self.commit_mixer_profile(next, origin)?
+        };
+        Ok(Response::MixerChanged { mixer })
+    }
+    fn set_mixer_output(
+        &mut self,
+        expected_generation: MixerGeneration,
+        target: MixTarget,
+        route: MixRoute,
+        origin: librewave_core::Origin,
+    ) -> Result<Response, IpcError> {
+        self.check_mixer_generation(expected_generation)?;
+        let current = &self.snapshot().mixer.profile;
+        let mixer = if current.outputs.route(target) == route {
+            self.snapshot().mixer.clone()
+        } else {
+            let next = current.with_output(target, route).map_err(mixer_profile_error)?;
+            self.commit_mixer_profile(next, origin)?
+        };
+        Ok(Response::MixerChanged { mixer })
     }
 
     fn set_mixer_route(
@@ -531,6 +581,19 @@ impl Daemon {
     }
 
     fn prepare_input_change(&self, expected: MixerGeneration) -> Result<(), IpcError> {
+        self.check_mixer_generation(expected)?;
+        if self.audio_session.enabled
+            || self.audio.as_ref().is_some_and(AudioSupervisor::needs_tick)
+        {
+            return Err(IpcError {
+                kind: IpcErrorKind::AudioNotReady,
+                message: "stop audio and finish cleanup before changing input layout".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn check_mixer_generation(&self, expected: MixerGeneration) -> Result<(), IpcError> {
         let actual = self.snapshot().mixer.generation();
         if expected != actual {
             return Err(IpcError {
@@ -538,14 +601,6 @@ impl Daemon {
                 message: format!(
                     "mixer generation {expected} is stale; current generation is {actual}"
                 ),
-            });
-        }
-        if self.audio_session.enabled
-            || self.audio.as_ref().is_some_and(AudioSupervisor::needs_tick)
-        {
-            return Err(IpcError {
-                kind: IpcErrorKind::AudioNotReady,
-                message: "stop audio and finish cleanup before changing input layout".to_owned(),
             });
         }
         Ok(())
@@ -1324,6 +1379,14 @@ fn invalid_control(message: String) -> IpcError {
 
 fn internal_error(message: String) -> IpcError {
     IpcError { kind: IpcErrorKind::Internal, message }
+}
+fn mixer_profile_error(error: librewave_core::MixerProfileError) -> IpcError {
+    match error {
+        librewave_core::MixerProfileError::GenerationExhausted => {
+            IpcError { kind: IpcErrorKind::MixerGenerationExhausted, message: error.to_string() }
+        }
+        other => internal_error(format!("validated mixer profile update failed: {other}")),
+    }
 }
 
 fn audio_cleanup_error() -> IpcError {

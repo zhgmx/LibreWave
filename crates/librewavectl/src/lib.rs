@@ -112,22 +112,28 @@ where
         [mixer, remove, source, generation] if mixer == "mixer" && remove == "remove" => {
             request_input_remove(socket_path, source, generation, output, errors)
         }
+        [mixer, faders, source, generation, monitor, stream]
+            if mixer == "mixer" && faders == "faders" =>
+        {
+            request_software_control(
+                socket_path,
+                parse_faders(source, generation, monitor, stream),
+                output,
+                errors,
+            )
+        }
+        [mixer, output_level, generation, target, enabled, level]
+            if mixer == "mixer" && output_level == "output" =>
+        {
+            request_software_control(
+                socket_path,
+                parse_output(generation, target, enabled, level),
+                output,
+                errors,
+            )
+        }
         [mixer, meters] if mixer == "mixer" && meters == "meters" => {
-            match request(socket_path, librewave_core::Command::GetMeters) {
-                Ok(Response::Meters { meters }) => {
-                    writeln!(
-                        output,
-                        "{}",
-                        serde_json::to_string_pretty(&meters).map_err(io::Error::other)?
-                    )?;
-                    Ok(0)
-                }
-                Ok(_) => {
-                    writeln!(errors, "error: daemon returned an unexpected meter response")?;
-                    Ok(1)
-                }
-                Err(error) => write_client_error(error, errors),
-            }
+            request_meters(socket_path, output, errors)
         }
         [apps, list] if apps == "apps" && list == "list" => request_applications(
             socket_path,
@@ -256,6 +262,86 @@ fn request_input_change<O: Write, E: Write>(
             Ok(1)
         }
         Err(error) => write_client_error(error, errors),
+    }
+}
+
+fn request_meters<O: Write, E: Write>(
+    socket: &Path,
+    output: &mut O,
+    errors: &mut E,
+) -> io::Result<i32> {
+    match request(socket, librewave_core::Command::GetMeters) {
+        Ok(Response::Meters { meters }) => {
+            writeln!(
+                output,
+                "{}",
+                serde_json::to_string_pretty(&meters).map_err(io::Error::other)?
+            )?;
+            Ok(0)
+        }
+        Ok(_) => {
+            writeln!(errors, "error: daemon returned an unexpected meter response")?;
+            Ok(1)
+        }
+        Err(error) => write_client_error(error, errors),
+    }
+}
+
+fn parse_gain(value: &str) -> Result<librewave_core::FaderGain, String> {
+    librewave_core::FaderGain::from_decibels(value.parse().map_err(|_| "level must be a number")?)
+        .map_err(|e| e.to_string())
+}
+fn parse_faders(
+    source: &str,
+    generation: &str,
+    monitor: &str,
+    stream: &str,
+) -> Result<librewave_core::Command, String> {
+    Ok(librewave_core::Command::SetMixerFaders {
+        source: SourceId::new(source.parse().map_err(|_| "invalid source identity")?),
+        expected_generation: MixerGeneration(
+            generation.parse().map_err(|_| "invalid mixer generation")?,
+        ),
+        monitor: parse_gain(monitor)?,
+        stream: parse_gain(stream)?,
+    })
+}
+fn parse_output(
+    generation: &str,
+    target: &str,
+    enabled: &str,
+    level: &str,
+) -> Result<librewave_core::Command, String> {
+    let target = match target {
+        "monitor" => MixTarget::Monitor,
+        "stream" => MixTarget::Stream,
+        _ => return Err("target must be monitor or stream".into()),
+    };
+    let enabled = match enabled {
+        "on" => true,
+        "off" => false,
+        _ => return Err("output state must be on or off".into()),
+    };
+    Ok(librewave_core::Command::SetMixerOutput {
+        expected_generation: MixerGeneration(
+            generation.parse().map_err(|_| "invalid mixer generation")?,
+        ),
+        target,
+        route: MixRoute::new(enabled, parse_gain(level)?),
+    })
+}
+fn request_software_control<O: Write, E: Write>(
+    socket: &Path,
+    command: Result<librewave_core::Command, String>,
+    output: &mut O,
+    errors: &mut E,
+) -> io::Result<i32> {
+    match command {
+        Ok(command) => request_input_change(socket, command, output, errors),
+        Err(error) => {
+            writeln!(errors, "error: {error}")?;
+            Ok(2)
+        }
     }
 }
 
@@ -704,6 +790,9 @@ fn write_mixer<W: Write>(output: &mut W, mixer: &MixerSnapshot) -> io::Result<()
         write_mix_route(output, "Monitor", source.controls.monitor())?;
         write_mix_route(output, "Stream", source.controls.stream())?;
     }
+    writeln!(output, "Software outputs:")?;
+    write_mix_route(output, "Monitor", mixer.profile.outputs.route(MixTarget::Monitor))?;
+    write_mix_route(output, "Stream", mixer.profile.outputs.route(MixTarget::Stream))?;
     Ok(())
 }
 
@@ -853,6 +942,8 @@ fn write_help<W: Write>(output: &mut W) -> io::Result<()> {
     writeln!(output)?;
     writeln!(output, "Commands:")?;
     writeln!(output, "  status          Show daemon, device, and audio status")?;
+    writeln!(output, "  mixer faders <source> <generation> <monitor-dB> <stream-dB>")?;
+    writeln!(output, "  mixer output <generation> <monitor|stream> <on|off> <level-dB>")?;
     writeln!(
         output,
         "  apps list       Show active playback application groups and route progress"
@@ -932,7 +1023,7 @@ mod tests {
         write_status(&mut output, &snapshot()).expect("render status");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "Daemon: connected\nProtocol: 10\nState generation: 4\nDevices: 1\nMixer: generation 0, inactive, 2 sources\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
+            "Daemon: connected\nProtocol: 11\nState generation: 4\nDevices: 1\nMixer: generation 0, inactive, 2 sources\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
         );
     }
 
@@ -1212,7 +1303,7 @@ mod tests {
         write_mixer(&mut output, &mixer).expect("render mixer");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "Mixer generation: 3\nRuntime: inactive (audio host and mixer engine are not connected)\nMeters: unavailable (audio host and mixer engine are not connected)\nMicrophone source: 1\nSources:\n  1  Microphone  role=microphone\n    Monitor: on, -0.5 dB\n    Stream: on, 0 dB\n  2  System  role=system\n    Monitor: on, 0 dB\n    Stream: on, 0 dB\n"
+            "Mixer generation: 3\nRuntime: inactive (audio host and mixer engine are not connected)\nMeters: unavailable (audio host and mixer engine are not connected)\nMicrophone source: 1\nSources:\n  1  Microphone  role=microphone\n    Monitor: on, -0.5 dB\n    Stream: on, 0 dB\n  2  System  role=system\n    Monitor: on, 0 dB\n    Stream: on, 0 dB\nSoftware outputs:\n    Monitor: on, 0 dB\n    Stream: on, 0 dB\n"
         );
         assert_eq!(format_fader(FaderGain::MAX), "12");
         assert_eq!(format_fader(FaderGain::MIN), "-60");

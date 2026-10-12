@@ -228,6 +228,38 @@ pub enum MixTarget {
     Stream,
 }
 
+/// Software levels applied after each complete mix sum, before final clipping.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputControls {
+    monitor: MixRoute,
+    stream: MixRoute,
+}
+impl Default for OutputControls {
+    fn default() -> Self {
+        let unity = MixRoute::new(true, FaderGain::UNITY);
+        Self { monitor: unity, stream: unity }
+    }
+}
+impl OutputControls {
+    /// Reads one software output level and mute state.
+    #[must_use]
+    pub const fn route(self, target: MixTarget) -> MixRoute {
+        match target {
+            MixTarget::Monitor => self.monitor,
+            MixTarget::Stream => self.stream,
+        }
+    }
+    /// Replaces one software output without changing the other.
+    #[must_use]
+    pub const fn with_route(self, target: MixTarget, route: MixRoute) -> Self {
+        match target {
+            MixTarget::Monitor => Self { monitor: route, ..self },
+            MixTarget::Stream => Self { stream: route, ..self },
+        }
+    }
+}
+
 impl fmt::Display for MixTarget {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -271,6 +303,7 @@ pub struct MixerProfile {
     pub generation: MixerGeneration,
     pub microphone_source: SourceId,
     pub sources: Vec<MixerSourceSnapshot>,
+    pub outputs: OutputControls,
 }
 
 impl<'de> Deserialize<'de> for MixerProfile {
@@ -284,6 +317,7 @@ impl<'de> Deserialize<'de> for MixerProfile {
             generation: MixerGeneration,
             microphone_source: SourceId,
             sources: Vec<MixerSourceSnapshot>,
+            outputs: OutputControls,
         }
 
         let wire = MixerProfileWire::deserialize(deserializer)?;
@@ -291,6 +325,7 @@ impl<'de> Deserialize<'de> for MixerProfile {
             generation: wire.generation,
             microphone_source: wire.microphone_source,
             sources: wire.sources,
+            outputs: wire.outputs,
         };
         profile.validate().map_err(serde::de::Error::custom)?;
         Ok(profile)
@@ -303,6 +338,7 @@ impl Default for MixerProfile {
         Self {
             generation: MixerGeneration(0),
             microphone_source: MICROPHONE_SOURCE_ID,
+            outputs: OutputControls::default(),
             sources: PRODUCT_SOURCES
                 .iter()
                 .map(|source| MixerSourceSnapshot {
@@ -316,6 +352,43 @@ impl Default for MixerProfile {
 }
 
 impl MixerProfile {
+    /// Sets both channel faders in one profile revision, preserving their mute states.
+    /// # Errors
+    /// Returns an error for a missing source or exhausted generation.
+    pub fn with_faders(
+        &self,
+        source: SourceId,
+        monitor: FaderGain,
+        stream: FaderGain,
+    ) -> Result<Self, MixerProfileError> {
+        let mut next = self.clone();
+        let controls = &mut next
+            .sources
+            .iter_mut()
+            .find(|s| s.controls.source() == source)
+            .ok_or(MixerProfileError::UnknownSource(source))?
+            .controls;
+        *controls = SourceControls::new(
+            source,
+            MixRoute::new(controls.monitor().enabled(), monitor),
+            MixRoute::new(controls.stream().enabled(), stream),
+        );
+        next.advance_generation()?;
+        Ok(next)
+    }
+    /// Sets one output in one profile revision.
+    /// # Errors
+    /// Returns an error for an exhausted generation.
+    pub fn with_output(
+        &self,
+        target: MixTarget,
+        route: MixRoute,
+    ) -> Result<Self, MixerProfileError> {
+        let mut next = self.clone();
+        next.outputs = next.outputs.with_route(target, route);
+        next.advance_generation()?;
+        Ok(next)
+    }
     /// Validates the one current pre-release product profile.
     ///
     /// # Errors
@@ -667,5 +740,32 @@ mod input_tests {
             removed.with_input(InputName::try_new("New input").expect("name")).expect("reuse slot");
         assert_eq!(restored.source(SourceId::new(5)).expect("reused source").name, "New input");
         restored.validate().expect("sorted reused slot");
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+    #[test]
+    fn complete_output_format_is_required_and_paired_edits_preserve_mutes() {
+        let profile = MixerProfile::default()
+            .with_route(SYSTEM_SOURCE_ID, MixTarget::Stream, MixRoute::new(false, FaderGain::MAX))
+            .expect("mute");
+        let next =
+            profile.with_faders(SYSTEM_SOURCE_ID, FaderGain::MIN, FaderGain::MIN).expect("pair");
+        assert_eq!(next.generation, MixerGeneration(2));
+        let controls = next.source(SYSTEM_SOURCE_ID).expect("source").controls;
+        assert!(controls.monitor().enabled());
+        assert!(!controls.stream().enabled());
+        assert_eq!(controls.monitor().fader(), controls.stream().fader());
+        assert_eq!(next.outputs, profile.outputs);
+        let value = serde_json::to_value(&next).expect("encode");
+        assert_eq!(
+            serde_json::from_value::<MixerProfile>(value.clone()).expect("current format"),
+            next
+        );
+        let mut old = value;
+        old.as_object_mut().expect("profile object").remove("outputs");
+        assert!(serde_json::from_value::<MixerProfile>(old).is_err());
     }
 }

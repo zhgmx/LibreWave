@@ -658,7 +658,7 @@ impl ClockBridgeControl {
     /// Returns an error for an invalid profile or a full control handoff.
     pub fn try_stage_profile(&mut self, profile: &MixerProfile) -> Result<(), BridgeControlError> {
         let controls = profile_controls(profile).map_err(BridgeControlError::Profile)?;
-        self.stager.try_stage(&controls).map_err(BridgeControlError::Stage)
+        self.stager.try_stage(&controls, profile.outputs).map_err(BridgeControlError::Stage)
     }
 
     pub fn begin_teardown(&mut self) {
@@ -831,7 +831,7 @@ impl ClockBridgeParts {
         )
         .map_err(|_| BridgeBuildError::EngineConfig)?;
         let controls = profile_controls(profile).map_err(BridgeBuildError::Profile)?;
-        let (engine, stager) = MixerEngine::new(mixer_config, &controls)
+        let (engine, stager) = MixerEngine::new(mixer_config, &controls, profile.outputs)
             .map_err(|_| BridgeBuildError::ControlMapping)?;
         let (meter_publisher, meters) = MeterPublisher::channel();
         let shared = Arc::new(SharedAttempt {

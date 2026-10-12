@@ -88,6 +88,23 @@ before processing. The graph callback uses fixed-capacity arrays and bounded
 loops. Teardown removes every configured adapter and link after callback
 quiescence. The public microphone endpoint remains independent of mix routes.
 
+## Mixer controls
+
+`SetMixerFaders` saves both channel levels in one profile revision and preserves
+each route's mute state. The UI's link preference is a window editing option.
+It does not create another saved mixer state or a second write path.
+
+`SetMixerOutput` changes one software mix output. The complete control snapshot
+contains source routes and both output controls. The engine applies the output
+coefficient after the complete sum and before clipping and output metering.
+The microphone endpoint bypasses these output controls. Coefficients are
+compiled on the control thread. The callback consumes one fixed-size snapshot.
+
+The current mixer state uses schema 2 and requires both output controls.
+An earlier development profile is refused. The daemon does not reset or
+convert it. Review and replace obsolete test state before launching this build.
+The hardware and audio-intent formats are unchanged.
+
 ## Meter observation
 
 `GetMeters` returns software peak and RMS values separately from control snapshots.

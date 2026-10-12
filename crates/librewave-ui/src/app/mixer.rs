@@ -25,6 +25,39 @@ pub(super) struct FaderEdit {
     pub(super) fader: FaderGain,
 }
 
+/// One latest pointer intent across all channel and output faders.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum MixerEdit {
+    Input(FaderEdit),
+    Output { target: MixTarget, fader: FaderGain },
+}
+impl From<FaderEdit> for MixerEdit {
+    fn from(edit: FaderEdit) -> Self {
+        Self::Input(edit)
+    }
+}
+impl MixerEdit {
+    pub(super) fn command(self, snapshot: &Snapshot) -> Option<Command> {
+        match self {
+            Self::Input(edit) => edit.command(snapshot),
+            Self::Output { target, fader } => {
+                let route = snapshot.mixer.profile.outputs.route(target);
+                (route.fader() != fader).then_some(Command::SetMixerOutput {
+                    expected_generation: snapshot.mixer.generation(),
+                    target,
+                    route: MixRoute::new(route.enabled(), fader),
+                })
+            }
+        }
+    }
+    fn input(self) -> Option<FaderEdit> {
+        match self {
+            Self::Input(edit) => Some(edit),
+            Self::Output { .. } => None,
+        }
+    }
+}
+
 impl FaderEdit {
     pub(super) fn command(self, snapshot: &Snapshot) -> Option<Command> {
         let controls = snapshot.mixer.profile.source(self.source)?.controls;
@@ -121,19 +154,23 @@ impl Shell {
                         .flex()
                         .flex_col()
                         .gap(px(SPACE_SM))
-                        .child(output_row(
+                        .child(self.output_row(
                             MixTarget::Monitor,
                             "headphones",
                             "Wave:3 headphones",
                             self.meters.as_ref().map(|f| f.outputs[1]),
                             self.meter_error.as_deref(),
+                            snapshot,
+                            cx,
                         ))
-                        .child(output_row(
+                        .child(self.output_row(
                             MixTarget::Stream,
                             "system",
                             "Source for applications",
                             self.meters.as_ref().map(|f| f.outputs[2]),
                             self.meter_error.as_deref(),
+                            snapshot,
+                            cx,
                         )),
                 ),
             )
@@ -221,6 +258,21 @@ impl Shell {
                         "Application audio"
                     })),
             )
+            .child(icon_button(
+                &format!("linked-faders-{id}"),
+                if self.linked_faders.contains(&id) { "plugs-connected" } else { "plugs" },
+                "Link or unlink channel fader levels in this window",
+                Tone::Quiet,
+                if self.linked_faders.contains(&id) { INK } else { FAINT },
+                !self.pending && self.settings_modal.is_none(),
+                cx,
+                move |this, _, cx| {
+                    if !this.linked_faders.remove(&id) {
+                        this.linked_faders.insert(id);
+                    }
+                    cx.notify();
+                },
+            ))
             .when(!microphone, |view| {
                 view.child(icon_button(
                     &format!("applications-{id}"),
@@ -279,12 +331,13 @@ impl Shell {
         let shown = self
             .queued_fader
             .or(self.in_flight_fader)
-            .filter(|edit| edit.source == id && edit.target == target)
+            .and_then(MixerEdit::input)
+            .filter(|edit| {
+                edit.source == id && (edit.target == target || self.linked_faders.contains(&id))
+            })
             .map_or(route.fader(), |edit| edit.fader);
         let open = self.settings_modal.is_none();
         let muted = !route.enabled();
-        let reset =
-            route_position_command(id, target, route, generation, fader_fraction(FaderGain::UNITY));
         let toggle = route_toggle_command(id, target, route, generation);
         div()
             .w(px(64.))
@@ -327,9 +380,10 @@ impl Shell {
                     open,
                     cx,
                     move |this, _, cx| {
-                        if let Some(command) = reset {
-                            this.send(command, cx);
-                        }
+                        this.send_fader(
+                            FaderEdit { source: id, target, fader: FaderGain::UNITY },
+                            cx,
+                        );
                     },
                 ),
             )
@@ -405,75 +459,221 @@ impl Shell {
 ///
 /// The daemon has no output selection or output level command. Both parts of
 /// the row are shown inactive.
-fn output_row(
+impl Shell {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "output view shares the current profile and meter observation"
+    )]
+    fn output_row(
+        &self,
+        target: MixTarget,
+        glyph: &'static str,
+        destination: &'static str,
+        levels: Option<librewave_core::StereoLevels>,
+        error: Option<&str>,
+        snapshot: &Snapshot,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let (color, mix_glyph, name) = mix_identity(target);
+        let key = name.to_lowercase();
+        let route = snapshot.mixer.profile.outputs.route(target);
+        let shown = self
+            .queued_fader
+            .or(self.in_flight_fader)
+            .and_then(|edit| match edit {
+                MixerEdit::Output { target: current, fader } if current == target => Some(fader),
+                _ => None,
+            })
+            .unwrap_or(route.fader());
+        let generation = snapshot.mixer.generation();
+        let controls_open = self.settings_modal.is_none();
+        let mutable = controls_open && !self.pending;
+        card()
+            .w_full()
+            .p(px(SPACE_MD))
+            .flex()
+            .items_center()
+            .gap(px(SPACE_MD))
+            .child(div().w(px(40.)).flex_shrink_0().child(super::meters::bar(
+                &format!("output-{key}"),
+                levels,
+                color,
+                error,
+            )))
+            .child(
+                div()
+                    .w(px(152.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(SPACE_MD))
+                    .child(icon_tile(mix_glyph, color, 36.))
+                    .child(div().font_weight(FontWeight::MEDIUM).child(format!("{name} mix"))),
+            )
+            .child(
+                identified(&format!("output-{key}-destination"))
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(36.))
+                    .px(px(SPACE_MD))
+                    .rounded(px(RADIUS))
+                    .bg(rgb(RAISED))
+                    .flex()
+                    .items_center()
+                    .gap(px(SPACE_SM))
+                    .child(icon(glyph, MUTED, ICON_SMALL))
+                    .child(div().flex_1().min_w_0().truncate().child(destination))
+                    .tooltip(tip("Output selection is not available yet")),
+            )
+            .child(output_track(
+                &format!("output-{key}-level"),
+                target,
+                shown,
+                color,
+                controls_open,
+                cx,
+            ))
+            .child(icon_button(
+                &format!("output-{key}-mute"),
+                if route.enabled() { "speaker-high" } else { "speaker-slash" },
+                "Mute software output",
+                Tone::Quiet,
+                if route.enabled() { color } else { DANGER },
+                mutable,
+                cx,
+                move |this, _, cx| {
+                    this.send(
+                        Command::SetMixerOutput {
+                            expected_generation: generation,
+                            target,
+                            route: MixRoute::new(!route.enabled(), route.fader()),
+                        },
+                        cx,
+                    );
+                },
+            ))
+            .child(activate(
+                button_face(&format!("output-{key}-reset"), Tone::Quiet)
+                    .child(format!("{:.1} dB", shown.decibels()))
+                    .tooltip(tip("Reset software output to 0 dB")),
+                mutable,
+                cx,
+                move |this, _, cx| {
+                    this.send_fader(MixerEdit::Output { target, fader: FaderGain::UNITY }, cx);
+                },
+            ))
+    }
+}
+
+#[derive(Clone)]
+struct OutputDrag {
     target: MixTarget,
-    glyph: &'static str,
-    destination: &'static str,
-    levels: Option<librewave_core::StereoLevels>,
-    error: Option<&str>,
-) -> Div {
-    let (color, mix_glyph, name) = mix_identity(target);
-    let key = name.to_lowercase();
-    card()
-        .child(div().w(px(40.)).flex_shrink_0().child(super::meters::bar(
-            &format!("output-{key}"),
-            levels,
-            color,
-            error,
-        )))
-        .w_full()
-        .p(px(SPACE_MD))
-        .flex()
-        .items_center()
-        .gap(px(SPACE_LG))
+}
+fn output_track(
+    key: &str,
+    target: MixTarget,
+    shown: FaderGain,
+    color: u32,
+    enabled: bool,
+    cx: &mut Context<Shell>,
+) -> Stateful<Div> {
+    let bounds = std::rc::Rc::new(std::cell::Cell::new(None::<Bounds<gpui::Pixels>>));
+    let painted = std::rc::Rc::clone(&bounds);
+    let mut track = identified(key)
+        .flex_1()
+        .min_w(px(80.))
+        .h(px(32.))
+        .relative()
+        .focusable()
+        .tab_stop(enabled)
+        .tab_index(0)
         .child(
             div()
-                .w(px(152.))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .gap(px(SPACE_MD))
-                .child(icon_tile(mix_glyph, color, 36.))
-                .child(div().font_weight(FontWeight::MEDIUM).child(format!("{name} mix"))),
+                .absolute()
+                .left(px(CAP / 2.))
+                .right(px(CAP / 2.))
+                .top(px(14.))
+                .h(px(4.))
+                .rounded_full()
+                .bg(rgb(LINE)),
         )
         .child(
-            identified(&format!("output-{key}-destination"))
-                .flex_1()
-                .min_w_0()
-                .h(px(36.))
-                .px(px(SPACE_MD))
-                .rounded(px(RADIUS))
-                .bg(rgb(RAISED))
-                .flex()
-                .items_center()
-                .gap(px(SPACE_SM))
-                .child(icon(glyph, MUTED, ICON_SMALL))
-                .child(div().flex_1().min_w_0().truncate().child(destination))
-                .tooltip(tip("Output selection is not available yet")),
+            div().absolute().left_0().right(px(CAP)).top(px(8.)).h(px(CAP)).child(
+                div()
+                    .absolute()
+                    .left(relative(fader_fraction(shown)))
+                    .w(px(CAP))
+                    .h(px(CAP))
+                    .rounded_full()
+                    .bg(rgb(color)),
+            ),
         )
         .child(
-            identified(&format!("output-{key}-level"))
-                .flex_1()
-                .min_w_0()
-                .h(px(36.))
-                .opacity(0.4)
-                .flex()
-                .items_center()
-                .gap(px(SPACE_MD))
-                .child(icon("speaker-high", MUTED, ICON_SMALL))
-                .child(
-                    div()
-                        .flex_1()
-                        .h(px(4.))
-                        .rounded_full()
-                        .bg(rgb(LINE))
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .child(div().w(px(CAP)).h(px(CAP)).rounded_full().bg(rgb(MUTED))),
-                )
-                .tooltip(tip("Output level is not available yet")),
-        )
+            canvas(move |area, _, _| painted.set(Some(area)), |_, (), _, _| {})
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+        );
+    if enabled {
+        track = track
+            .cursor_pointer()
+            .on_drag(OutputDrag { target }, |_, _, _, cx| cx.new(|_| gpui::Empty))
+            .on_drag_move(cx.listener(
+                move |this, event: &DragMoveEvent<OutputDrag>, window, cx| {
+                    if event.drag(cx).target != target {
+                        return;
+                    }
+                    if let Some(fader) = output_at_pixel(
+                        f32::from(event.event.position.x),
+                        f32::from(event.bounds.left()),
+                        f32::from(event.bounds.size.width),
+                    ) {
+                        this.fader_window = Some(window.window_handle());
+                        this.send_fader(MixerEdit::Output { target, fader }, cx);
+                    }
+                },
+            ))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                    if let Some(area) = bounds.get()
+                        && let Some(fader) = output_at_pixel(
+                            f32::from(event.position.x),
+                            f32::from(area.left()),
+                            f32::from(area.size.width),
+                        )
+                    {
+                        this.fader_window = Some(window.window_handle());
+                        this.send_fader(MixerEdit::Output { target, fader }, cx);
+                    }
+                }),
+            )
+            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                let fader = match event.keystroke.key.as_str() {
+                    "home" => Some(FaderGain::MIN),
+                    "end" => Some(FaderGain::MAX),
+                    "left" | "down" => {
+                        FaderGain::from_half_decibel_steps(shown.half_decibel_steps() - 1).ok()
+                    }
+                    "right" | "up" => {
+                        FaderGain::from_half_decibel_steps(shown.half_decibel_steps() + 1).ok()
+                    }
+                    _ => None,
+                };
+                if let Some(fader) = fader {
+                    cx.stop_propagation();
+                    this.send_fader(MixerEdit::Output { target, fader }, cx);
+                }
+            }));
+    }
+    track
+}
+fn output_at_pixel(x: f32, left: f32, width: f32) -> Option<FaderGain> {
+    if !x.is_finite() || !left.is_finite() || !width.is_finite() || width <= CAP {
+        return None;
+    }
+    fader_from_fraction((x - left - CAP / 2.) / (width - CAP))
 }
 
 /// The level names between the two faders of a strip.
@@ -729,6 +929,23 @@ pub(super) fn route_step_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn horizontal_output_pointer_positions_round_trip_every_step_and_reject_invalid_bounds() {
+        let left = 24.0;
+        let width = 160.0;
+        for step in -120..=24 {
+            let fader = FaderGain::from_half_decibel_steps(step).expect("step");
+            let x = left + CAP / 2.0 + fader_fraction(fader) * (width - CAP);
+            assert_eq!(output_at_pixel(x, left, width), Some(fader));
+        }
+        assert_eq!(output_at_pixel(-100.0, left, width), Some(FaderGain::MIN));
+        assert_eq!(output_at_pixel(1000.0, left, width), Some(FaderGain::MAX));
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(output_at_pixel(invalid, left, width).is_none());
+        }
+        assert!(output_at_pixel(24.0, left, CAP).is_none());
+    }
 
     #[test]
     fn pointer_geometry_covers_every_step_and_clamps_drag_beyond_the_track() {

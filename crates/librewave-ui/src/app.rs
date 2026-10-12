@@ -9,7 +9,9 @@ mod settings;
 mod stage;
 mod theme;
 
+#[cfg(test)]
 use mixer::FaderEdit;
+use mixer::MixerEdit;
 use settings::SettingsPane;
 
 #[cfg(test)]
@@ -92,8 +94,9 @@ struct Shell {
     meter_request_epoch: Option<u64>,
     meters_received: Option<std::time::Instant>,
     pending: bool,
-    in_flight_fader: Option<FaderEdit>,
-    queued_fader: Option<FaderEdit>,
+    in_flight_fader: Option<MixerEdit>,
+    queued_fader: Option<MixerEdit>,
+    linked_faders: std::collections::BTreeSet<librewave_core::SourceId>,
     fader_window: Option<gpui::AnyWindowHandle>,
     poll_in_flight: bool,
     request_epoch: u64,
@@ -109,6 +112,24 @@ struct Shell {
 }
 
 impl Shell {
+    fn linked_command(&self, command: Command) -> Command {
+        if let Command::SetMixerRoute { expected_generation, source, target, route } = command
+            && self.linked_faders.contains(&source)
+            && self
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.mixer.profile.source(source))
+                .is_some_and(|s| s.controls.route(target).fader() != route.fader())
+        {
+            return Command::SetMixerFaders {
+                expected_generation,
+                source,
+                monitor: route.fader(),
+                stream: route.fader(),
+            };
+        }
+        command
+    }
     fn new(cx: &mut Context<Self>) -> Self {
         let mut shell = Self {
             snapshot: None,
@@ -124,6 +145,7 @@ impl Shell {
             pending: false,
             in_flight_fader: None,
             queued_fader: None,
+            linked_faders: std::collections::BTreeSet::new(),
             fader_window: None,
             poll_in_flight: false,
             request_epoch: 0,
@@ -192,11 +214,14 @@ impl Shell {
     }
 
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
+        let command = self.linked_command(command);
         if self.pending
             || (self.settings_modal.is_some()
                 && matches!(
                     command,
                     Command::SetMixerRoute { .. }
+                        | Command::SetMixerFaders { .. }
+                        | Command::SetMixerOutput { .. }
                         | Command::AddMixerInput { .. }
                         | Command::RemoveMixerInput { .. }
                         | Command::InspectDevice { .. }
@@ -245,18 +270,38 @@ impl Shell {
         .detach();
     }
 
-    fn send_fader(&mut self, edit: FaderEdit, cx: &mut Context<Self>) {
+    fn edit_command(&self, edit: MixerEdit) -> Option<Command> {
+        let snapshot = self.snapshot.as_ref()?;
+        if let MixerEdit::Input(input) = edit
+            && self.linked_faders.contains(&input.source)
+        {
+            let controls = snapshot.mixer.profile.source(input.source)?.controls;
+            return (controls.monitor().fader() != input.fader
+                || controls.stream().fader() != input.fader)
+                .then_some(Command::SetMixerFaders {
+                    expected_generation: snapshot.mixer.generation(),
+                    source: input.source,
+                    monitor: input.fader,
+                    stream: input.fader,
+                });
+        }
+        edit.command(snapshot)
+    }
+
+    fn send_fader(&mut self, edit: impl Into<MixerEdit>, cx: &mut Context<Self>) {
+        let edit = edit.into();
         if self.defer_fader(edit) {
             cx.notify();
             return;
         }
-        if let Some(command) = self.snapshot.as_ref().and_then(|snapshot| edit.command(snapshot)) {
+        if let Some(command) = self.edit_command(edit) {
             self.send(command, cx);
             self.in_flight_fader = Some(edit);
         }
     }
 
-    fn defer_fader(&mut self, edit: FaderEdit) -> bool {
+    fn defer_fader(&mut self, edit: impl Into<MixerEdit>) -> bool {
+        let edit = edit.into();
         if self.settings_modal.is_some() {
             return true;
         }
@@ -270,7 +315,7 @@ impl Shell {
         true
     }
 
-    fn finish_fader(&mut self, succeeded: bool) -> Option<FaderEdit> {
+    fn finish_fader(&mut self, succeeded: bool) -> Option<MixerEdit> {
         self.in_flight_fader = None;
         let queued = self.queued_fader.take();
         // Never replay a drag after a stale generation, disconnect or write error.
@@ -366,6 +411,8 @@ impl Shell {
             (Command::GetMixer, Response::Mixer { mixer })
             | (
                 Command::SetMixerRoute { .. }
+                | Command::SetMixerFaders { .. }
+                | Command::SetMixerOutput { .. }
                 | Command::AddMixerInput { .. }
                 | Command::RemoveMixerInput { .. },
                 Response::MixerChanged { mixer },
@@ -378,6 +425,9 @@ impl Shell {
                 self.action_error = Some("The daemon returned an unexpected response.".to_owned());
                 return;
             }
+        }
+        if let Some(snapshot) = &self.snapshot {
+            self.linked_faders.retain(|id| snapshot.mixer.profile.source(*id).is_some());
         }
         self.connection_error = None;
     }
@@ -532,6 +582,7 @@ mod tests {
             pending: false,
             in_flight_fader: None,
             queued_fader: None,
+            linked_faders: std::collections::BTreeSet::new(),
             fader_window: None,
             poll_in_flight: false,
             request_epoch: 0,
@@ -803,6 +854,49 @@ mod tests {
     }
 
     #[test]
+    fn linked_level_edits_align_both_faders_and_output_edits_share_the_latest_intent_slot() {
+        let mut snapshot = Snapshot::empty();
+        snapshot.mixer.profile = snapshot
+            .mixer
+            .profile
+            .with_route(SYSTEM_SOURCE_ID, MixTarget::Stream, MixRoute::new(false, FaderGain::MAX))
+            .expect("different muted stream");
+        let mut shell = shell_with(snapshot);
+        shell.linked_faders.insert(SYSTEM_SOURCE_ID);
+        let input = FaderEdit {
+            source: SYSTEM_SOURCE_ID,
+            target: MixTarget::Monitor,
+            fader: FaderGain::UNITY,
+        };
+        assert_eq!(
+            shell.edit_command(input.into()),
+            Some(Command::SetMixerFaders {
+                expected_generation: MixerGeneration(1),
+                source: SYSTEM_SOURCE_ID,
+                monitor: FaderGain::UNITY,
+                stream: FaderGain::UNITY
+            })
+        );
+        let mute = route_toggle_command(
+            SYSTEM_SOURCE_ID,
+            MixTarget::Monitor,
+            MixRoute::new(true, FaderGain::UNITY),
+            MixerGeneration(1),
+        );
+        assert_eq!(shell.linked_command(mute), mute, "linking does not couple mute states");
+        shell.pending = true;
+        shell.in_flight_fader = Some(input.into());
+        let output = MixerEdit::Output { target: MixTarget::Monitor, fader: FaderGain::MIN };
+        assert!(shell.defer_fader(output));
+        assert_eq!(shell.queued_fader, Some(output));
+        assert_eq!(shell.finish_fader(true), Some(output));
+        assert!(
+            matches!(shell.edit_command(output),Some(Command::SetMixerOutput {route,..}) if route.enabled() && route.fader()==FaderGain::MIN)
+        );
+        assert!(shell.in_flight_fader.is_none() && shell.queued_fader.is_none());
+    }
+
+    #[test]
     fn repeated_drag_motion_keeps_one_latest_intent_and_cancels_it_on_failure() {
         let mut shell = shell_with(Snapshot::empty());
         let before = shell.snapshot.clone();
@@ -815,7 +909,7 @@ mod tests {
         // An unrelated in-flight request does not acquire a fader backlog.
         assert!(shell.defer_fader(edit));
         assert!(shell.queued_fader.is_none());
-        shell.in_flight_fader = Some(edit);
+        shell.in_flight_fader = Some(edit.into());
         for step in -120..=24 {
             assert!(shell.defer_fader(FaderEdit {
                 fader: FaderGain::from_half_decibel_steps(step).expect("step"),
@@ -823,11 +917,11 @@ mod tests {
             }));
         }
         let latest = FaderEdit { fader: FaderGain::MAX, ..edit };
-        assert_eq!(shell.queued_fader, Some(latest));
+        assert_eq!(shell.queued_fader, Some(latest.into()));
         assert_eq!(shell.snapshot, before, "pointer intent cannot replace daemon state");
-        assert_eq!(shell.finish_fader(true), Some(latest));
+        assert_eq!(shell.finish_fader(true), Some(latest.into()));
         assert!(shell.queued_fader.is_none() && shell.in_flight_fader.is_none());
-        shell.in_flight_fader = Some(edit);
+        shell.in_flight_fader = Some(edit.into());
         shell.defer_fader(latest);
         assert!(shell.finish_fader(false).is_none());
         assert!(shell.queued_fader.is_none() && shell.in_flight_fader.is_none());

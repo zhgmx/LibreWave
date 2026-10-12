@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// The current local request/response protocol version.
-pub const PROTOCOL_VERSION: u16 = 10;
+pub const PROTOCOL_VERSION: u16 = 11;
 /// The maximum encoded JSON payload accepted by the local protocol.
 pub const MAX_FRAME_SIZE: usize = 1024 * 1024;
 
@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn semantic_control_command_and_stale_error_round_trip_at_version_seven() {
-        assert_eq!(PROTOCOL_VERSION, 10);
+        assert_eq!(PROTOCOL_VERSION, 11);
         let request = RequestEnvelope {
             version: PROTOCOL_VERSION,
             request_id: 4,
@@ -387,7 +387,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(request).expect("serialize semantic request"),
             json!({
-                "version": 10,
+                "version": 11,
                 "request_id": 4,
                 "command": {
                     "SetWave3Control": {
@@ -412,7 +412,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response.clone()).expect("serialize stale response"),
             json!({
-                "version": 10,
+                "version": 11,
                 "request_id": 4,
                 "result": {
                     "Err": {
@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response).expect("serialize control response"),
             json!({
-                "version": 10,
+                "version": 11,
                 "request_id": 4,
                 "result": {
                     "Ok": {
@@ -494,7 +494,7 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "version": 10,
+                "version": 11,
                 "request_id": 18,
                 "command": {
                     "SetMixerRoute": {
@@ -663,5 +663,39 @@ mod application_tests {
         );
         let wire = encode_response(&response).expect("encode application response");
         assert_eq!(decode_response(&wire[4..]).expect("decode application response"), response);
+    }
+}
+
+#[cfg(test)]
+mod software_control_tests {
+    use super::*;
+    use librewave_core::{FaderGain, MixRoute, MixTarget};
+    #[test]
+    fn atomic_fader_and_output_commands_round_trip_with_complete_output_state() {
+        for command in [
+            Command::SetMixerFaders {
+                expected_generation: MixerGeneration(4),
+                source: SourceId::new(2),
+                monitor: FaderGain::MIN,
+                stream: FaderGain::MAX,
+            },
+            Command::SetMixerOutput {
+                expected_generation: MixerGeneration(4),
+                target: MixTarget::Monitor,
+                route: MixRoute::new(false, FaderGain::MAX),
+            },
+        ] {
+            let request = RequestEnvelope { version: PROTOCOL_VERSION, request_id: 1, command };
+            let wire = encode_request(&request).expect("encode");
+            assert_eq!(decode_request(&wire[4..]).expect("decode"), request);
+        }
+        let mut mixer = MixerSnapshot::default();
+        mixer.profile = mixer
+            .profile
+            .with_output(MixTarget::Stream, MixRoute::new(false, FaderGain::MIN))
+            .expect("output profile");
+        let response = ResponseEnvelope::success(1, Response::MixerChanged { mixer });
+        let wire = encode_response(&response).expect("encode");
+        assert_eq!(decode_response(&wire[4..]).expect("decode"), response);
     }
 }

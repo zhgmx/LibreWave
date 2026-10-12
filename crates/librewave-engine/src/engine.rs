@@ -4,7 +4,7 @@ use crate::meter::{BlockMeters, StereoAccumulator, finish_block, mixer_output_in
 use crate::transfer::{
     ControlConsumer, ControlMappingError, ControlSnapshot, ControlStager, compile_snapshot,
 };
-use librewave_core::{EndpointId, SourceControls, SourceId};
+use librewave_core::{EndpointId, OutputControls, SourceControls, SourceId};
 use std::fmt;
 
 /// One explicitly identified stereo interleaved input buffer.
@@ -75,8 +75,9 @@ impl MixerEngine {
     pub fn new(
         config: MixerConfig,
         initial_controls: &[SourceControls],
+        initial_outputs: OutputControls,
     ) -> Result<(Self, ControlStager), ControlMappingError> {
-        let controls = compile_snapshot(&config, initial_controls)?;
+        let controls = compile_snapshot(&config, initial_controls, initial_outputs)?;
         let (stager, control_consumer) = ControlConsumer::channel(config);
         Ok((Self { config, controls, control_consumer }, stager))
     }
@@ -162,8 +163,8 @@ impl MixerEngine {
             }
 
             let microphone = microphone.clamp(-1.0, 1.0);
-            let monitor = clip_mix(monitor);
-            let stream = clip_mix(stream);
+            let monitor = clip_mix(monitor * f64::from(self.controls.outputs[0].coefficient));
+            let stream = clip_mix(stream * f64::from(self.controls.outputs[1].coefficient));
             outputs[microphone_output].samples[sample_index] = microphone;
             outputs[monitor_output].samples[sample_index] = monitor;
             outputs[stream_output].samples[sample_index] = stream;

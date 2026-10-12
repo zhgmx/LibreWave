@@ -16,7 +16,8 @@ pub use meters::{MAX_MIXER_SOURCES, MeterFrame, MeterSnapshot, SourceLevels, Ste
 pub use mixer::{
     FaderGain, FaderGainError, MICROPHONE_SOURCE_ID, MeterAvailability, MixRoute, MixTarget,
     MixerGeneration, MixerInactiveReason, MixerProfile, MixerProfileError, MixerRuntimeState,
-    MixerSnapshot, MixerSourceSnapshot, SYSTEM_SOURCE_ID, SourceControls, SourceId, SourceRole,
+    MixerSnapshot, MixerSourceSnapshot, OutputControls, SYSTEM_SOURCE_ID, SourceControls, SourceId,
+    SourceRole,
 };
 
 pub use librewave_protocol::ApiVersion;
@@ -523,6 +524,15 @@ pub enum Command {
         target: MixTarget,
         route: MixRoute,
     },
+    /// Atomically set both channel faders without changing either mute state.
+    SetMixerFaders {
+        expected_generation: MixerGeneration,
+        source: SourceId,
+        monitor: FaderGain,
+        stream: FaderGain,
+    },
+    /// Set a software mix output level and mute state.
+    SetMixerOutput { expected_generation: MixerGeneration, target: MixTarget, route: MixRoute },
 }
 
 /// Desktop default selections. An absent configured value means automatic selection.
