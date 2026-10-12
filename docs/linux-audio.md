@@ -285,3 +285,28 @@ Do not claim Linux audio backend support until these tests pass.
 - Confirm that saved microphone gain and headphone level survive every recovery case.
 - Install a new development build over an older one and confirm that every running path refers to the new build.
 - Uninstall and confirm that manifest-owned paths are removed, replaced files are restored, profiles are preserved, and no LibreWave process, unit, rule, or node remains.
+
+## Application target restoration
+
+Application moves write the observed software input's `object.serial` to
+`target.object` with type `Spa:Id`. The serial identifies the current node.
+The router rejects missing or replaced inputs and checks every audio link
+before it reports a verified move. Conditional rollback preserves independent
+metadata changes.
+
+WirePlumber's stream restoration hook resolves this serial and saves the
+stable node name. On a new stream, it resolves that name to the current serial.
+This permits input recreation without retaining stale node identities in
+LibreWave. Explicit application targets and disabled target restoration can
+prevent restoration. LibreWave does not change the global restoration setting.
+
+A private PipeWire and WirePlumber test moved a silent stream, checked the saved
+target, recreated the stream, then recreated the input and restarted
+WirePlumber. The stream returned to the assigned input with a new input serial.
+This test uses private state and no ALSA device. Run it separately and serially:
+
+```text
+LIBREWAVE_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux --lib private_application_ -- --ignored --test-threads=1
+```
+
+Real desktop routing and restart acceptance remain required.

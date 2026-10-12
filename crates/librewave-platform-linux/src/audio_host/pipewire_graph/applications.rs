@@ -137,7 +137,6 @@ impl Router {
         revision: u64,
         application: ApplicationId,
         source: SourceId,
-        target_name: &str,
         streams: &[Stream],
         sinks: &[(SourceId, u32, u64)],
         now: Instant,
@@ -164,7 +163,14 @@ impl Router {
                 "An application stream forbids movement or lacks a verified incarnation.".into()
             );
         }
-        let desired = MetadataValue { type_: Some("Spa:Id".into()), value: target_name.to_owned() };
+        if *target_serial == 0 {
+            return Err("The selected input lacks a verified incarnation.".into());
+        }
+        // WirePlumber resolves this serial and saves the stable node name for
+        // stream restoration. A node name moves streams but is not saved by
+        // its target.object restoration hook.
+        let desired =
+            MetadataValue { type_: Some("Spa:Id".into()), value: target_serial.to_string() };
         let members = group
             .iter()
             .map(|s| Member {
@@ -359,17 +365,11 @@ mod tests {
         let now = Instant::now();
         assert_eq!(Router::project(&streams, &sinks())[0].streams, 2);
         let writes = r
-            .begin(
-                0,
-                streams[0].identity,
-                SourceId::new(3),
-                "librewave.input.3",
-                &streams,
-                &sinks(),
-                now,
-            )
+            .begin(0, streams[0].identity, SourceId::new(3), &streams, &sinks(), now)
             .expect("valid fixture");
         assert_eq!(writes.len(), 2);
+        assert!(writes.iter().all(|w| w.value
+            == Some(MetadataValue { type_: Some("Spa:Id".into()), value: "100".into() })));
         for w in writes {
             r.targets.insert(w.subject, w.value.expect("valid fixture"));
         }
@@ -387,14 +387,14 @@ mod tests {
         let mut r = router();
         let mut s = vec![stream(1)];
         let now = Instant::now();
-        assert!(r.begin(1, s[0].identity, SourceId::new(3), "target", &s, &sinks(), now).is_err());
+        assert!(r.begin(1, s[0].identity, SourceId::new(3), &s, &sinks(), now).is_err());
         r.moving = Some(false);
-        assert!(r.begin(0, s[0].identity, SourceId::new(3), "target", &s, &sinks(), now).is_err());
+        assert!(r.begin(0, s[0].identity, SourceId::new(3), &s, &sinks(), now).is_err());
         r.moving = Some(true);
         s[0].blocked = true;
-        assert!(r.begin(0, s[0].identity, SourceId::new(3), "target", &s, &sinks(), now).is_err());
+        assert!(r.begin(0, s[0].identity, SourceId::new(3), &s, &sinks(), now).is_err());
         s[0].blocked = false;
-        assert!(r.begin(0, s[0].identity, SourceId::new(1), "target", &s, &sinks(), now).is_err());
+        assert!(r.begin(0, s[0].identity, SourceId::new(1), &s, &sinks(), now).is_err());
         assert!(r.pending.is_none());
         assert!(r.targets.is_empty());
     }
@@ -405,9 +405,8 @@ mod tests {
         let now = Instant::now();
         let old = MetadataValue { type_: Some("custom".into()), value: "old".into() };
         r.targets.insert(1, old.clone());
-        let writes = r
-            .begin(0, s[0].identity, SourceId::new(3), "target", &s, &sinks(), now)
-            .expect("valid fixture");
+        let writes =
+            r.begin(0, s[0].identity, SourceId::new(3), &s, &sinks(), now).expect("valid fixture");
         for w in writes {
             r.targets.insert(w.subject, w.value.expect("valid fixture"));
         }
@@ -422,9 +421,8 @@ mod tests {
         let mut r = router();
         let mut s = vec![stream(1)];
         let now = Instant::now();
-        let w = r
-            .begin(0, s[0].identity, SourceId::new(3), "target", &s, &sinks(), now)
-            .expect("valid fixture");
+        let w =
+            r.begin(0, s[0].identity, SourceId::new(3), &s, &sinks(), now).expect("valid fixture");
         r.targets.insert(1, w[0].value.clone().expect("valid fixture"));
         s.push(stream(2));
         assert_eq!(r.advance(&s, &sinks(), now), vec![Write { subject: 1, value: None }]);
@@ -440,7 +438,7 @@ mod tests {
         let streams = vec![stream(1)];
         let now = Instant::now();
         let writes = r
-            .begin(0, streams[0].identity, SourceId::new(3), "target", &streams, &sinks(), now)
+            .begin(0, streams[0].identity, SourceId::new(3), &streams, &sinks(), now)
             .expect("move");
         r.update_target(1, writes[0].value.clone());
         r.update_target(1, None);
@@ -471,23 +469,15 @@ mod tests {
         let streams = vec![stream(1)];
         let now = Instant::now();
         let writes = r
-            .begin(0, streams[0].identity, SourceId::new(3), "target", &streams, &sinks(), now)
+            .begin(0, streams[0].identity, SourceId::new(3), &streams, &sinks(), now)
             .expect("begin");
         r.update_target(1, writes[0].value.clone());
         let rollback = r.advance(&streams, &sinks(), now + MOVE_TIMEOUT);
         assert_eq!(rollback, vec![Write { subject: 1, value: None }]);
         assert!(matches!(r.result, Some(ApplicationRoute::Restoring { .. })));
         assert!(
-            r.begin(
-                r.revision,
-                streams[0].identity,
-                SourceId::new(3),
-                "target",
-                &streams,
-                &sinks(),
-                now
-            )
-            .is_err()
+            r.begin(r.revision, streams[0].identity, SourceId::new(3), &streams, &sinks(), now)
+                .is_err()
         );
         r.update_target(1, None);
         r.advance(&streams, &sinks(), now);

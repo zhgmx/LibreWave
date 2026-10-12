@@ -206,18 +206,6 @@ impl<P: GraphProcessor> ActiveGraph<P> {
         application: ApplicationId,
         source: SourceId,
     ) -> Result<(), String> {
-        let name = self
-            .inner
-            .endpoints
-            .iter()
-            .find_map(|plan| match plan.endpoint {
-                EndpointId::System if source == librewave_core::SYSTEM_SOURCE_ID => {
-                    Some(plan.node_name.clone())
-                }
-                EndpointId::Input { source: id } if id == source => Some(plan.node_name.clone()),
-                _ => None,
-            })
-            .ok_or_else(|| "The selected software input is not configured.".to_owned())?;
         let writes = {
             let mut state = self.inner.registry_state.borrow_mut();
             let (streams, _, sinks) = state.application_view(&self.inner.endpoints);
@@ -226,15 +214,7 @@ impl<P: GraphProcessor> ActiveGraph<P> {
             {
                 return Err("The application stream observation limit was reached.".into());
             }
-            state.router.begin(
-                revision,
-                application,
-                source,
-                &name,
-                &streams,
-                &sinks,
-                Instant::now(),
-            )?
+            state.router.begin(revision, application, source, &streams, &sinks, Instant::now())?
         };
         self.write_targets(writes);
         Ok(())

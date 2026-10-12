@@ -1315,6 +1315,165 @@ mod tests {
             graph.teardown().expect("remove private graph");
         }
 
+        #[test]
+        #[ignore = "requires LIBREWAVE_PIPEWIRE_INTEGRATION=1; tests saved targets only in a private PipeWire/WirePlumber session"]
+        fn private_application_target_survives_stream_graph_and_policy_restart() {
+            use librewave_core::{ApplicationRoute, ApplicationSnapshot, SourceId};
+            assert_eq!(std::env::var("LIBREWAVE_PIPEWIRE_INTEGRATION").as_deref(), Ok("1"));
+            let server = PrivatePipeWire::start(128, 31);
+            let mut policy = server.start_wireplumber();
+            let mut endpoints = DELIBERATE_ENDPOINTS.to_vec();
+            endpoints.push(EndpointId::Input { source: SourceId::new(3) });
+            let plans = endpoint_plans(&endpoints).expect("input plans");
+            let mut graph = application_graph(&plans);
+            let player = application_player(&server, Some("librewave.system"));
+            let (revision, application) = wait_application(&mut graph, Some(SYSTEM_SOURCE_ID));
+            graph.route_application(revision, application, SourceId::new(3)).expect("move");
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                graph.iterate(Duration::from_millis(10));
+                if matches!(graph.applications(), ApplicationSnapshot::Ready { route: Some(ApplicationRoute::Verified { source, .. }), .. } if source == SourceId::new(3))
+                {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "move not verified: {:?}", graph.applications());
+            }
+            // Prove WirePlumber stored the stable name, not just that links moved.
+            let state_file = server.root.join("state/wireplumber/stream-properties");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                graph.iterate(Duration::from_millis(10));
+                if fs::read_to_string(&state_file).is_ok_and(|s| {
+                    s.contains("org.librewave.PersistencePlayer") && s.contains("librewave.input.3")
+                }) {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "WirePlumber did not save the assigned target");
+            }
+            drop(player);
+            wait_no_applications(&mut graph);
+            // A new stream has no target override and must use the stored assignment.
+            let player = application_player(&server, None);
+            wait_application(&mut graph, Some(SourceId::new(3)));
+            drop(player);
+            wait_no_applications(&mut graph);
+            let old_serial = graph
+                .inner
+                .registry_state
+                .borrow()
+                .application_view(&plans)
+                .2
+                .into_iter()
+                .find(|s| s.0 == SourceId::new(3))
+                .expect("old input")
+                .2;
+            graph.teardown().expect("release graph");
+            drop(graph);
+            drop(policy);
+            policy = server.start_wireplumber();
+            let mut graph = application_graph(&plans);
+            let player = application_player(&server, None);
+            wait_application(&mut graph, Some(SourceId::new(3)));
+            let new_serial = graph
+                .inner
+                .registry_state
+                .borrow()
+                .application_view(&plans)
+                .2
+                .into_iter()
+                .find(|s| s.0 == SourceId::new(3))
+                .expect("new input")
+                .2;
+            assert_ne!(
+                old_serial, new_serial,
+                "restoration must resolve the new incarnation by name"
+            );
+            assert!(!graph.diagnostics().failed);
+            drop(player);
+            wait_no_applications(&mut graph);
+            graph.teardown().expect("release rebuilt graph");
+            drop(policy);
+        }
+
+        fn application_graph(plans: &[EndpointPlan]) -> ActiveGraph<LayoutProbe> {
+            InactiveGraph::construct(
+                REMOTE,
+                plans,
+                NonZeroU32::new(128).expect("quantum"),
+                AdapterPortMode::WirePlumber,
+                LayoutProbe { sources: 2, cycles: Arc::new(AtomicU64::new(0)) },
+            )
+            .expect("private graph")
+            .activate()
+            .expect("activate private graph")
+        }
+
+        fn application_player(server: &PrivatePipeWire, target: Option<&str>) -> TestChild {
+            let mut command = server.command("pw-play");
+            command.args([
+                "--raw",
+                "--rate",
+                "48000",
+                "--channels",
+                "2",
+                "--format",
+                "s16",
+                "--properties",
+                "application.id=org.librewave.PersistencePlayer application.name=PersistencePlayer",
+            ]);
+            if let Some(target) = target {
+                command.args(["--target", target]);
+            }
+            TestChild(
+                command
+                    .arg("/dev/zero")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("silent private stream"),
+            )
+        }
+
+        fn wait_application(
+            graph: &mut ActiveGraph<LayoutProbe>,
+            source: Option<librewave_core::SourceId>,
+        ) -> (u64, librewave_core::ApplicationId) {
+            use librewave_core::{ApplicationMovement, ApplicationSnapshot};
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                graph.iterate(Duration::from_millis(10));
+                if let ApplicationSnapshot::Ready {
+                    generation,
+                    applications,
+                    movement: ApplicationMovement::Allowed,
+                    ..
+                } = graph.applications()
+                    && let [application] = applications.as_slice()
+                    && application.source == source
+                    && application.streams == 1
+                {
+                    return (generation.revision, application.id);
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "application did not reach target: {:?}",
+                    graph.applications()
+                );
+            }
+        }
+
+        fn wait_no_applications(graph: &mut ActiveGraph<LayoutProbe>) {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                graph.iterate(Duration::from_millis(10));
+                if matches!(graph.applications(), librewave_core::ApplicationSnapshot::Ready { applications, .. } if applications.is_empty())
+                {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "private stream remained");
+            }
+        }
+
         struct TestChild(Child);
 
         impl Drop for TestChild {

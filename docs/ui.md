@@ -122,8 +122,10 @@ with `executable` for an executable identity from the list. The clients use
 the same daemon commands. Application grouping and routing passed a private
 software-session test. Native interaction and real desktop routing remain
 unverified. The list identifies applications, not individual browser tabs.
-WirePlumber can remember a selected target when its stream restoration setting
-permits it. LibreWave keeps no assignment cache and does not replay assignments
+LibreWave sends the observed input serial as `target.object`. WirePlumber
+resolves it and stores the stable input name when target restoration is enabled.
+A private test confirmed restoration after stream recreation, input recreation,
+and a WirePlumber restart. LibreWave keeps no assignment cache and does not replay assignments
 after restart. A stream's first audio can reach its previous destination before
 movement completes.
 
