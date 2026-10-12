@@ -84,6 +84,29 @@ sudo dnf install \
 
 These packages are prerequisites for builds from source. They do not install or configure LibreWave.
 
+## Device access
+
+Device access is an installation step. It is not required for each application
+launch. Setup installs `/etc/udev/rules.d/70-librewave-wave3.rules`. The rule tags
+only normal-mode USB vendor `0fd9`, product `0070`, with `uaccess`.
+
+Automatic access requires systemd-udev, systemd-logind, and an active local
+desktop session. The same user can then use the device from the application,
+CLI, or daemon. An SSH connection alone does not create the local-seat grant.
+Setup also requires `pkexec`, a polkit authentication agent, and the `getfacl`
+and `setfacl` commands.
+
+The rule stays installed when the application closes. It applies to new device
+nodes after reconnect or reboot when the local session is active. This is the
+intended permission lifecycle; reconnect and login acceptance tests remain
+required. A temporary `setfacl` grant used for development applies only to one
+current node and disappears when that node is replaced.
+
+Uninstall removes the owned rule and restores recorded permissions when the
+exact node still matches. Permission-record recovery for a new connection is
+separate from the persistent rule. Do not bypass the ownership checks to make
+cleanup succeed.
+
 ## Source setup
 
 Build both runnable binaries before setup. A test build does not guarantee that the plain executable files are current.
