@@ -38,8 +38,9 @@ When the daemon is unavailable, the stage dims the illustration and the mixer
 area shows one notice with **Start audio** and **Open Settings**. The main
 view does not expose socket diagnostics or invent device or channel state.
 Live peak meters appear on input strips and output rows while audio runs.
-Effects and linked levels remain unavailable and have no controls.
-Output selection and output level are also unavailable. The mixer shows where they go, as described in Mixer.
+The mixer has linked channel levels, application assignment, and software
+output level and mute controls. Effects and output destination selection
+remain unavailable.
 
 ### Device stage
 
@@ -121,6 +122,10 @@ with `executable` for an executable identity from the list. The clients use
 the same daemon commands. Application grouping and routing passed a private
 software-session test. Native interaction and real desktop routing remain
 unverified. The list identifies applications, not individual browser tabs.
+WirePlumber can remember a selected target when its stream restoration setting
+permits it. LibreWave keeps no assignment cache and does not replay assignments
+after restart. A stream's first audio can reach its previous destination before
+movement completes.
 
 **Outputs** is under the inputs and has one row for each mix. A row names the
 mix and where it goes. The Monitor mix plays in the Wave:3 headphones. The
@@ -165,8 +170,9 @@ failure ends the gesture, cancels the pending level, and shows the error.
 Pointer previews are not saved until the daemon accepts the change.
 
 Focus a fader with the Tab key. Use the arrow keys for 0.5 dB steps, Home for
--60 dB, End for +12 dB, and Enter for 0 dB. Each action sends one route
-change with the current mixer generation. The daemon returns the complete mixer
+-60 dB, and End for +12 dB. Enter resets a channel fader to 0 dB. Each action
+uses the current mixer generation. Linked channel edits set both levels in
+one request. Output edits change one software mix. The daemon returns the complete mixer
 snapshot after it saves the change. Routes can be
 saved while the audio host is inactive; they apply when an opt-in audio attempt
 becomes active. A stale generation error is shown until the next action, while
@@ -196,10 +202,11 @@ The captures do not validate native mouse or keyboard interaction, active audio,
 or behavior on other desktops.
 Longer stability on the current startup and routing implementation also
 requires validation.
-The fader tracks support drag, click, and keyboard input. The hardware level
-bars are not draggable. Linked
-faders, application assignment, effects, and output selection remain work
-for later increments.
+Channel and output fader tracks support drag, click, and keyboard input.
+Hardware level bars are not draggable. Linked levels and output controls passed
+software tests, and grouped application routing passed a private WirePlumber
+test. Native interaction and real audio acceptance of these controls remain
+pending. Effects and output destination selection remain work for later increments.
 
 The Linux application uses upstream Zed GPUI and `gpui_platform` from
 Zed tag `v0.233.9`, commit `236e6ddf54e0763d0343f4d3e369d2ae00fe9670`,
