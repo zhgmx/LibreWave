@@ -1,6 +1,6 @@
 use super::{
-    AudioSupervisor, Daemon, IpcError, IpcErrorKind, MixerRuntimeState, PersistenceError, Response,
-    ignore_reconciliation_event, internal_error,
+    AdmissionPurpose, AudioSupervisor, Daemon, DeviceAdmissionSnapshot, IpcError, IpcErrorKind,
+    MixerRuntimeState, PersistenceError, Response, ignore_reconciliation_event, internal_error,
 };
 
 impl Daemon {
@@ -15,17 +15,29 @@ impl Daemon {
                 message: "connect exactly one supported Wave:3 before takeover".to_owned(),
             });
         }
-        let candidate = self
+        let id = *self
             .candidates
-            .values()
+            .keys()
             .next()
             .ok_or_else(|| internal_error("no candidate after admission count check".into()))?;
-        (self.audio_access)(candidate).map_err(|error| IpcError {
-            message: format!(
-                "read-only Wave:3 admission failed: {error}; no desktop ownership was changed"
-            ),
-            kind: IpcErrorKind::AudioAccess { error },
-        })?;
+        // Observation already owns the claimed vendor interface. Reuse that
+        // connection for a fresh read, or acquire the first connection when
+        // observation has not run. A second unclaimed probe cannot access an
+        // interface held by the daemon's existing USB handle.
+        self.admit(id, origin, AdmissionPurpose::Observe)?;
+        let error = match &self.device(id)?.admission {
+            DeviceAdmissionSnapshot::Admitted { config: Some(_), .. } => None,
+            DeviceAdmissionSnapshot::Failed { error } => Some(error.clone()),
+            _ => Some(librewave_core::AdmissionError::MalformedResponse),
+        };
+        if let Some(error) = error {
+            return Err(IpcError {
+                message: format!(
+                    "read-only Wave:3 admission failed: {error}; no desktop ownership was changed"
+                ),
+                kind: IpcErrorKind::AudioAccess { error },
+            });
+        }
         Ok(Response::AudioAccessChecked)
     }
     pub(super) fn read_desktop_defaults(&mut self) -> Result<Response, IpcError> {

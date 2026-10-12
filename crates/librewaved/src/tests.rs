@@ -2,7 +2,7 @@ use super::*;
 const FIRST_GENERATION: DeviceGeneration = DeviceGeneration::new([0; 16], 1);
 const SECOND_GENERATION: DeviceGeneration = DeviceGeneration::new([0; 16], 2);
 use crate::PersistenceError;
-use librewave_core::{AudioSnapshot, FaderGain, ServiceFailureReason, ServiceState};
+use librewave_core::{AudioSnapshot, FaderGain, Origin, ServiceFailureReason, ServiceState};
 use librewave_platform_linux::ServiceAvailability;
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -1960,5 +1960,87 @@ fn output_and_paired_fader_save_failures_do_not_advance_retained_state() {
             assert_eq!(daemon.snapshot(), &before);
             assert_eq!(*saves.borrow(), 1);
         }
+    }
+}
+
+#[test]
+fn audio_access_reuses_the_observed_connection_without_restoring_managed_controls() {
+    let mut desired = DesiredState::default();
+    desired.stage("1-8.3".into(), Wave3Control::MicrophoneMute(true)).expect("desired fixture");
+    desired.promote("1-8.3").expect("desired fixture");
+    let mut h = harness(desired.clone(), wave3_config(), vec![], vec![]);
+    h.daemon.observe_controls(Instant::now());
+    assert_eq!(*h.connections.borrow(), 1);
+    // Any second connection is a defect even if a platform probe could read it.
+    h.daemon.connector = Box::new(|_| panic!("audio access opened a second USB connection"));
+    let mut physical = wave3_config();
+    physical.input_gain.raw = 4726;
+    h.refreshes.borrow_mut().push_back(ConnectionRefreshOutcome::Changed(physical.clone()));
+    let mixer = h.daemon.snapshot().mixer.clone();
+    assert!(matches!(
+        h.daemon.handle(Command::CheckAudioAccess, Origin::Client),
+        Ok(Response::AudioAccessChecked)
+    ));
+    assert!(h.refreshes.borrow().is_empty(), "access must perform a fresh configuration read");
+    assert_eq!(h.daemon.snapshot().devices[0].admission.config(), Some(&physical));
+    assert_eq!(h.daemon.snapshot().mixer, mixer);
+    assert!(matches!(
+        h.daemon.handle(Command::CheckAudioAccess, Origin::Client),
+        Ok(Response::AudioAccessChecked)
+    ));
+    assert_eq!(*h.connections.borrow(), 1);
+    assert!(h.calls.borrow().is_empty());
+    assert_eq!(*h.saves.borrow(), 0);
+    assert_eq!(*h.store_state.borrow(), desired);
+    assert!(!h.daemon.audio_session.enabled && h.daemon.audio_session.defaults.is_none());
+}
+
+#[test]
+fn audio_access_acquires_the_first_observation_without_restoring_hardware() {
+    let mut desired = DesiredState::default();
+    desired.stage("1-8.3".into(), Wave3Control::MicrophoneMute(true)).expect("desired fixture");
+    desired.promote("1-8.3").expect("desired fixture");
+    let mut h = harness(desired.clone(), wave3_config(), vec![], vec![]);
+    assert!(matches!(
+        h.daemon.handle(Command::CheckAudioAccess, Origin::Client),
+        Ok(Response::AudioAccessChecked)
+    ));
+    assert_eq!(*h.connections.borrow(), 1);
+    assert!(!h.daemon.snapshot().devices[0].admission.config().expect("config").input_mute);
+    assert!(h.calls.borrow().is_empty());
+    assert_eq!(*h.saves.borrow(), 0);
+    assert_eq!(*h.store_state.borrow(), desired);
+}
+
+#[test]
+fn audio_access_reports_retained_read_and_initial_admission_failures_without_takeover() {
+    for error in [
+        AdmissionError::MalformedResponse,
+        AdmissionError::PermissionDenied,
+        AdmissionError::Disconnected,
+    ] {
+        let mut h = harness(DesiredState::default(), wave3_config(), vec![], vec![]);
+        h.daemon.observe_controls(Instant::now());
+        h.refreshes.borrow_mut().push_back(ConnectionRefreshOutcome::Failed(error.clone()));
+        let failure =
+            h.daemon.handle(Command::CheckAudioAccess, Origin::Client).expect_err("read must fail");
+        assert_eq!(failure.kind, IpcErrorKind::AudioAccess { error: error.clone() });
+        assert_eq!(
+            h.daemon.snapshot().devices[0].admission,
+            DeviceAdmissionSnapshot::Failed { error: error.clone() }
+        );
+        assert!(h.daemon.connections.is_empty());
+        assert_eq!(*h.connections.borrow(), 1);
+        assert!(h.calls.borrow().is_empty());
+        assert!(!h.daemon.audio_session.enabled && h.daemon.audio_session.defaults.is_none());
+        h.daemon.connector = Box::new(move |_| Err(error.clone()));
+        assert!(matches!(
+            h.daemon
+                .handle(Command::CheckAudioAccess, Origin::Client)
+                .expect_err("admission must fail")
+                .kind,
+            IpcErrorKind::AudioAccess { .. }
+        ));
+        assert_eq!(*h.saves.borrow(), 0);
     }
 }

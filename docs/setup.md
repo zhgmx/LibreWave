@@ -176,7 +176,7 @@ If an existing user WirePlumber fragment creates competing Wave endpoints, selec
 librewavectl start --experimental --suspend-config /absolute/path/to/wireplumber.conf.d/51-elgato.conf
 ```
 
-Start verifies the installed artifacts and refuses extra, stale, or modified daemon processes. It reloads the user units and starts `librewaved.service` when necessary. It checks host services and read-only device admission before it changes the audio policy.
+Start verifies the installed artifacts and refuses extra, stale, or modified daemon processes. It reloads the user units and starts `librewaved.service` when necessary. It checks host services and read-only device admission before it changes the audio policy. The admission check uses the daemon's control connection and reads fresh state. It does not restore saved hardware settings or open a competing USB handle.
 
 The daemon saves the configured default selections. The lifecycle backs up the selected regular `.conf` file, including its mode, and suspends only that file. It creates the exact `80-librewave-wave3.conf` policy and restarts WirePlumber. It waits for ready audio before selecting `librewave.system` and `librewave.microphone`. Success requires both configured and effective defaults to select those endpoints.
 

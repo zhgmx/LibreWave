@@ -48,7 +48,6 @@ pub struct Daemon {
     service_probe: Option<librewave_platform_linux::ServiceProbe>,
     next_service_probe: Instant,
     desktop_defaults: Box<dyn librewave_platform_linux::desktop_defaults::DesktopDefaultStore>,
-    audio_access: Box<AudioAccessCheck>,
     audio_endpoints: Box<dyn FnMut() -> std::io::Result<Vec<String>>>,
     audio_session: AudioSession,
     audio_session_store: Box<dyn AudioSessionStore>,
@@ -57,8 +56,6 @@ pub struct Daemon {
     next_control_inventory: Instant,
     control_reads: BTreeMap<DeviceId, Instant>,
 }
-
-type AudioAccessCheck = dyn FnMut(&UsbDeviceCandidate) -> Result<(), AdmissionError>;
 
 type ConnectionFactory =
     dyn FnMut(&UsbDeviceCandidate) -> Result<Box<dyn ManagedWave3Connection>, AdmissionError>;
@@ -161,11 +158,6 @@ impl Daemon {
             next_control_inventory: Instant::now(),
             control_reads: BTreeMap::new(),
             audio_endpoints: Box::new(librewave_platform_linux::desktop_defaults::audio_endpoints),
-            audio_access: Box::new(|candidate| {
-                librewave_platform_linux::probe_wave3_usb(candidate)
-                    .map(|_| ())
-                    .map_err(admission_error)
-            }),
         })
     }
 
@@ -195,7 +187,6 @@ impl Daemon {
             service_probe: None,
             next_service_probe: Instant::now(),
             desktop_defaults: Box::new(UnavailableDesktopDefaults),
-            audio_access: Box::new(|_| Err(AdmissionError::Disconnected)),
             audio_endpoints: Box::new(|| Ok(Vec::new())),
             audio_session: AudioSession::default(),
             audio_session_store: Box::new(MemoryAudioSessionStore(AudioSession::default())),
