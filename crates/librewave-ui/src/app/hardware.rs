@@ -93,7 +93,7 @@ impl Shell {
                 panel.child(notice(error.to_string(), DANGER)).child(read(Tone::Secondary, cx))
             }
             DeviceAdmissionSnapshot::Admitted { api, config: None, .. } => panel
-                .child(notice(format!("API {api} sent no configuration."), WARNING))
+                .child(notice(format!("Configuration unavailable for API {api}."), WARNING))
                 .child(read(Tone::Secondary, cx)),
             DeviceAdmissionSnapshot::Admitted {
                 generation,
@@ -146,7 +146,7 @@ fn levels(config: &Wave3ConfigSnapshot, target: Target, cx: &mut Context<Shell>)
         .gap(px(SPACE_MD))
         .child(level_row(
             &Level {
-                name: "Input gain",
+                name: "Microphone gain",
                 key: "gain",
                 value: config.input_gain,
                 minimum: 0,
@@ -165,7 +165,7 @@ fn levels(config: &Wave3ConfigSnapshot, target: Target, cx: &mut Context<Shell>)
         ))
         .child(level_row(
             &Level {
-                name: "Headphones",
+                name: "Headphone level",
                 key: "headphone",
                 value: config.headphone_volume,
                 minimum: -60 * 256,

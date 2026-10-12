@@ -122,7 +122,7 @@ impl Shell {
                         .flex_col()
                         .gap(px(SPACE_SM))
                         .child(output_row(MixTarget::Monitor, "headphones", "Wave:3 headphones"))
-                        .child(output_row(MixTarget::Stream, "system", "Source for other apps")),
+                        .child(output_row(MixTarget::Stream, "system", "Source for applications")),
                 ),
             )
     }

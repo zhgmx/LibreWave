@@ -185,7 +185,7 @@ impl Shell {
                 "power",
                 MUTED,
                 "Audio state is unavailable",
-                "Connect to the LibreWave service to check audio state.".to_owned(),
+                "Connect to the daemon to check audio state.".to_owned(),
             ),
         };
         let start = labeled_icon_button(
@@ -282,9 +282,9 @@ impl Shell {
     fn setup_pane(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut commands = group();
         for (index, (name, detail, command)) in [
-            ("Install or repair", "Installs the service and the device access rule.", "setup"),
+            ("Install or repair", "Installs the daemon and the device access rule.", "setup"),
             ("Check the installation", "Reports each installed part and its state.", "doctor"),
-            ("Remove", "Removes every file that setup installed.", "uninstall"),
+            ("Remove", "Removes unmodified LibreWave files.", "uninstall"),
         ]
         .into_iter()
         .enumerate()
@@ -368,7 +368,7 @@ impl Shell {
                             color,
                             44.,
                         ))
-                        .child(description("LibreWave service", state.to_owned()))
+                        .child(description("LibreWave daemon", state.to_owned()))
                         .child(icon_button(
                             "refresh",
                             "arrow-clockwise",
@@ -383,7 +383,7 @@ impl Shell {
             )
             .child(
                 group().child(
-                    row("Socket", "The service answers on this path.".to_owned())
+                    row("Socket", "The daemon answers on this path.".to_owned())
                         .child(code(&configured_socket_path().display().to_string())),
                 ),
             )

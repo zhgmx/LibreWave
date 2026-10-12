@@ -60,8 +60,8 @@ After a read, the same command is the circular arrow beside the device name.
 
 The hardware controls sit under the illustration:
 
-- **Input gain** and **Headphones** each show a level in dB and a bar for its
-  position in the reviewed range. Physical readings use two decimal places.
+- **Microphone gain** and **Headphone level** each show a level in dB and a bar
+  for its position in the reviewed range. Physical readings use two decimal places.
   The **−** and **+** buttons change a level
   by 0.5 dB. The bars are not draggable.
 - The icon button before each level mutes or unmutes it. A muted level is dim
@@ -149,9 +149,11 @@ acceptance runs. GPUI tests check command mapping, pointer geometry, state
 handling, loaded Ready and Locked control layouts, initial keyboard focus,
 modal focus containment, restoration errors across Settings pages, and backdrop
 dismissal. Loaded-control layout tests use fixtures. Native captures check the
-daemon-connected view with controls not loaded and the Settings dialog. These
-captures do not validate native mouse or keyboard interaction, active audio,
-or cross-desktop behavior.
+daemon-connected view before and after reading the real Wave:3 API 5.4 controls,
+the loaded device stage at the minimum window size, and the Settings dialog.
+The loaded-control review leaves audio inactive and hardware controls unchanged.
+The captures do not validate native mouse or keyboard interaction, active audio,
+or behavior on other desktops.
 Longer stability on the current startup and routing implementation also
 requires validation.
 The fader tracks support drag, click, and keyboard input. The hardware level
