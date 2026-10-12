@@ -18,8 +18,7 @@ impl Shell {
         let inputs =
             self.snapshot.as_ref().map_or(0, |snapshot| snapshot.mixer.profile.sources.len());
         // Below this width the stage moves above the mixer.
-        let compact =
-            f32::from(viewport.width) < STAGE_WIDTH + mixer_min_width(inputs) + 2. * SPACE_2XL;
+        let compact = f32::from(viewport.width) < STAGE_WIDTH + mixer_min_width() + 2. * SPACE_2XL;
         let height = f32::from(viewport.height);
         let stage = self.stage(compact, height, cx);
         let body = if compact {

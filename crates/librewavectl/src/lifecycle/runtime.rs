@@ -835,6 +835,12 @@ fn diagnose_running(manifest: &Manifest, host: &mut impl RuntimeHost) -> io::Res
             return Err(io::Error::other(format!("expected one product node: {name}")));
         }
     }
+    for source in mixer.profile.sources.iter().skip(2) {
+        let name = format!("librewave.input.{}", source.controls.source());
+        if names.iter().filter(|observed| **observed == name).count() != 1 {
+            return Err(io::Error::other(format!("expected one product node: {name}")));
+        }
+    }
     request_kind(host, Command::GetDesktopDefaults, |response| {
         matches!(response, Response::DesktopDefaults { .. })
     })

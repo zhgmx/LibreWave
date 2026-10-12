@@ -242,6 +242,7 @@ impl fmt::Display for MixTarget {
 pub enum SourceRole {
     Microphone,
     System,
+    Software,
 }
 
 impl fmt::Display for SourceRole {
@@ -249,6 +250,7 @@ impl fmt::Display for SourceRole {
         formatter.write_str(match self {
             Self::Microphone => "microphone",
             Self::System => "system",
+            Self::Software => "software",
         })
     }
 }
@@ -324,12 +326,62 @@ impl MixerProfile {
         if self.microphone_source != MICROPHONE_SOURCE_ID {
             return Err(MixerProfileError::MicrophoneSource);
         }
-        if self.sources.len() != PRODUCT_SOURCES.len() {
+        if !(PRODUCT_SOURCES.len()..=crate::MAX_MIXER_SOURCES).contains(&self.sources.len()) {
             return Err(MixerProfileError::SourceCount { actual: self.sources.len() });
         }
         for (source, expected) in self.sources.iter().zip(PRODUCT_SOURCES) {
             validate_source(source, expected)?;
         }
+        for (index, source) in self.sources.iter().enumerate().skip(PRODUCT_SOURCES.len()) {
+            let id = source.controls.source();
+            if source.role != SourceRole::Software
+                || !(3..=12).contains(&id.get())
+                || id <= self.sources[index - 1].controls.source()
+                || crate::InputName::try_new(&source.name).is_err()
+            {
+                return Err(MixerProfileError::SourceIdentity { id });
+            }
+        }
+        Ok(())
+    }
+
+    /// Adds a named software input at the first free bounded identity.
+    /// # Errors
+    /// Returns an error when capacity or the profile generation is exhausted.
+    pub fn with_input(&self, name: crate::InputName) -> Result<Self, MixerProfileError> {
+        let id = (3..=12)
+            .map(SourceId::new)
+            .find(|id| self.source(*id).is_none())
+            .ok_or(MixerProfileError::SourceCount { actual: self.sources.len() + 1 })?;
+        let mut next = self.clone();
+        let unity = MixRoute::new(true, FaderGain::UNITY);
+        next.sources.push(MixerSourceSnapshot {
+            role: SourceRole::Software,
+            name: name.as_str().to_owned(),
+            controls: SourceControls::new(id, unity, unity),
+        });
+        next.sources.sort_by_key(|source| source.controls.source());
+        next.advance_generation()?;
+        Ok(next)
+    }
+
+    /// Removes one software input. Built-in inputs cannot be removed.
+    /// # Errors
+    /// Returns an error for a built-in or absent input or exhausted generation.
+    pub fn without_input(&self, id: SourceId) -> Result<Self, MixerProfileError> {
+        if self.source(id).is_none_or(|source| source.role != SourceRole::Software) {
+            return Err(MixerProfileError::UnknownSource(id));
+        }
+        let mut next = self.clone();
+        next.sources.retain(|source| source.controls.source() != id);
+        next.advance_generation()?;
+        Ok(next)
+    }
+
+    fn advance_generation(&mut self) -> Result<(), MixerProfileError> {
+        self.generation = MixerGeneration(
+            self.generation.0.checked_add(1).ok_or(MixerProfileError::GenerationExhausted)?,
+        );
         Ok(())
     }
 
@@ -394,8 +446,9 @@ impl fmt::Display for MixerProfileError {
             Self::SourceCount { actual } => {
                 write!(
                     formatter,
-                    "the current mixer profile requires exactly {} sources; received {actual}",
-                    PRODUCT_SOURCES.len()
+                    "the current mixer profile requires {} to {} sources; received {actual}",
+                    PRODUCT_SOURCES.len(),
+                    crate::MAX_MIXER_SOURCES
                 )
             }
             Self::SourceIdentity { id } => {
@@ -579,5 +632,40 @@ mod tests {
             assert_eq!(source.controls.monitor(), MixRoute::new(true, FaderGain::UNITY));
             assert_eq!(source.controls.stream(), MixRoute::new(true, FaderGain::UNITY));
         }
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    use crate::InputName;
+
+    #[test]
+    fn software_inputs_are_bounded_sorted_and_round_trip_as_one_profile() {
+        let mut profile = MixerProfile::default();
+        for number in 3..=12 {
+            profile = profile
+                .with_input(InputName::try_new(&format!("Input {number}")).expect("name"))
+                .expect("add");
+            assert_eq!(
+                profile.sources.last().expect("source").controls.source(),
+                SourceId::new(number)
+            );
+            profile.validate().expect("layout");
+        }
+        assert!(profile.with_input(InputName::try_new("Overflow").expect("name")).is_err());
+        assert_eq!(
+            serde_json::from_str::<MixerProfile>(&serde_json::to_string(&profile).expect("encode"))
+                .expect("decode"),
+            profile
+        );
+        assert!(profile.without_input(MICROPHONE_SOURCE_ID).is_err());
+        assert!(profile.without_input(SYSTEM_SOURCE_ID).is_err());
+        let removed = profile.without_input(SourceId::new(5)).expect("remove");
+        assert!(removed.source(SourceId::new(5)).is_none());
+        let restored =
+            removed.with_input(InputName::try_new("New input").expect("name")).expect("reuse slot");
+        assert_eq!(restored.source(SourceId::new(5)).expect("reused source").name, "New input");
+        restored.validate().expect("sorted reused slot");
     }
 }

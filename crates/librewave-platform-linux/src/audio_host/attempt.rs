@@ -319,7 +319,7 @@ impl ComposedAudioHost {
                 ResourceActivity::Closed
             },
             published_endpoints: if self.graph.is_some() {
-                DELIBERATE_ENDPOINTS.to_vec()
+                profile_endpoints(&self.profile)
             } else {
                 Vec::new()
             },
@@ -464,6 +464,20 @@ impl ComposedAudioHost {
     }
 }
 
+fn profile_endpoints(profile: &MixerProfile) -> Vec<EndpointId> {
+    DELIBERATE_ENDPOINTS
+        .iter()
+        .copied()
+        .chain(
+            profile
+                .sources
+                .iter()
+                .skip(2)
+                .map(|source| EndpointId::Input { source: source.controls.source() }),
+        )
+        .collect()
+}
+
 impl AudioHost for ComposedAudioHost {
     type Error = LinuxAudioError;
 
@@ -574,7 +588,16 @@ impl AudioHost for ComposedAudioHost {
         _candidate: &UsbDeviceCandidate,
         endpoints: &[EndpointId],
     ) -> Result<(), Self::Error> {
-        let plans: Vec<EndpointPlan> = endpoint_plans(endpoints)?;
+        let mut plans: Vec<EndpointPlan> = endpoint_plans(&profile_endpoints(&self.profile))?;
+        for plan in &mut plans {
+            if let EndpointId::Input { source } = plan.endpoint {
+                let input = self
+                    .profile
+                    .source(source)
+                    .ok_or_else(|| attempt_error("input plan", "source is absent"))?;
+                plan.node_description = format!("LibreWave {}", input.name);
+            }
+        }
         if endpoints != DELIBERATE_ENDPOINTS {
             return Err(attempt_error("graph publication", "endpoint order or count is invalid"));
         }

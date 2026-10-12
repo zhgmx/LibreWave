@@ -13,7 +13,8 @@ use std::sync::atomic::{
     AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
 };
 
-const PORT_COUNT: usize = 8;
+const PORT_COUNT: usize = 28;
+pub(super) const MAX_SOFTWARE_INPUTS: usize = librewave_core::MAX_MIXER_SOURCES - 1;
 const FAULT_CAPACITY: usize = 16;
 const FILTER_STATE_OTHER: i32 = 0;
 pub(super) const FILTER_STATE_PAUSED: i32 = 1;
@@ -43,6 +44,7 @@ unsafe extern "C" {
         core: *mut c_void,
         name: *const c_char,
         properties: *mut c_void,
+        port_count: u32,
         process: NativeProcessCallback,
         state_changed: NativeStateCallback,
         data: *mut c_void,
@@ -244,7 +246,15 @@ pub(super) struct StereoOutput<'a> {
     pub(super) right: &'a mut [f32],
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct SoftwareBlock<'a> {
+    pub(super) source: librewave_core::SourceId,
+    pub(super) state: SystemCycleState,
+    pub(super) signal: StereoInput<'a>,
+}
+
 pub(super) struct ProcessBlock<'a> {
+    pub(super) additional: &'a [SoftwareBlock<'a>],
     pub(super) timing: ProcessTiming,
     pub(super) system_state: SystemCycleState,
     pub(super) system: StereoInput<'a>,
@@ -322,7 +332,7 @@ impl SystemTracker {
 struct RealtimeState<P> {
     processor: P,
     validator: CycleValidator,
-    system: SystemTracker,
+    input_trackers: [SystemTracker; MAX_SOFTWARE_INPUTS],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -376,7 +386,8 @@ fn validate_buffer_ranges(pointers: &[*mut f32], frames: usize) -> Result<(), Bu
 struct CallbackState<P> {
     realtime: UnsafeCell<RealtimeState<P>>,
     faults: FaultRecords,
-    link_word: Arc<AtomicU64>,
+    link_words: Arc<[AtomicU64; MAX_SOFTWARE_INPUTS]>,
+    source_ids: Vec<librewave_core::SourceId>,
     failed: AtomicBool,
     callbacks_in_flight: AtomicU32,
     process_cycles: AtomicU64,
@@ -396,6 +407,11 @@ impl<P> CallbackState<P> {
     }
 }
 
+pub(super) struct SoftwareLayout {
+    pub(super) sources: Vec<librewave_core::SourceId>,
+    pub(super) links: Arc<[AtomicU64; MAX_SOFTWARE_INPUTS]>,
+}
+
 pub(super) struct FilterDiagnostics {
     pub(super) process_cycles: u64,
     pub(super) system_link_word: u64,
@@ -413,7 +429,7 @@ pub(super) struct FilterHandle<P: GraphProcessor> {
     native: Option<NonNull<NativeFilter>>,
     callbacks: Pin<Box<CallbackState<P>>>,
     disconnected: bool,
-    added_mask: u8,
+    added_mask: u32,
 }
 
 impl<P: GraphProcessor> FilterHandle<P> {
@@ -424,8 +440,17 @@ impl<P: GraphProcessor> FilterHandle<P> {
         expected_driver: u32,
         expected_quantum: NonZeroU32,
         processor: P,
-        link_word: Arc<AtomicU64>,
+        software: SoftwareLayout,
     ) -> Result<Self, String> {
+        let SoftwareLayout { sources: source_ids, links: link_words } = software;
+        if source_ids.is_empty()
+            || source_ids.len() > MAX_SOFTWARE_INPUTS
+            || source_ids[0] != librewave_core::SYSTEM_SOURCE_ID
+        {
+            return Err("invalid software input layout".to_owned());
+        }
+        let port_count = u32::try_from(source_ids.len() * 2 + 6)
+            .map_err(|_| "filter port count overflow".to_owned())?;
         let callbacks = Box::pin(CallbackState {
             realtime: UnsafeCell::new(RealtimeState {
                 processor,
@@ -434,10 +459,12 @@ impl<P: GraphProcessor> FilterHandle<P> {
                     expected_quantum,
                     previous_position: None,
                 },
-                system: SystemTracker { observed_word: 0, state: SystemCycleState::Idle },
+                input_trackers: [SystemTracker { observed_word: 0, state: SystemCycleState::Idle };
+                    MAX_SOFTWARE_INPUTS],
             }),
             faults: FaultRecords::new(),
-            link_word,
+            link_words,
+            source_ids,
             failed: AtomicBool::new(false),
             callbacks_in_flight: AtomicU32::new(0),
             process_cycles: AtomicU64::new(0),
@@ -458,6 +485,7 @@ impl<P: GraphProcessor> FilterHandle<P> {
                 core.as_raw_ptr().cast(),
                 name.as_ptr(),
                 properties.into_raw().cast(),
+                port_count,
                 process_callback::<P>,
                 state_callback::<P>,
                 data,
@@ -474,10 +502,10 @@ impl<P: GraphProcessor> FilterHandle<P> {
         properties: pw::properties::PropertiesBox,
     ) -> Result<(), String> {
         let native = self.native.ok_or_else(|| "filter is destroyed".to_owned())?;
-        if index >= PORT_COUNT {
+        if index >= self.callbacks.source_ids.len() * 2 + 6 {
             return Err("filter port index is out of range".to_owned());
         }
-        let bit = 1_u8 << index;
+        let bit = 1_u32 << index;
         if self.added_mask & bit != 0 {
             return Err("filter port index is already present".to_owned());
         }
@@ -493,10 +521,10 @@ impl<P: GraphProcessor> FilterHandle<P> {
 
     pub(super) fn connect_inactive(&mut self) -> Result<(), String> {
         let native = self.native.ok_or_else(|| "filter is destroyed".to_owned())?;
-        if self.added_mask != u8::MAX {
-            return Err("filter does not own all eight ports".to_owned());
+        if self.added_mask != (1_u32 << (self.callbacks.source_ids.len() * 2 + 6)) - 1 {
+            return Err("filter does not own its complete port layout".to_owned());
         }
-        // SAFETY: native is owned by self and all eight ports were added.
+        // SAFETY: native is owned by self and every declared port was added.
         result_code(unsafe { lw_pw_filter_connect_inactive_rt(native.as_ptr()) }, "connect filter")
     }
 
@@ -523,7 +551,7 @@ impl<P: GraphProcessor> FilterHandle<P> {
         let (faults, dropped_faults) = self.callbacks.faults.snapshot();
         FilterDiagnostics {
             process_cycles: self.callbacks.process_cycles.load(Ordering::Relaxed),
-            system_link_word: self.callbacks.link_word.load(Ordering::Acquire),
+            system_link_word: self.callbacks.link_words[0].load(Ordering::Acquire),
             startup_incomplete_cycles: self
                 .callbacks
                 .startup_incomplete_cycles
@@ -677,7 +705,11 @@ unsafe extern "C" fn process_callback<P: GraphProcessor>(
     c_int::from(faulted)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "keep the validated buffer lifetimes in one graph boundary"
+)]
 fn process_cycle<P: GraphProcessor>(
     callbacks: &CallbackState<P>,
     realtime: &mut RealtimeState<P>,
@@ -708,6 +740,9 @@ fn process_cycle<P: GraphProcessor>(
         });
         true
     };
+    let input_count = callbacks.source_ids.len();
+    let output_start = input_count * 2;
+    let port_count = output_start + 6;
     // PipeWire can schedule a new filter while only some ports are mapped.
     // The bounded control-side startup waits for one complete cycle. Silence
     // mapped outputs after validating their ranges so an incomplete startup
@@ -723,8 +758,8 @@ fn process_cycle<P: GraphProcessor>(
         if quantum == 0 {
             return fail(ProcessFault::InvalidQuantum, 0);
         }
-        // SAFETY: the C shim supplies exactly eight pointer entries.
-        let pointers = unsafe { slice::from_raw_parts(buffers, PORT_COUNT) };
+        // SAFETY: construction gives the shim and callback the same bounded port count.
+        let pointers = unsafe { slice::from_raw_parts(buffers, port_count) };
         let mut mapped = [std::ptr::null_mut(); PORT_COUNT];
         let mut count = 0;
         for pointer in pointers.iter().copied().filter(|pointer| !pointer.is_null()) {
@@ -734,7 +769,8 @@ fn process_cycle<P: GraphProcessor>(
         if let Err(error) = validate_buffer_ranges(&mapped[..count], quantum as usize) {
             return fail(buffer_range_fault(error), 0);
         }
-        for pointer in pointers[2..].iter().copied().filter(|pointer| !pointer.is_null()) {
+        for pointer in pointers[output_start..].iter().copied().filter(|pointer| !pointer.is_null())
+        {
             // SAFETY: PipeWire mapped this output for `quantum` frames and
             // the non-null, aligned ranges were checked for overlap above.
             unsafe { slice::from_raw_parts_mut(pointer, quantum as usize) }.fill(0.0);
@@ -750,8 +786,8 @@ fn process_cycle<P: GraphProcessor>(
     if let Err((fault, expected)) = realtime.validator.validate(timing) {
         return fail(fault, expected);
     }
-    // SAFETY: the C shim always supplies exactly eight entries.
-    let pointers = unsafe { slice::from_raw_parts(buffers, PORT_COUNT) };
+    // SAFETY: construction fixes the same bounded port count in the shim and callback.
+    let pointers = unsafe { slice::from_raw_parts(buffers, port_count) };
     if let Err(error) = validate_buffer_ranges(pointers, quantum as usize) {
         return fail(buffer_range_fault(error), 0);
     }
@@ -763,24 +799,45 @@ fn process_cycle<P: GraphProcessor>(
     // SAFETY: same checked-range invariant as system_left.
     let system_right = unsafe { slice::from_raw_parts(pointers[1], frames) };
     let system = StereoInput { left: system_left, right: system_right };
-    let link_word = callbacks.link_word.load(Ordering::Acquire);
-    let Ok(system_state) = realtime.system.advance(link_word, system) else {
+    let link_word = callbacks.link_words[0].load(Ordering::Acquire);
+    let Ok(system_state) = realtime.input_trackers[0].advance(link_word, system) else {
         return fail(ProcessFault::StaleSystemTail, 0);
     };
     // SAFETY: all six output ranges are non-null, aligned, fully mapped, and
     // non-overlapping with every input and output range.
-    let microphone_left = unsafe { slice::from_raw_parts_mut(pointers[2], frames) };
+    let microphone_left = unsafe { slice::from_raw_parts_mut(pointers[output_start], frames) };
     // SAFETY: this range was validated as non-overlapping above.
-    let microphone_right = unsafe { slice::from_raw_parts_mut(pointers[3], frames) };
+    let microphone_right = unsafe { slice::from_raw_parts_mut(pointers[output_start + 1], frames) };
     // SAFETY: this range was validated as non-overlapping above.
-    let monitor_left = unsafe { slice::from_raw_parts_mut(pointers[4], frames) };
+    let monitor_left = unsafe { slice::from_raw_parts_mut(pointers[output_start + 2], frames) };
     // SAFETY: this range was validated as non-overlapping above.
-    let monitor_right = unsafe { slice::from_raw_parts_mut(pointers[5], frames) };
+    let monitor_right = unsafe { slice::from_raw_parts_mut(pointers[output_start + 3], frames) };
     // SAFETY: this range was validated as non-overlapping above.
-    let stream_left = unsafe { slice::from_raw_parts_mut(pointers[6], frames) };
+    let stream_left = unsafe { slice::from_raw_parts_mut(pointers[output_start + 4], frames) };
     // SAFETY: this range was validated as non-overlapping above.
-    let stream_right = unsafe { slice::from_raw_parts_mut(pointers[7], frames) };
+    let stream_right = unsafe { slice::from_raw_parts_mut(pointers[output_start + 5], frames) };
+    let empty = StereoInput { left: &[], right: &[] };
+    let mut additional = [SoftwareBlock {
+        source: librewave_core::SourceId::new(0),
+        state: SystemCycleState::Idle,
+        signal: empty,
+    }; MAX_SOFTWARE_INPUTS - 1];
+    for index in 1..input_count {
+        // SAFETY: every source pair is inside the fixed input layout and the
+        // complete non-overlapping buffer extents were checked above.
+        let left = unsafe { slice::from_raw_parts(pointers[index * 2], frames) };
+        // SAFETY: the same checked buffer invariant applies to the right channel.
+        let right = unsafe { slice::from_raw_parts(pointers[index * 2 + 1], frames) };
+        let signal = StereoInput { left, right };
+        let word = callbacks.link_words[index].load(Ordering::Acquire);
+        let Ok(state) = realtime.input_trackers[index].advance(word, signal) else {
+            return fail(ProcessFault::StaleSystemTail, 0);
+        };
+        additional[index - 1] =
+            SoftwareBlock { source: callbacks.source_ids[index], state, signal };
+    }
     let block = ProcessBlock {
+        additional: &additional[..input_count - 1],
         timing,
         system_state,
         system,
@@ -1190,10 +1247,13 @@ fn last_os_error() -> String {
 mod tests {
     use super::*;
 
-    struct StartupProcessor(Arc<AtomicU32>);
+    struct StartupProcessor(Arc<AtomicU32>, usize);
 
     impl GraphProcessor for StartupProcessor {
         fn process(&mut self, block: ProcessBlock<'_>) -> Result<(), ProcessFault> {
+            if block.additional.len() + 1 != self.1 {
+                return Err(ProcessFault::Processor);
+            }
             self.0.fetch_add(1, Ordering::Relaxed);
             block.microphone.left.fill(0.0);
             block.microphone.right.fill(0.0);
@@ -1205,21 +1265,24 @@ mod tests {
         }
     }
 
-    #[test]
-    fn partial_port_mapping_waits_only_until_the_first_complete_cycle() {
-        let processed = Arc::new(AtomicU32::new(0));
-        let callbacks = CallbackState {
+    fn startup_callbacks(
+        processed: &Arc<AtomicU32>,
+        source_ids: Vec<librewave_core::SourceId>,
+    ) -> CallbackState<StartupProcessor> {
+        CallbackState {
             realtime: UnsafeCell::new(RealtimeState {
-                processor: StartupProcessor(Arc::clone(&processed)),
+                processor: StartupProcessor(Arc::clone(processed), source_ids.len()),
                 validator: CycleValidator {
                     expected_driver: 25,
                     expected_quantum: NonZeroU32::new(4).expect("nonzero"),
                     previous_position: None,
                 },
-                system: SystemTracker { observed_word: 0, state: SystemCycleState::Idle },
+                input_trackers: [SystemTracker { observed_word: 0, state: SystemCycleState::Idle };
+                    MAX_SOFTWARE_INPUTS],
             }),
             faults: FaultRecords::new(),
-            link_word: Arc::new(AtomicU64::new(0)),
+            link_words: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
+            source_ids,
             failed: AtomicBool::new(false),
             callbacks_in_flight: AtomicU32::new(0),
             process_cycles: AtomicU64::new(0),
@@ -1230,13 +1293,63 @@ mod tests {
             filter_state: AtomicI32::new(FILTER_STATE_STREAMING),
             has_streamed: AtomicBool::new(true),
             stopping: AtomicBool::new(false),
-        };
+        }
+    }
+
+    #[test]
+    fn maximum_layout_maps_all_inputs_and_silences_only_its_six_outputs() {
+        let processed = Arc::new(AtomicU32::new(0));
+        let callbacks =
+            startup_callbacks(&processed, (2..=12).map(librewave_core::SourceId::new).collect());
         let mut samples = [[0.0_f32; 4]; PORT_COUNT];
-        for output in &mut samples[2..] {
+        for output in &mut samples[22..] {
             output.fill(0.5);
         }
         let mut pointers: [*mut f32; PORT_COUNT] =
             std::array::from_fn(|index| samples[index].as_mut_ptr());
+        pointers[0] = std::ptr::null_mut();
+        // SAFETY: this test owns the callback state and the complete declared layout.
+        let realtime = unsafe { &mut *callbacks.realtime.get() };
+        assert!(!process_cycle(
+            &callbacks,
+            realtime,
+            25,
+            1,
+            48_000,
+            0,
+            1,
+            4,
+            pointers.as_mut_ptr(),
+            1
+        ));
+        assert!(samples[22..].iter().flatten().all(|value| *value == 0.0));
+        assert_eq!(processed.load(Ordering::Relaxed), 0);
+        pointers[0] = samples[0].as_mut_ptr();
+        assert!(!process_cycle(
+            &callbacks,
+            realtime,
+            25,
+            1,
+            48_000,
+            4,
+            2,
+            4,
+            pointers.as_mut_ptr(),
+            0
+        ));
+        assert_eq!(processed.load(Ordering::Relaxed), 1);
+        assert_eq!(callbacks.process_cycles.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn partial_port_mapping_waits_only_until_the_first_complete_cycle() {
+        let processed = Arc::new(AtomicU32::new(0));
+        let callbacks = startup_callbacks(&processed, vec![librewave_core::SYSTEM_SOURCE_ID]);
+        let mut samples = [[0.0_f32; 4]; 8];
+        for output in &mut samples[2..] {
+            output.fill(0.5);
+        }
+        let mut pointers: [*mut f32; 8] = std::array::from_fn(|index| samples[index].as_mut_ptr());
         pointers[0] = std::ptr::null_mut();
         pointers[1] = std::ptr::null_mut();
         // SAFETY: the test is single-threaded and owns the callback state.
@@ -1432,5 +1545,14 @@ mod tests {
         let (snapshot, dropped) = records.snapshot();
         assert!(snapshot.iter().all(Option::is_some));
         assert_eq!(dropped, 2);
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+    #[test]
+    fn twelve_sources_have_a_bounded_dense_port_layout() {
+        assert_eq!(PORT_COUNT, MAX_SOFTWARE_INPUTS * 2 + 6);
     }
 }

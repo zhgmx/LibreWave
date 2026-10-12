@@ -6,7 +6,7 @@ use librewave_engine::{
 };
 use librewave_platform_linux::audio_host::{
     BridgeState, CaptureClockObservation, ClockBridgeConfig, ClockBridgeParts,
-    DirectionBridgeConfig, GraphClockObservation, GraphOutputBuffers, GraphSystemInput,
+    DirectionBridgeConfig, GraphClockObservation, GraphInputSignal, GraphOutputBuffers,
     PACKED_S24_SAMPLE_BYTES, PlaybackBoundaryDelivery, PlaybackClockObservation,
     PlaybackPeriodSubmitter, PlaybackSubmissionProgress, PlaybackWriteError,
     WAVE3_CAPTURE_CHANNELS, WAVE3_PCM_RATE_HZ, WAVE3_PLAYBACK_CHANNELS, Wave3PhysicalIoConfig,
@@ -225,7 +225,10 @@ fn exact_callback_reachable_sequence_does_not_allocate_or_deallocate() {
                             SIMULATION_GRAPH_QUANTUM,
                         )
                         .expect("graph observation"),
-                        GraphSystemInput::unconnected(),
+                        &[librewave_platform_linux::audio_host::GraphInput {
+                            source: librewave_core::SYSTEM_SOURCE_ID,
+                            signal: GraphInputSignal::unconnected(),
+                        }],
                         GraphOutputBuffers {
                             microphone_left: &mut output.0,
                             microphone_right: &mut output.1,
@@ -293,7 +296,10 @@ fn exact_callback_reachable_sequence_does_not_allocate_or_deallocate() {
         read.publish(capture_observation, &capture_quantum)?;
         parts.graph.process(
             graph_observation,
-            GraphSystemInput::unconnected(),
+            &[librewave_platform_linux::audio_host::GraphInput {
+                source: librewave_core::SYSTEM_SOURCE_ID,
+                signal: GraphInputSignal::unconnected(),
+            }],
             GraphOutputBuffers {
                 microphone_left: &mut output.0,
                 microphone_right: &mut output.1,

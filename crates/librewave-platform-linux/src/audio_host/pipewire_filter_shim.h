@@ -16,7 +16,7 @@ typedef int (*lw_pw_process_fn)(void *data,
         uint64_t position,
         uint64_t monotonic_nsec,
         uint32_t duration,
-        float *buffers[8],
+        float **buffers,
         uint32_t missing_mask);
 
 typedef void (*lw_pw_state_fn)(void *data, int old_state, int state);
@@ -32,6 +32,7 @@ struct lw_pw_filter *lw_pw_filter_new(
         struct pw_core *core,
         const char *name,
         struct pw_properties *properties,
+        uint32_t port_count,
         lw_pw_process_fn process,
         lw_pw_state_fn state_changed,
         void *data);

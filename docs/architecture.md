@@ -71,6 +71,23 @@ A persistence-ambiguous connection stays retained and write-locked while configu
 
 Desired hardware state contains only controls that a client explicitly changed through LibreWave. It is stored under the profile directory in one strict pre-release schema. A command is recorded as pending before USB access. The daemon promotes it to managed state only after verified apply or an unchanged result. A pending command after a crash locks restoration for that topology.
 
+## Software inputs
+
+The profile contains Microphone and System plus zero to ten named software inputs.
+Software source IDs are 3 through 12. The daemon accepts a layout change only
+while audio is stopped and cleanup is complete. It saves the complete profile
+before publishing the new mixer generation. A stale request or failed save
+leaves the retained layout unchanged.
+
+Each configured software input has one deliberate virtual sink named
+`librewave.input.<source-id>`. The Linux adapter builds a dense DSP port layout
+for the exact profile, with at most 28 ports. It validates mapped buffers before
+reading them. Each input has its own connection tracker and drops detached
+samples from the first drain cycle. Scratch and source mappings are allocated
+before processing. The graph callback uses fixed-capacity arrays and bounded
+loops. Teardown removes every configured adapter and link after callback
+quiescence. The public microphone endpoint remains independent of mix routes.
+
 ## Meter observation
 
 `GetMeters` returns software peak and RMS values separately from control snapshots.

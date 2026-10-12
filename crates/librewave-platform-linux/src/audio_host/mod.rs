@@ -39,7 +39,7 @@ pub use clock_bridge::{
     CaptureClockObservation, CaptureIngress, CapturePublishReport, CaptureReadBoundary,
     ClockBridgeConfig, ClockBridgeControl, ClockBridgeParts, DirectionBridgeConfig,
     GraphBoundaryDelivery, GraphClockObservation, GraphClockObservationError, GraphClockProcessor,
-    GraphOutputBuffers, GraphProcessReport, GraphSystemInput, ObservationPublication,
+    GraphInput, GraphInputSignal, GraphOutputBuffers, GraphProcessReport, ObservationPublication,
     PlaybackBoundaryDelivery, PlaybackClockObservation, PlaybackEgress, PlaybackPeriodSubmitter,
     PlaybackProcessReport, PlaybackSubmissionProgress, PlaybackWriteError,
 };
@@ -61,16 +61,16 @@ pub enum PipeWireEndpointDirection {
 }
 
 /// A complete, inspectable plan for one public `PipeWire` endpoint.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EndpointPlan {
     /// Portable endpoint identity.
     pub endpoint: EndpointId,
     /// Direction derived from [`EndpointFlow`].
     pub direction: PipeWireEndpointDirection,
     /// Stable `PipeWire` node name.
-    pub node_name: &'static str,
+    pub node_name: String,
     /// Human-readable node description.
-    pub node_description: &'static str,
+    pub node_description: String,
     /// Explicit `PipeWire` media class.
     pub media_class: &'static str,
     /// Whether `node.virtual` is true.
@@ -86,7 +86,9 @@ pub struct EndpointPlan {
 pub fn endpoint_plans(endpoints: &[EndpointId]) -> Result<Vec<EndpointPlan>, LinuxAudioError> {
     let mut plans = Vec::with_capacity(endpoints.len());
     for endpoint in endpoints {
-        if !DELIBERATE_ENDPOINTS.contains(endpoint) {
+        if !DELIBERATE_ENDPOINTS.contains(endpoint)
+            && !matches!(endpoint, EndpointId::Input { source } if (3..=12).contains(&source.get()))
+        {
             return Err(LinuxAudioError::EndpointNotAllowed(*endpoint));
         }
         if plans.iter().any(|plan: &EndpointPlan| plan.endpoint == *endpoint) {
@@ -97,10 +99,19 @@ pub fn endpoint_plans(endpoints: &[EndpointId]) -> Result<Vec<EndpointPlan>, Lin
             EndpointFlow::PublicSource => PipeWireEndpointDirection::Output,
         };
         let (node_name, node_description) = match endpoint {
-            EndpointId::System => ("librewave.system", "LibreWave System"),
-            EndpointId::Microphone => ("librewave.microphone", "LibreWave Microphone"),
-            EndpointId::MonitorMix => ("librewave.monitor-mix", "LibreWave Monitor Mix"),
-            EndpointId::StreamMix => ("librewave.stream-mix", "LibreWave Stream Mix"),
+            EndpointId::System => ("librewave.system".to_owned(), "LibreWave System".to_owned()),
+            EndpointId::Microphone => {
+                ("librewave.microphone".to_owned(), "LibreWave Microphone".to_owned())
+            }
+            EndpointId::MonitorMix => {
+                ("librewave.monitor-mix".to_owned(), "LibreWave Monitor Mix".to_owned())
+            }
+            EndpointId::StreamMix => {
+                ("librewave.stream-mix".to_owned(), "LibreWave Stream Mix".to_owned())
+            }
+            EndpointId::Input { source } => {
+                (format!("librewave.input.{source}"), format!("LibreWave Input {source}"))
+            }
         };
         plans.push(EndpointPlan {
             endpoint: *endpoint,

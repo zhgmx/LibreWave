@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 mod device_generation;
+mod input_name;
+pub use input_name::{InputName, InputNameError};
 mod meters;
 mod mixer;
 pub use device_generation::{DeviceGeneration, DeviceGenerationError};
@@ -29,6 +31,8 @@ pub enum EndpointId {
     MonitorMix,
     /// The software stream-mix endpoint.
     StreamMix,
+    /// A user-created software input. Its source identity is profile-owned.
+    Input { source: SourceId },
 }
 
 impl EndpointId {
@@ -40,6 +44,7 @@ impl EndpointId {
             Self::Microphone => "Microphone",
             Self::MonitorMix => "Monitor mix",
             Self::StreamMix => "Stream mix",
+            Self::Input { .. } => "Software input",
         }
     }
 
@@ -47,7 +52,7 @@ impl EndpointId {
     #[must_use]
     pub const fn flow(self) -> EndpointFlow {
         match self {
-            Self::System => EndpointFlow::PublicSink,
+            Self::System | Self::Input { .. } => EndpointFlow::PublicSink,
             Self::Microphone | Self::MonitorMix | Self::StreamMix => EndpointFlow::PublicSource,
         }
     }
@@ -479,6 +484,10 @@ pub enum Command {
     GetMixer,
     /// Return the latest bounded software meter observation without changing profiles.
     GetMeters,
+    /// Add a named software input while audio is stopped.
+    AddMixerInput { expected_generation: MixerGeneration, name: InputName },
+    /// Remove one software input while audio is stopped.
+    RemoveMixerInput { expected_generation: MixerGeneration, source: SourceId },
     /// Enable the experimental audio owner in this daemon session.
     StartExperimentalAudio,
     /// Cancel audio recovery and release the daemon-owned audio resources.

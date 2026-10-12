@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// The current local request/response protocol version.
-pub const PROTOCOL_VERSION: u16 = 8;
+pub const PROTOCOL_VERSION: u16 = 9;
 /// The maximum encoded JSON payload accepted by the local protocol.
 pub const MAX_FRAME_SIZE: usize = 1024 * 1024;
 
@@ -42,7 +42,7 @@ pub enum Response {
     /// Transient software meters, separate from control generations.
     Meters { meters: librewave_core::MeterSnapshot },
     /// The mixer snapshot after an accepted route request.
-    MixerRouteChanged { mixer: MixerSnapshot },
+    MixerChanged { mixer: MixerSnapshot },
     /// Audio start was accepted. Readiness is reported by the mixer snapshot.
     AudioStarting { mixer: MixerSnapshot },
     /// All audio resources were released and automatic recovery was disabled.
@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn semantic_control_command_and_stale_error_round_trip_at_version_seven() {
-        assert_eq!(PROTOCOL_VERSION, 8);
+        assert_eq!(PROTOCOL_VERSION, 9);
         let request = RequestEnvelope {
             version: PROTOCOL_VERSION,
             request_id: 4,
@@ -385,7 +385,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(request).expect("serialize semantic request"),
             json!({
-                "version": 8,
+                "version": 9,
                 "request_id": 4,
                 "command": {
                     "SetWave3Control": {
@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response.clone()).expect("serialize stale response"),
             json!({
-                "version": 8,
+                "version": 9,
                 "request_id": 4,
                 "result": {
                     "Err": {
@@ -427,7 +427,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response).expect("serialize control response"),
             json!({
-                "version": 8,
+                "version": 9,
                 "request_id": 4,
                 "result": {
                     "Ok": {
@@ -492,7 +492,7 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "version": 8,
+                "version": 9,
                 "request_id": 18,
                 "command": {
                     "SetMixerRoute": {
@@ -520,13 +520,13 @@ mod tests {
 
         let response = ResponseEnvelope::success(
             18,
-            Response::MixerRouteChanged { mixer: MixerSnapshot::default() },
+            Response::MixerChanged { mixer: MixerSnapshot::default() },
         );
         let frame = encode_response(&response).expect("encode mixer response");
         assert_eq!(decode_response(&frame[4..]).expect("decode mixer response"), response);
 
         let mut wrong_identity = serde_json::to_value(response).expect("serialize mixer response");
-        wrong_identity["result"]["Ok"]["MixerRouteChanged"]["mixer"]["profile"]["sources"][0]["name"] =
+        wrong_identity["result"]["Ok"]["MixerChanged"]["mixer"]["profile"]["sources"][0]["name"] =
             json!("Wrong microphone");
         assert!(
             decode_response(

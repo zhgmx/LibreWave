@@ -313,9 +313,7 @@ fn mixer_get_and_route_change_persist_before_advancing_both_generations() {
             librewave_core::Origin::Client,
         )
         .expect("change mixer route");
-    let Response::MixerRouteChanged { mixer } = response else {
-        panic!("unexpected mixer response")
-    };
+    let Response::MixerChanged { mixer } = response else { panic!("unexpected mixer response") };
     assert_eq!(mixer.generation(), MixerGeneration(1));
     assert_eq!(daemon.snapshot().generation, 1);
     assert_eq!(
@@ -345,7 +343,7 @@ fn unchanged_mixer_route_is_success_without_persistence_or_generation_change() {
             librewave_core::Origin::Client,
         )
         .expect("unchanged mixer route");
-    assert_eq!(response, Response::MixerRouteChanged { mixer: MixerSnapshot::default() });
+    assert_eq!(response, Response::MixerChanged { mixer: MixerSnapshot::default() });
     assert_eq!(daemon.snapshot().generation, 0);
     assert_eq!(*saves.borrow(), 0);
     assert_eq!(*persisted.borrow(), MixerProfile::default());
@@ -455,9 +453,7 @@ fn mixer_post_rename_ambiguity_keeps_retained_state_and_retry_converges() {
     assert_eq!(persisted.borrow().generation, MixerGeneration(1));
 
     let response = daemon.handle(command, librewave_core::Origin::Client).expect("retry converges");
-    let Response::MixerRouteChanged { mixer } = response else {
-        panic!("unexpected mixer response")
-    };
+    let Response::MixerChanged { mixer } = response else { panic!("unexpected mixer response") };
     assert_eq!(mixer.profile, *persisted.borrow());
     assert_eq!(mixer.generation(), MixerGeneration(1));
     assert_eq!(daemon.snapshot().generation, 1);
@@ -1811,4 +1807,73 @@ fn inactive_meter_requests_do_not_read_hardware_save_or_advance_generations() {
     assert!(h.calls.borrow().is_empty());
     assert_eq!(*h.connections.borrow(), 0);
     assert_eq!(*h.saves.borrow(), 0);
+}
+
+#[test]
+fn input_changes_are_durable_atomic_and_refuse_stale_or_running_layout_changes() {
+    let (mut daemon, retained, saves) = mixer_daemon(vec![]);
+    let name = librewave_core::InputName::try_new("Music").expect("name");
+    let response = daemon
+        .handle(
+            Command::AddMixerInput { expected_generation: MixerGeneration(0), name },
+            librewave_core::Origin::Client,
+        )
+        .expect("add input");
+    assert!(matches!(response, Response::MixerChanged { .. }));
+    assert_eq!(retained.borrow().source(SourceId::new(3)).expect("saved source").name, "Music");
+    let before = daemon.snapshot().clone();
+    let error = daemon
+        .handle(
+            Command::RemoveMixerInput {
+                expected_generation: MixerGeneration(0),
+                source: SourceId::new(3),
+            },
+            librewave_core::Origin::Client,
+        )
+        .expect_err("stale layout change");
+    assert!(matches!(error.kind, IpcErrorKind::StaleMixerGeneration { .. }));
+    assert_eq!(daemon.snapshot(), &before);
+    assert_eq!(*saves.borrow(), 1);
+    daemon.audio_session.enabled = true;
+    assert!(
+        daemon
+            .handle(
+                Command::AddMixerInput { expected_generation: MixerGeneration(1), name },
+                librewave_core::Origin::Client
+            )
+            .is_err()
+    );
+    assert_eq!(*saves.borrow(), 1);
+    daemon.audio_session.enabled = false;
+    daemon
+        .handle(
+            Command::RemoveMixerInput {
+                expected_generation: MixerGeneration(1),
+                source: SourceId::new(3),
+            },
+            librewave_core::Origin::Client,
+        )
+        .expect("remove input");
+    assert!(retained.borrow().source(SourceId::new(3)).is_none());
+}
+
+#[test]
+fn failed_input_saves_leave_the_retained_layout_unchanged() {
+    for action in [SaveAction::Before, SaveAction::After] {
+        let (mut daemon, _, saves) = mixer_daemon(vec![action]);
+        let before = daemon.snapshot().clone();
+        assert!(
+            daemon
+                .handle(
+                    Command::AddMixerInput {
+                        expected_generation: MixerGeneration(0),
+                        name: librewave_core::InputName::try_new("Music").expect("name")
+                    },
+                    librewave_core::Origin::Client
+                )
+                .is_err()
+        );
+        assert_eq!(daemon.snapshot(), &before);
+        assert_eq!(*saves.borrow(), 1);
+    }
 }

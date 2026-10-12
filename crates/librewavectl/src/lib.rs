@@ -106,6 +106,12 @@ where
         [devices, set, id, generation, control, value] if devices == "devices" && set == "set" => {
             request_control_change(socket_path, id, generation, control, value, output, errors)
         }
+        [mixer, add, generation, name] if mixer == "mixer" && add == "add" => {
+            request_input_add(socket_path, generation, name, output, errors)
+        }
+        [mixer, remove, source, generation] if mixer == "mixer" && remove == "remove" => {
+            request_input_remove(socket_path, source, generation, output, errors)
+        }
         [mixer, meters] if mixer == "mixer" && meters == "meters" => {
             match request(socket_path, librewave_core::Command::GetMeters) {
                 Ok(Response::Meters { meters }) => {
@@ -179,6 +185,71 @@ fn request_audio(
     }
 }
 
+fn request_input_add<O: Write, E: Write>(
+    socket: &Path,
+    generation: &str,
+    name: &str,
+    output: &mut O,
+    errors: &mut E,
+) -> io::Result<i32> {
+    let (Ok(generation), Ok(name)) =
+        (generation.parse::<u64>(), librewave_core::InputName::try_new(name))
+    else {
+        writeln!(errors, "error: input generation or name is invalid")?;
+        return Ok(2);
+    };
+    request_input_change(
+        socket,
+        librewave_core::Command::AddMixerInput {
+            expected_generation: MixerGeneration(generation),
+            name,
+        },
+        output,
+        errors,
+    )
+}
+
+fn request_input_remove<O: Write, E: Write>(
+    socket: &Path,
+    source: &str,
+    generation: &str,
+    output: &mut O,
+    errors: &mut E,
+) -> io::Result<i32> {
+    let (Ok(source), Ok(generation)) = (source.parse::<u16>(), generation.parse::<u64>()) else {
+        writeln!(errors, "error: input source or generation is invalid")?;
+        return Ok(2);
+    };
+    request_input_change(
+        socket,
+        librewave_core::Command::RemoveMixerInput {
+            expected_generation: MixerGeneration(generation),
+            source: SourceId::new(source),
+        },
+        output,
+        errors,
+    )
+}
+
+fn request_input_change<O: Write, E: Write>(
+    socket_path: &Path,
+    command: librewave_core::Command,
+    output: &mut O,
+    errors: &mut E,
+) -> io::Result<i32> {
+    match request(socket_path, command) {
+        Ok(Response::MixerChanged { mixer }) => {
+            write_mixer(output, &mixer)?;
+            Ok(0)
+        }
+        Ok(_) => {
+            writeln!(errors, "error: daemon returned an unexpected input response")?;
+            Ok(1)
+        }
+        Err(error) => write_client_error(error, errors),
+    }
+}
+
 fn request_mixer<O, E>(socket_path: &Path, output: &mut O, errors: &mut E) -> io::Result<i32>
 where
     O: Write,
@@ -220,7 +291,7 @@ where
         }
     };
     match request(socket_path, command) {
-        Ok(Response::MixerRouteChanged { mixer }) => {
+        Ok(Response::MixerChanged { mixer }) => {
             write_mixer(output, &mixer)?;
             Ok(0)
         }
@@ -718,6 +789,11 @@ fn write_help<W: Write>(output: &mut W) -> io::Result<()> {
         output,
         "  mixer meters    Show software peak and RMS amplitudes in linear millionths"
     )?;
+    writeln!(
+        output,
+        "  mixer add <generation> <name>   Add a software input while audio is stopped"
+    )?;
+    writeln!(output, "  mixer remove <source-id> <generation>   Remove a software input")?;
     writeln!(output, "  mixer show      Show desired mixer state and runtime availability")?;
     writeln!(output, "  mixer set <source-id> <generation> <monitor|stream> <on|off> <level-db>")?;
     writeln!(output)?;
@@ -774,7 +850,7 @@ mod tests {
         write_status(&mut output, &snapshot()).expect("render status");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "Daemon: connected\nProtocol: 8\nState generation: 4\nDevices: 1\nMixer: generation 0, inactive, 2 sources\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
+            "Daemon: connected\nProtocol: 9\nState generation: 4\nDevices: 1\nMixer: generation 0, inactive, 2 sources\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
         );
     }
 

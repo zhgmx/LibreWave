@@ -1,5 +1,6 @@
 #![allow(clippy::float_cmp)]
 
+use super::GraphInput;
 use super::*;
 use crate::audio_host::worker::{
     ParkedPlaybackWorker, PcmIoError, PcmStatusSnapshot, PcmWait, PlaybackPcm, PlaybackWorker,
@@ -485,14 +486,29 @@ fn process_graph(
     parts: &mut ClockBridgeParts,
     positions: &mut Positions,
     quantum: usize,
-    system: GraphSystemInput<'_>,
+    system: GraphInputSignal<'_>,
     output: &mut OutputStorage,
 ) -> GraphProcessReport {
+    let mut inputs = [GraphInput {
+        source: librewave_core::SourceId::new(0),
+        signal: GraphInputSignal::unconnected(),
+    }; librewave_engine::MAX_SOURCES - 1];
+    let count = parts.graph.software_sources().len();
+    for (index, source) in parts.graph.software_sources().iter().copied().enumerate() {
+        inputs[index] = GraphInput {
+            source,
+            signal: if source == SYSTEM_SOURCE_ID {
+                system
+            } else {
+                GraphInputSignal::unconnected()
+            },
+        };
+    }
     let report = parts
         .graph
         .process(
             graph_observation(positions.graph, positions.graph_time, quantum),
-            system,
+            &inputs[..count],
             output.buffers(quantum),
         )
         .expect("graph boundary");
@@ -552,7 +568,7 @@ fn prime_with_quantum(
                     parts,
                     &mut positions,
                     quantum,
-                    GraphSystemInput::unconnected(),
+                    GraphInputSignal::unconnected(),
                     &mut output,
                 );
                 assert_ne!(report.delivery, GraphBoundaryDelivery::Delivered);
@@ -565,7 +581,7 @@ fn prime_with_quantum(
                     parts,
                     &mut positions,
                     quantum,
-                    GraphSystemInput::unconnected(),
+                    GraphInputSignal::unconnected(),
                     &mut output,
                 );
                 process_playback(parts, &mut positions, &mut submitter, playback_period);
@@ -631,7 +647,7 @@ fn reach_playback_stabilizing(parts: &mut ClockBridgeParts) -> Positions {
                     parts,
                     &mut positions,
                     SIMULATION_PLAYBACK_PERIOD,
-                    GraphSystemInput::unconnected(),
+                    GraphInputSignal::unconnected(),
                     &mut output,
                 );
             }
@@ -641,7 +657,7 @@ fn reach_playback_stabilizing(parts: &mut ClockBridgeParts) -> Positions {
                     parts,
                     &mut positions,
                     SIMULATION_PLAYBACK_PERIOD,
-                    GraphSystemInput::unconnected(),
+                    GraphInputSignal::unconnected(),
                     &mut output,
                 );
                 process_playback(parts, &mut positions, &mut submitter, SIMULATION_PLAYBACK_PERIOD);
@@ -707,7 +723,7 @@ fn reach_playback_filter_delay(parts: &mut ClockBridgeParts) -> Positions {
                     parts,
                     &mut positions,
                     SIMULATION_PLAYBACK_PERIOD,
-                    GraphSystemInput::unconnected(),
+                    GraphInputSignal::unconnected(),
                     &mut output,
                 );
             }
@@ -776,7 +792,7 @@ fn active_cycle(
         parts,
         positions,
         SIMULATION_PLAYBACK_PERIOD,
-        GraphSystemInput::unconnected(),
+        GraphInputSignal::unconnected(),
         output,
     );
     let playback = process_playback(parts, positions, submitter, SIMULATION_PLAYBACK_PERIOD);
@@ -1149,7 +1165,7 @@ fn filter_delay_and_estimator_priming_use_nominal_without_controller_history() {
             &mut parts,
             &mut positions,
             SIMULATION_DELAY_QUANTUM,
-            GraphSystemInput::unconnected(),
+            GraphInputSignal::unconnected(),
             &mut output,
         );
         capture_delay_boundaries += 1;
@@ -1169,7 +1185,7 @@ fn filter_delay_and_estimator_priming_use_nominal_without_controller_history() {
             &mut parts,
             &mut positions,
             SIMULATION_DELAY_QUANTUM,
-            GraphSystemInput::unconnected(),
+            GraphInputSignal::unconnected(),
             &mut output,
         );
     }
@@ -1183,7 +1199,7 @@ fn filter_delay_and_estimator_priming_use_nominal_without_controller_history() {
             &mut parts,
             &mut positions,
             SIMULATION_DELAY_QUANTUM,
-            GraphSystemInput::unconnected(),
+            GraphInputSignal::unconnected(),
             &mut output,
         );
         let report = process_playback(
@@ -1225,7 +1241,7 @@ fn assert_playback_estimator_waits_for_running_clock(
         parts,
         positions,
         SIMULATION_DELAY_QUANTUM,
-        GraphSystemInput::unconnected(),
+        GraphInputSignal::unconnected(),
         output,
     );
     process_playback(parts, positions, submitter, SIMULATION_DELAY_PLAYBACK_PERIOD);
@@ -1239,7 +1255,7 @@ fn assert_playback_estimator_waits_for_running_clock(
         parts,
         positions,
         SIMULATION_DELAY_QUANTUM,
-        GraphSystemInput::unconnected(),
+        GraphInputSignal::unconnected(),
         output,
     );
     process_playback(parts, positions, submitter, SIMULATION_DELAY_PLAYBACK_PERIOD);
@@ -1251,7 +1267,7 @@ fn assert_playback_estimator_waits_for_running_clock(
         parts,
         positions,
         SIMULATION_DELAY_QUANTUM,
-        GraphSystemInput::unconnected(),
+        GraphInputSignal::unconnected(),
         output,
     );
     process_playback(parts, positions, submitter, SIMULATION_DELAY_PLAYBACK_PERIOD);
@@ -1301,7 +1317,7 @@ fn playback_stabilizing_keeps_graph_running_when_capture_fill_is_outside_guard()
         &mut parts,
         &mut positions,
         SIMULATION_PLAYBACK_PERIOD,
-        GraphSystemInput::unconnected(),
+        GraphInputSignal::unconnected(),
         &mut output,
     );
     process_playback(&mut parts, &mut positions, &mut submitter, SIMULATION_PLAYBACK_PERIOD);
@@ -1333,7 +1349,7 @@ fn playback_stabilizing_keeps_graph_running_when_playback_fill_is_outside_guard(
         &mut parts,
         &mut positions,
         SIMULATION_PLAYBACK_PERIOD,
-        GraphSystemInput::unconnected(),
+        GraphInputSignal::unconnected(),
         &mut output,
     );
     process_playback(&mut parts, &mut positions, &mut submitter, SIMULATION_PLAYBACK_PERIOD);
@@ -1354,7 +1370,7 @@ fn completed_capture_boundary_spans_gate_accounting_and_publishes_once() {
         &mut parts,
         &mut positions,
         SIMULATION_PLAYBACK_PERIOD,
-        GraphSystemInput::unconnected(),
+        GraphInputSignal::unconnected(),
         &mut output,
     );
 
@@ -1422,7 +1438,7 @@ fn graph_boundary_overlap_does_not_reopen_priming_gate() {
         &mut parts,
         &mut positions,
         SIMULATION_PLAYBACK_PERIOD,
-        GraphSystemInput::unconnected(),
+        GraphInputSignal::unconnected(),
         &mut output,
     );
     parts.control.shared.graph_in_flight.store(1, Ordering::SeqCst);
@@ -1519,7 +1535,10 @@ fn connected_system_requires_complete_finite_graph_buffers() {
     assert!(matches!(
         parts.graph.process(
             graph_observation(positions.graph, positions.graph_time, SIMULATION_PLAYBACK_PERIOD),
-            GraphSystemInput::connected(&left, &right),
+            &[GraphInput {
+                source: SYSTEM_SOURCE_ID,
+                signal: GraphInputSignal::connected(&left, &right)
+            }],
             output.buffers(SIMULATION_PLAYBACK_PERIOD),
         ),
         Err(BridgeError::NonFinite { domain: BridgeClockDomain::PipeWireGraph, sample_index: 34 })
@@ -1571,7 +1590,7 @@ fn cross_epoch_repeated_regressing_and_fixed_quantum_observations_fault() {
     assert!(matches!(
         parts.graph.process(
             graph_observation(positions.graph, positions.graph_time, 128),
-            GraphSystemInput::unconnected(),
+            &[GraphInput { source: SYSTEM_SOURCE_ID, signal: GraphInputSignal::unconnected() }],
             output.buffers(128),
         ),
         Err(BridgeError::FixedQuantumChanged { expected: SIMULATION_PLAYBACK_PERIOD, actual: 128 })
@@ -1615,7 +1634,7 @@ fn cross_epoch_repeated_regressing_and_fixed_quantum_observations_fault() {
     assert!(matches!(
         parts.graph.process(
             graph_observation(positions.graph, stale_time, SIMULATION_PLAYBACK_PERIOD),
-            GraphSystemInput::unconnected(),
+            &[GraphInput { source: SYSTEM_SOURCE_ID, signal: GraphInputSignal::unconnected() }],
             output.buffers(SIMULATION_PLAYBACK_PERIOD),
         ),
         Err(BridgeError::Estimator {
@@ -1643,7 +1662,7 @@ fn graph_and_playback_boundaries_map_epoch_and_time_faults() {
     assert!(matches!(
         parts.graph.process(
             wrong_graph,
-            GraphSystemInput::unconnected(),
+            &[GraphInput { source: SYSTEM_SOURCE_ID, signal: GraphInputSignal::unconnected() }],
             output.buffers(SIMULATION_PLAYBACK_PERIOD),
         ),
         Err(BridgeError::ObservationEpoch { domain: BridgeClockDomain::PipeWireGraph, .. })
@@ -1658,7 +1677,7 @@ fn graph_and_playback_boundaries_map_epoch_and_time_faults() {
     assert!(matches!(
         parts.graph.process(
             graph_observation(positions.graph, regressed_graph_time, SIMULATION_PLAYBACK_PERIOD,),
-            GraphSystemInput::unconnected(),
+            &[GraphInput { source: SYSTEM_SOURCE_ID, signal: GraphInputSignal::unconnected() }],
             output.buffers(SIMULATION_PLAYBACK_PERIOD),
         ),
         Err(BridgeError::MonotonicTimeDiscontinuity {
@@ -1768,7 +1787,7 @@ fn fifo_shortage_and_overflow_are_terminal() {
     let capture_error = loop {
         match parts.graph.process(
             graph_observation(positions.graph, positions.graph_time, SIMULATION_PLAYBACK_PERIOD),
-            GraphSystemInput::unconnected(),
+            &[GraphInput { source: SYSTEM_SOURCE_ID, signal: GraphInputSignal::unconnected() }],
             output.buffers(SIMULATION_PLAYBACK_PERIOD),
         ) {
             Ok(report) => {
@@ -1812,7 +1831,7 @@ fn fifo_shortage_and_overflow_are_terminal() {
         publish_capture(&mut parts, &mut positions, SIMULATION_PLAYBACK_PERIOD, 0.0);
         match parts.graph.process(
             graph_observation(positions.graph, positions.graph_time, SIMULATION_PLAYBACK_PERIOD),
-            GraphSystemInput::unconnected(),
+            &[GraphInput { source: SYSTEM_SOURCE_ID, signal: GraphInputSignal::unconnected() }],
             output.buffers(SIMULATION_PLAYBACK_PERIOD),
         ) {
             Ok(report) => {
@@ -1841,7 +1860,7 @@ fn application_hardware_and_graph_position_contracts_are_exact() {
                 positions.graph_time,
                 SIMULATION_PLAYBACK_PERIOD,
             ),
-            GraphSystemInput::unconnected(),
+            &[GraphInput { source: SYSTEM_SOURCE_ID, signal: GraphInputSignal::unconnected() }],
             output.buffers(SIMULATION_PLAYBACK_PERIOD),
         ),
         Err(BridgeError::Discontinuity { domain: BridgeClockDomain::PipeWireGraph, .. })
@@ -1880,7 +1899,10 @@ fn application_hardware_and_graph_position_contracts_are_exact() {
     assert!(matches!(
         parts.graph.process(
             graph_observation(positions.graph, positions.graph_time, SIMULATION_PLAYBACK_PERIOD,),
-            GraphSystemInput::from_raw(true, Some(&left), None),
+            &[GraphInput {
+                source: SYSTEM_SOURCE_ID,
+                signal: GraphInputSignal::from_raw(true, Some(&left), None)
+            }],
             output.buffers(SIMULATION_PLAYBACK_PERIOD),
         ),
         Err(BridgeError::MissingSystemBuffer)
@@ -1901,7 +1923,7 @@ fn failed_downstream_boundaries_commit_no_controller_fifo_estimator_or_position_
     assert!(matches!(
         parts.graph.process(
             graph_observation(positions.graph, positions.graph_time, SIMULATION_PLAYBACK_PERIOD),
-            GraphSystemInput::unconnected(),
+            &[GraphInput { source: SYSTEM_SOURCE_ID, signal: GraphInputSignal::unconnected() }],
             output.buffers(SIMULATION_PLAYBACK_PERIOD),
         ),
         Err(BridgeError::Asrc {
@@ -2022,7 +2044,7 @@ fn playback_fifo_rejection_after_graph_processing_commits_no_boundary_state() {
     assert!(matches!(
         parts.graph.process(
             graph_observation(positions.graph, positions.graph_time, SIMULATION_PLAYBACK_PERIOD,),
-            GraphSystemInput::unconnected(),
+            &[GraphInput { source: SYSTEM_SOURCE_ID, signal: GraphInputSignal::unconnected() }],
             output.buffers(SIMULATION_PLAYBACK_PERIOD),
         ),
         Err(BridgeError::Overflow { domain: BridgeClockDomain::WavePlayback, .. })
@@ -2071,7 +2093,7 @@ fn playback_fifo_rejection_after_graph_processing_commits_no_boundary_state() {
     assert!(matches!(
         parts.graph.process(
             graph_observation(positions.graph, positions.graph_time, SIMULATION_PLAYBACK_PERIOD,),
-            GraphSystemInput::unconnected(),
+            &[GraphInput { source: SYSTEM_SOURCE_ID, signal: GraphInputSignal::unconnected() }],
             output.buffers(SIMULATION_PLAYBACK_PERIOD),
         ),
         Err(BridgeError::AttemptFaulted)
@@ -2092,7 +2114,7 @@ fn each_supported_quantum_is_valid_per_attempt_but_changes_are_terminal() {
             .graph
             .process(
                 graph_observation(0, 0, quantum),
-                GraphSystemInput::unconnected(),
+                &[GraphInput { source: SYSTEM_SOURCE_ID, signal: GraphInputSignal::unconnected() }],
                 output.buffers(quantum),
             )
             .expect("first fixed quantum");
@@ -2270,4 +2292,60 @@ impl ClockBridgeParts {
             BridgeClockDomain::PipeWireGraph => 0,
         }
     }
+}
+
+#[test]
+fn additional_software_input_reaches_independent_mixes_and_meters() {
+    let mut profile = MixerProfile::default()
+        .with_input(librewave_core::InputName::try_new("Music").expect("name"))
+        .expect("input");
+    let source = librewave_core::SourceId::new(3);
+    profile = profile
+        .with_route(
+            source,
+            librewave_core::MixTarget::Stream,
+            librewave_core::MixRoute::new(false, librewave_core::FaderGain::UNITY),
+        )
+        .expect("stream mute");
+    let physical = Wave3PhysicalIoConfig::try_new(
+        u32::try_from(SIMULATION_CAPTURE_PERIOD).expect("capture period"),
+        SIMULATION_CAPTURE_BUFFER,
+        u32::try_from(SIMULATION_PLAYBACK_PERIOD).expect("playback period"),
+        SIMULATION_PLAYBACK_BUFFER,
+    )
+    .expect("physical fake geometry");
+    let config = ClockBridgeConfig::try_new(
+        epoch(),
+        SIMULATION_MAXIMUM_GRAPH_QUANTUM,
+        simulation_direction(WAVE3_CAPTURE_CHANNELS, SIMULATION_MAXIMUM_GRAPH_QUANTUM),
+        simulation_direction(WAVE3_PLAYBACK_CHANNELS, SIMULATION_PLAYBACK_PERIOD),
+    )
+    .expect("bridge config");
+    let mut parts = ClockBridgeParts::new(physical, &profile, config).expect("three-source bridge");
+    let mut positions = prime(&mut parts);
+    parts.control.activate().expect("activate");
+    let frames = SIMULATION_PLAYBACK_PERIOD;
+    publish_capture(&mut parts, &mut positions, frames, 0.25);
+    let left = vec![0.5; frames];
+    let right = vec![0.25; frames];
+    let mut output = OutputStorage::new();
+    while parts.meters.try_take().is_some() {}
+    let report = parts
+        .graph
+        .process(
+            graph_observation(positions.graph, positions.graph_time, frames),
+            &[
+                GraphInput { source: SYSTEM_SOURCE_ID, signal: GraphInputSignal::unconnected() },
+                GraphInput { source, signal: GraphInputSignal::connected(&left, &right) },
+            ],
+            output.buffers(frames),
+        )
+        .expect("independent inputs");
+    assert_eq!(report.delivery, GraphBoundaryDelivery::Delivered);
+    for (monitor, stream) in output.monitor_left[..frames].iter().zip(&output.stream_left[..frames])
+    {
+        assert!((*monitor - *stream - 0.5).abs() < 0.0001);
+    }
+    let meters = parts.meters.try_take().expect("actual meter frame");
+    assert!((meters.source(source).expect("source meter").left().peak() - 0.5).abs() < 0.0001);
 }

@@ -14,7 +14,8 @@ _Static_assert(PW_VERSION_FILTER_EVENTS == 1,
 struct lw_pw_filter {
     struct pw_filter *filter;
     struct spa_hook listener;
-    void *ports[8];
+    void *ports[28];
+    uint32_t port_count;
     lw_pw_process_fn process;
     lw_pw_state_fn state_changed;
     void *data;
@@ -88,12 +89,12 @@ static void on_state_changed(void *data, enum pw_filter_state old_state,
 static void on_process(void *data, struct spa_io_position *position)
 {
     struct lw_pw_filter *bridge = data;
-    float *buffers[8];
+    float *buffers[28];
     uint32_t missing_mask = 0;
     uint32_t index;
     int faulted;
 
-    for (index = 0; index < 8; index++) {
+    for (index = 0; index < bridge->port_count; index++) {
         buffers[index] = pw_filter_get_dsp_buffer(
                 bridge->ports[index], position->clock.duration);
         if (buffers[index] == NULL)
@@ -149,6 +150,7 @@ static const struct pw_filter_events test_events = {
 struct lw_pw_filter *lw_pw_filter_new(struct pw_core *core,
         const char *name,
         struct pw_properties *properties,
+        uint32_t port_count,
         lw_pw_process_fn process,
         lw_pw_state_fn state_changed,
         void *data)
@@ -157,7 +159,8 @@ struct lw_pw_filter *lw_pw_filter_new(struct pw_core *core,
 
     check_pipewire_signatures();
     if (core == NULL || name == NULL || properties == NULL ||
-            process == NULL || state_changed == NULL || data == NULL) {
+            process == NULL || state_changed == NULL || data == NULL ||
+            port_count < 8 || port_count > 28 || (port_count & 1u) != 0) {
         if (properties != NULL)
             pw_properties_free(properties);
         errno = EINVAL;
@@ -168,6 +171,7 @@ struct lw_pw_filter *lw_pw_filter_new(struct pw_core *core,
         pw_properties_free(properties);
         return NULL;
     }
+    bridge->port_count = port_count;
     bridge->process = process;
     bridge->state_changed = state_changed;
     bridge->data = data;
@@ -186,7 +190,7 @@ int lw_pw_filter_add_port(struct lw_pw_filter *bridge, uint32_t index,
 {
     enum pw_direction direction = output ?
             PW_DIRECTION_OUTPUT : PW_DIRECTION_INPUT;
-    if (bridge == NULL || properties == NULL || index >= 8 ||
+    if (bridge == NULL || properties == NULL || index >= bridge->port_count ||
             bridge->ports[index] != NULL) {
         if (properties != NULL)
             pw_properties_free(properties);
@@ -203,7 +207,7 @@ int lw_pw_filter_add_port(struct lw_pw_filter *bridge, uint32_t index,
 
 int lw_pw_filter_connect_inactive_rt(struct lw_pw_filter *bridge)
 {
-    if (bridge == NULL || bridge->added_mask != UINT32_C(0xff))
+    if (bridge == NULL || bridge->added_mask != ((UINT32_C(1) << bridge->port_count) - 1u))
         return -EINVAL;
     return pw_filter_connect(bridge->filter,
             PW_FILTER_FLAG_INACTIVE | PW_FILTER_FLAG_RT_PROCESS, NULL, 0);

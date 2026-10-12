@@ -71,9 +71,8 @@ pub(super) fn mixer_width(inputs: usize) -> f32 {
 
 /// The narrowest the mixer can be before its strips scroll sideways.
 #[allow(clippy::cast_precision_loss)]
-pub(super) fn mixer_min_width(inputs: usize) -> f32 {
-    let inputs = inputs.max(2) as f32;
-    inputs * (STRIP_MIN + SPACE_MD) + ADD_MIN
+pub(super) fn mixer_min_width() -> f32 {
+    2. * (STRIP_MIN + SPACE_MD) + ADD_MIN
 }
 
 fn fader_height_for_viewport(viewport_height: f32) -> f32 {
@@ -105,7 +104,7 @@ impl Shell {
                 cx,
             ));
         }
-        let strips = strips.child(add_input());
+        let strips = strips.child(self.add_input(snapshot, cx));
         div()
             .id("mixer")
             .debug_selector(|| "mixer".to_owned())
@@ -146,7 +145,6 @@ impl Shell {
         fader_height: f32,
         cx: &mut Context<Self>,
     ) -> Div {
-        let microphone = source.role == SourceRole::Microphone;
         card()
             .flex_1()
             .min_w(px(STRIP_MIN))
@@ -155,29 +153,7 @@ impl Shell {
             .flex()
             .flex_col()
             .gap(px(SPACE_XL))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(SPACE_MD))
-                    .child(icon_tile(if microphone { "mic" } else { "system" }, INK, 40.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(HEADING))
-                                    .line_height(px(HEADING_LINE))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(source.name.clone()),
-                            )
-                            .child(caption(if microphone { "Wave:3" } else { "Desktop audio" })),
-                    ),
-            )
+            .child(self.source_heading(source, generation, cx))
             .child(super::meters::bar(
                 &format!("input-{}", source.controls.source()),
                 self.meters.as_ref().and_then(|frame| {
@@ -199,6 +175,71 @@ impl Shell {
                     .child(scale(fader_height))
                     .child(self.lane(source, MixTarget::Stream, generation, fader_height, cx)),
             )
+    }
+
+    fn source_heading(
+        &self,
+        source: &MixerSourceSnapshot,
+        generation: MixerGeneration,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let microphone = source.role == SourceRole::Microphone;
+        let id = source.controls.source();
+        let removable = !self.pending
+            && self.settings_modal.is_none()
+            && self.snapshot.as_ref().is_some_and(|s| {
+                s.mixer.runtime
+                    == librewave_core::MixerRuntimeState::Inactive {
+                        reason: librewave_core::MixerInactiveReason::AudioHostEngineNotConnected,
+                    }
+            });
+        div()
+            .flex()
+            .items_center()
+            .gap(px(SPACE_MD))
+            .child(icon_tile(if microphone { "mic" } else { "system" }, INK, 40.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(HEADING))
+                            .line_height(px(HEADING_LINE))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(source.name.clone()),
+                    )
+                    .child(caption(if microphone {
+                        "Wave:3"
+                    } else if source.role == SourceRole::System {
+                        "Desktop audio"
+                    } else {
+                        "Application audio"
+                    })),
+            )
+            .when(source.role == SourceRole::Software, |view| {
+                view.child(icon_button(
+                    &format!("remove-input-{id}"),
+                    "x",
+                    if removable { "Remove input" } else { "Stop audio before removing an input" },
+                    Tone::Quiet,
+                    FAINT,
+                    removable,
+                    cx,
+                    move |this, _, cx| {
+                        this.send(
+                            Command::RemoveMixerInput {
+                                expected_generation: generation,
+                                source: id,
+                            },
+                            cx,
+                        );
+                    },
+                ))
+            })
     }
 
     /// One source in one mix: the mix marker, fader, level, and mute.
@@ -296,23 +337,50 @@ impl Shell {
     }
 }
 
-/// The panel after the last input. The daemon has no command that adds an
-/// input, so this panel only marks where one goes.
-fn add_input() -> Stateful<Div> {
-    identified("add-input")
-        .flex_1()
-        .min_w(px(ADD_MIN))
-        .max_w(px(STRIP_MAX))
-        .rounded(px(RADIUS_CARD))
-        .bg(rgba(alpha(PANEL, 0x8C)))
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap(px(SPACE_MD))
-        .child(icon_tile("plus", MUTED, 40.))
-        .child(div().text_color(rgb(FAINT)).child("Add input"))
-        .tooltip(tip("More inputs are not available yet"))
+impl Shell {
+    fn add_input(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> Stateful<Div> {
+        let free =
+            (3..=12).map(SourceId::new).find(|id| snapshot.mixer.profile.source(*id).is_none());
+        let enabled = free.is_some()
+            && !self.pending
+            && self.settings_modal.is_none()
+            && snapshot.mixer.runtime
+                == librewave_core::MixerRuntimeState::Inactive {
+                    reason: librewave_core::MixerInactiveReason::AudioHostEngineNotConnected,
+                };
+        let generation = snapshot.mixer.generation();
+        let name =
+            free.and_then(|id| librewave_core::InputName::try_new(&format!("Input {id}")).ok());
+        activate(
+            identified("add-input")
+                .flex_1()
+                .min_w(px(ADD_MIN))
+                .max_w(px(STRIP_MAX))
+                .rounded(px(RADIUS_CARD))
+                .bg(rgba(alpha(PANEL, 0x8C)))
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(SPACE_MD))
+                .child(icon_tile("plus", MUTED, 40.))
+                .child(div().text_color(rgb(FAINT)).child("Add input"))
+                .tooltip(tip(if free.is_none() {
+                    "All 12 input slots are in use"
+                } else if !enabled {
+                    "Stop audio before adding an input"
+                } else {
+                    "Add a software input"
+                })),
+            enabled,
+            cx,
+            move |this, _, cx| {
+                if let Some(name) = name {
+                    this.send(Command::AddMixerInput { expected_generation: generation, name }, cx);
+                }
+            },
+        )
+    }
 }
 
 /// One mix: its name, where it goes, and its level.
@@ -671,6 +739,6 @@ mod tests {
         for level in SCALE {
             assert!(FaderGain::from_decibels(f32::from(level)).is_ok());
         }
-        assert!(mixer_min_width(2) < mixer_width(2));
+        assert!(mixer_min_width() < mixer_width(2));
     }
 }

@@ -4,9 +4,10 @@ use super::pcm::{
     PackedS24Error, WAVE3_CAPTURE_CHANNELS, WAVE3_PLAYBACK_CHANNELS, Wave3PhysicalIoConfig,
     decode_s24_3le, encode_s24_3le, packed_frame_count,
 };
+#[cfg(test)]
+use librewave_core::SYSTEM_SOURCE_ID;
 use librewave_core::{
-    EndpointId, MICROPHONE_SOURCE_ID, MixerProfile, MixerProfileError, SYSTEM_SOURCE_ID,
-    SourceControls,
+    EndpointId, MICROPHONE_SOURCE_ID, MixerProfile, MixerProfileError, SourceControls,
 };
 use librewave_engine::{
     ClockAttemptEpoch, ClockObservation, ClockRateEstimator, ClockRateEstimatorConfig,
@@ -821,8 +822,8 @@ impl ClockBridgeParts {
             observation::copy_slot::<CaptureClockObservation>();
         let (graph_observation_publisher, graph_observation_reader) =
             observation::copy_slot::<GraphClockObservation>();
-        let source_ids =
-            [profile.sources[0].controls.source(), profile.sources[1].controls.source()];
+        let source_ids: Vec<_> =
+            profile.sources.iter().map(|source| source.controls.source()).collect();
         let mixer_config = MixerConfig::try_new(
             config.maximum_graph_quantum_frames,
             profile.microphone_source,
@@ -882,7 +883,14 @@ impl ClockBridgeParts {
                 capture_input: allocate_zeroed(capture_input_samples)?,
                 capture_matched: allocate_zeroed(config.maximum_graph_quantum_frames)?,
                 microphone_input: allocate_zeroed(maximum_graph_samples)?,
-                system_input: allocate_zeroed(maximum_graph_samples)?,
+                software_sources: source_ids[1..].to_vec(),
+                software_input: {
+                    let mut buffers: Vec<Vec<f32>> = allocate_zeroed(source_ids.len() - 1)?;
+                    for buffer in &mut buffers {
+                        *buffer = allocate_zeroed(maximum_graph_samples)?;
+                    }
+                    buffers
+                },
                 microphone_output: allocate_zeroed(maximum_graph_samples)?,
                 monitor_output: allocate_zeroed(maximum_graph_samples)?,
                 stream_output: allocate_zeroed(maximum_graph_samples)?,
@@ -953,9 +961,9 @@ fn allocate_zeroed<T: Clone + Default>(length: usize) -> Result<Vec<T>, BridgeBu
     Ok(values)
 }
 
-fn profile_controls(profile: &MixerProfile) -> Result<[SourceControls; 2], MixerProfileError> {
+fn profile_controls(profile: &MixerProfile) -> Result<Vec<SourceControls>, MixerProfileError> {
     profile.validate()?;
-    Ok([profile.sources[0].controls, profile.sources[1].controls])
+    Ok(profile.sources.iter().map(|source| source.controls).collect())
 }
 
 /// The capture-worker owner of the mono capture FIFO producer.
@@ -1199,13 +1207,13 @@ impl CaptureIngress {
 
 /// Raw graph-side System buffers and their explicit connection state.
 #[derive(Clone, Copy, Debug)]
-pub struct GraphSystemInput<'a> {
+pub struct GraphInputSignal<'a> {
     connected: bool,
     left: Option<&'a [f32]>,
     right: Option<&'a [f32]>,
 }
 
-impl<'a> GraphSystemInput<'a> {
+impl<'a> GraphInputSignal<'a> {
     #[must_use]
     pub const fn unconnected() -> Self {
         Self { connected: false, left: None, right: None }
@@ -1224,6 +1232,13 @@ impl<'a> GraphSystemInput<'a> {
     ) -> Self {
         Self { connected, left, right }
     }
+}
+
+/// One identified software signal at a graph boundary.
+#[derive(Clone, Copy, Debug)]
+pub struct GraphInput<'a> {
+    pub source: librewave_core::SourceId,
+    pub signal: GraphInputSignal<'a>,
 }
 
 /// Direct graph-time output buffers for the three mixer endpoints.
@@ -1271,7 +1286,8 @@ pub struct GraphClockProcessor {
     capture_input: Vec<f32>,
     capture_matched: Vec<f32>,
     microphone_input: Vec<f32>,
-    system_input: Vec<f32>,
+    software_sources: Vec<librewave_core::SourceId>,
+    software_input: Vec<Vec<f32>>,
     microphone_output: Vec<f32>,
     monitor_output: Vec<f32>,
     stream_output: Vec<f32>,
@@ -1293,6 +1309,12 @@ impl fmt::Debug for GraphClockProcessor {
 }
 
 impl GraphClockProcessor {
+    /// The ordered software inputs fixed when this graph was constructed.
+    #[must_use]
+    pub fn software_sources(&self) -> &[librewave_core::SourceId] {
+        &self.software_sources
+    }
+
     /// Advances the graph clock while both physical workers are parked.
     ///
     /// `PipeWire` continues to call an active filter while the control owner
@@ -1375,7 +1397,7 @@ impl GraphClockProcessor {
     pub fn process(
         &mut self,
         observation: GraphClockObservation,
-        system: GraphSystemInput<'_>,
+        inputs: &[GraphInput<'_>],
         mut outputs: GraphOutputBuffers<'_>,
     ) -> Result<GraphProcessReport, BridgeError> {
         let _activity = ActivityGuard::enter(&self.shared.graph_in_flight);
@@ -1452,12 +1474,22 @@ impl GraphClockProcessor {
                     },
                 )
             })?;
-        prepare_system_input(
-            &self.shared,
-            system,
-            quantum_frames,
-            &mut self.system_input[..sample_count],
-        )?;
+        if inputs.len() != self.software_sources.len() {
+            return fault(&self.shared, BridgeError::MissingSystemBuffer);
+        }
+        for ((input, expected), buffer) in
+            inputs.iter().zip(&self.software_sources).zip(&mut self.software_input)
+        {
+            if input.source != *expected {
+                return fault(&self.shared, BridgeError::MissingSystemBuffer);
+            }
+            prepare_system_input(
+                &self.shared,
+                input.signal,
+                quantum_frames,
+                &mut buffer[..sample_count],
+            )?;
+        }
         validate_output_lengths(&outputs, quantum_frames)
             .map_err(|error| mark_fault(&self.shared, error))?;
 
@@ -1537,10 +1569,15 @@ impl GraphClockProcessor {
             self.microphone_input[frame * 2] = sample;
             self.microphone_input[frame * 2 + 1] = sample;
         }
-        let inputs = [
-            InputBuffer::new(MICROPHONE_SOURCE_ID, &self.microphone_input[..sample_count]),
-            InputBuffer::new(SYSTEM_SOURCE_ID, &self.system_input[..sample_count]),
-        ];
+        let mut engine_inputs = [InputBuffer::new(librewave_core::SourceId::new(0), &[]);
+            librewave_engine::MAX_SOURCES];
+        engine_inputs[0] =
+            InputBuffer::new(MICROPHONE_SOURCE_ID, &self.microphone_input[..sample_count]);
+        for (index, (source, buffer)) in
+            self.software_sources.iter().zip(&self.software_input).enumerate()
+        {
+            engine_inputs[index + 1] = InputBuffer::new(*source, &buffer[..sample_count]);
+        }
         let mut engine_outputs = [
             OutputBuffer::new(EndpointId::Microphone, &mut self.microphone_output[..sample_count]),
             OutputBuffer::new(EndpointId::MonitorMix, &mut self.monitor_output[..sample_count]),
@@ -1548,7 +1585,11 @@ impl GraphClockProcessor {
         ];
         let engine_report = self
             .engine
-            .process(quantum_frames, &inputs, &mut engine_outputs)
+            .process(
+                quantum_frames,
+                &engine_inputs[..=self.software_sources.len()],
+                &mut engine_outputs,
+            )
             .map_err(|error| mark_fault(&self.shared, BridgeError::Engine(error)))?;
         validate_finite_output(&self.shared, &self.microphone_output[..sample_count])?;
         validate_finite_output(&self.shared, &self.monitor_output[..sample_count])?;
@@ -1662,7 +1703,7 @@ fn silence_outputs(outputs: &mut GraphOutputBuffers<'_>) {
 
 fn prepare_system_input(
     shared: &SharedAttempt,
-    system: GraphSystemInput<'_>,
+    system: GraphInputSignal<'_>,
     frames: usize,
     interleaved: &mut [f32],
 ) -> Result<(), BridgeError> {

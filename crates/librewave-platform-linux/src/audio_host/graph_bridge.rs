@@ -2,7 +2,8 @@
 
 use super::clock_bridge::observation::CopySlotPublisher;
 use super::clock_bridge::{
-    BridgeError, GraphClockObservation, GraphClockProcessor, GraphOutputBuffers, GraphSystemInput,
+    BridgeError, GraphClockObservation, GraphClockProcessor, GraphInput, GraphInputSignal,
+    GraphOutputBuffers,
 };
 use super::pipewire_filter_ffi::{
     GraphProcessor, ProcessBlock, ProcessFault, ProcessTiming, SystemCycleState,
@@ -53,12 +54,31 @@ impl GraphProcessor for ClockBridgeGraphProcessor {
         // A removed link can leave old samples in the adapter's mapped buffer.
         // The drain state is semantic silence from the first detached cycle.
         let system = match block.system_state {
-            SystemCycleState::Idle | SystemCycleState::Draining => GraphSystemInput::unconnected(),
+            SystemCycleState::Idle | SystemCycleState::Draining => GraphInputSignal::unconnected(),
             SystemCycleState::Priming | SystemCycleState::Active => {
-                GraphSystemInput::connected(block.system.left, block.system.right)
+                GraphInputSignal::connected(block.system.left, block.system.right)
             }
         };
-        let result = self.graph.process(observation, system, outputs);
+        if block.additional.len() >= super::pipewire_filter_ffi::MAX_SOFTWARE_INPUTS {
+            return Err(self.bridge_error(BridgeError::MissingSystemBuffer));
+        }
+        let mut inputs = [GraphInput {
+            source: librewave_core::SourceId::new(0),
+            signal: GraphInputSignal::unconnected(),
+        }; super::pipewire_filter_ffi::MAX_SOFTWARE_INPUTS];
+        inputs[0] = GraphInput { source: librewave_core::SYSTEM_SOURCE_ID, signal: system };
+        for (index, input) in block.additional.iter().enumerate() {
+            let signal = match input.state {
+                SystemCycleState::Idle | SystemCycleState::Draining => {
+                    GraphInputSignal::unconnected()
+                }
+                SystemCycleState::Priming | SystemCycleState::Active => {
+                    GraphInputSignal::connected(input.signal.left, input.signal.right)
+                }
+            };
+            inputs[index + 1] = GraphInput { source: input.source, signal };
+        }
+        let result = self.graph.process(observation, &inputs[..=block.additional.len()], outputs);
         result.map_err(|error| self.bridge_error(error))?;
         Ok(())
     }
@@ -118,6 +138,7 @@ mod tests {
         let mut stream_left = vec![0.0; 256];
         let mut stream_right = vec![0.0; 256];
         let result = processor.process(ProcessBlock {
+            additional: &[],
             timing: ProcessTiming {
                 driver_id: 42,
                 rate: 48_000,
@@ -162,6 +183,7 @@ mod tests {
         let mut stream_right = vec![0.0; 256];
         processor
             .process(ProcessBlock {
+                additional: &[],
                 timing: ProcessTiming {
                     driver_id: 42,
                     rate: 48_000,
@@ -212,6 +234,7 @@ mod tests {
         let mut stream_right = vec![0.5; frames];
         processor
             .process(ProcessBlock {
+                additional: &[],
                 timing,
                 system_state: SystemCycleState::Active,
                 system: super::super::pipewire_filter_ffi::StereoInput {
@@ -251,6 +274,7 @@ mod tests {
         stream_right.fill(0.5);
         processor
             .process(ProcessBlock {
+                additional: &[],
                 timing: ProcessTiming {
                     position: timing.position + frames as u64,
                     monotonic_nsec: timing.monotonic_nsec + 5_333_333,

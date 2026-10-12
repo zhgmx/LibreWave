@@ -180,6 +180,8 @@ impl Shell {
                 && matches!(
                     command,
                     Command::SetMixerRoute { .. }
+                        | Command::AddMixerInput { .. }
+                        | Command::RemoveMixerInput { .. }
                         | Command::InspectDevice { .. }
                         | Command::SetWave3Control { .. }
                 ))
@@ -341,7 +343,12 @@ impl Shell {
                 self.hardware_state_stale = false;
             }
             (Command::GetMixer, Response::Mixer { mixer })
-            | (Command::SetMixerRoute { .. }, Response::MixerRouteChanged { mixer }) => {
+            | (
+                Command::SetMixerRoute { .. }
+                | Command::AddMixerInput { .. }
+                | Command::RemoveMixerInput { .. },
+                Response::MixerChanged { mixer },
+            ) => {
                 if let Some(snapshot) = &mut self.snapshot {
                     snapshot.mixer = mixer;
                 }
@@ -952,7 +959,7 @@ mod tests {
                 target: MixTarget::Monitor,
                 route: MixRoute::new(true, FaderGain::from_decibels(-0.5).expect("route level")),
             },
-            Response::MixerRouteChanged { mixer: mixer.clone() },
+            Response::MixerChanged { mixer: mixer.clone() },
         );
         assert_eq!(shell.snapshot.as_ref().map(|snapshot| &snapshot.mixer), Some(&mixer));
     }

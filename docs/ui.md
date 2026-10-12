@@ -38,8 +38,8 @@ When the daemon is unavailable, the stage dims the illustration and the mixer
 area shows one notice with **Start audio** and **Open Settings**. The main
 view does not expose socket diagnostics or invent device or channel state.
 Live peak meters appear on input strips and output rows while audio runs.
-Effects and linked levels remain unavailable and have no controls. Additional inputs, output selection, and output level are also
-unavailable. The mixer shows where they go, as described in Mixer.
+Effects and linked levels remain unavailable and have no controls.
+Output selection and output level are also unavailable. The mixer shows where they go, as described in Mixer.
 
 ### Device stage
 
@@ -82,8 +82,8 @@ volume and software mixer levels.
 
 ### Mixer
 
-**Inputs** has one strip for each input. Only the Microphone and System inputs
-are currently supported. Each strip has a stereo input peak meter, a Monitor fader, and a Stream fader
+**Inputs** has one strip for each input. Microphone and System are permanent
+inputs. Up to ten additional software inputs can receive application audio. Each strip has a stereo input peak meter, a Monitor fader, and a Stream fader
 with a dB scale between them. Input meters observe samples before the faders.
 Output meters observe each final mix after clipping. The meter scale is
 -60 to 0 dBFS. A source peak above full scale appears red. A dim track means
@@ -95,9 +95,17 @@ input in that mix. A muted fader is grey and its button is red. Setting or
 resetting a level preserves its mute state. Levels changed while audio is
 stopped are saved.
 
-An **Add input** panel follows the last strip. The daemon has no command that
-adds an input, so the panel does nothing and says so when the pointer rests on
-it. The strips scroll sideways when they do not fit.
+An **Add input** panel follows the last strip. Stop audio before adding or
+removing an input. **Add input** creates the next free software input. The
+small close button on a software input removes it. The daemon saves each
+complete layout before it acknowledges the change. Built-in inputs cannot
+be removed. The strips scroll sideways when they do not fit.
+
+The CLI accepts a name: `librewavectl mixer add <generation> "Music"`.
+Each input has a stable public sink name, such as `librewave.input.3`.
+Select its LibreWave device in an application's audio settings. Per-application
+assignment inside LibreWave is still under development. Layout changes remain
+unavailable until audio stops and cleanup completes.
 
 **Outputs** is under the inputs and has one row for each mix. A row names the
 mix and where it goes. The Monitor mix plays in the Wave:3 headphones. The
@@ -166,7 +174,7 @@ Longer stability on the current startup and routing implementation also
 requires validation.
 The fader tracks support drag, click, and keyboard input. The hardware level
 bars are not draggable. Linked
-faders, application-specific inputs, effects, and output selection remain work
+faders, application assignment, effects, and output selection remain work
 for later increments.
 
 The Linux application uses upstream Zed GPUI and `gpui_platform` from

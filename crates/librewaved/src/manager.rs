@@ -428,6 +428,21 @@ impl Daemon {
                 Ok(Response::ControlChanged { device })
             }
             Command::GetMixer => Ok(Response::Mixer { mixer: self.snapshot().mixer.clone() }),
+            Command::AddMixerInput { expected_generation, name } => {
+                self.prepare_input_change(expected_generation)?;
+                let next = self.snapshot().mixer.profile.with_input(name).map_err(|error| {
+                    IpcError { kind: IpcErrorKind::InvalidRequest, message: error.to_string() }
+                })?;
+                Ok(Response::MixerChanged { mixer: self.commit_mixer_profile(next, origin)? })
+            }
+            Command::RemoveMixerInput { expected_generation, source } => {
+                self.prepare_input_change(expected_generation)?;
+                let next =
+                    self.snapshot().mixer.profile.without_input(source).map_err(|error| {
+                        IpcError { kind: IpcErrorKind::InvalidRequest, message: error.to_string() }
+                    })?;
+                Ok(Response::MixerChanged { mixer: self.commit_mixer_profile(next, origin)? })
+            }
             Command::GetMeters => Ok(Response::Meters {
                 meters: self.audio.as_ref().map_or_else(
                     || librewave_core::MeterSnapshot::Unavailable {
@@ -454,7 +469,7 @@ impl Daemon {
             Command::SetMixerRoute { expected_generation, source, target, route } => {
                 let mixer =
                     self.set_mixer_route(expected_generation, source, target, route, origin)?;
-                Ok(Response::MixerRouteChanged { mixer })
+                Ok(Response::MixerChanged { mixer })
             }
         }
     }
@@ -494,6 +509,35 @@ impl Daemon {
             },
             other => internal_error(format!("validated mixer profile update failed: {other}")),
         })?;
+        self.commit_mixer_profile(next, origin)
+    }
+
+    fn prepare_input_change(&self, expected: MixerGeneration) -> Result<(), IpcError> {
+        let actual = self.snapshot().mixer.generation();
+        if expected != actual {
+            return Err(IpcError {
+                kind: IpcErrorKind::StaleMixerGeneration { expected, actual },
+                message: format!(
+                    "mixer generation {expected} is stale; current generation is {actual}"
+                ),
+            });
+        }
+        if self.audio_session.enabled
+            || self.audio.as_ref().is_some_and(AudioSupervisor::needs_tick)
+        {
+            return Err(IpcError {
+                kind: IpcErrorKind::AudioNotReady,
+                message: "stop audio and finish cleanup before changing input layout".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn commit_mixer_profile(
+        &mut self,
+        next: MixerProfile,
+        origin: librewave_core::Origin,
+    ) -> Result<MixerSnapshot, IpcError> {
         match self.mixer_store.save(&next) {
             Ok(()) => {}
             Err(PersistenceError::SaveAfterRename(_)) => {
