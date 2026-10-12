@@ -142,7 +142,8 @@ The CLI accepts `librewavectl mixer output <generation> monitor on -6.5`.
 Replace `monitor` with `stream` for the other output, or use `off` to mute it.
 `librewavectl mixer faders <source> <generation> -6.5 -6.5` changes both channel
 faders atomically without changing mute states. These controls passed software
-tests. Their native interaction and live audio behavior remain unverified.
+tests and a bounded Wave:3 audio run through the CLI. Native interaction with
+the channel and output controls remains unverified.
 
 ## Settings
 
@@ -188,9 +189,10 @@ after the host owns the audio path. The daemon publishes actual software
 peak and RMS values over a separate IPC request. The UI reads meters every
 100 ms while audio is active. Readings expire after 350 ms without a block.
 Meters report individual processed blocks, not a peak hold over the interval.
-Default tests check the signal path with fakes; live meter validation remains
-pending. Physical write validation is limited to the Low-cut control
-on Wave:3 API 5.4. Other hardware controls still require validation.
+Default tests check the signal path with fakes. A bounded Wave:3 run verified
+software meters with a quiet disposable test source. Physical write validation
+is limited to the Low-cut control on Wave:3 API 5.4. Other hardware controls
+still require validation.
 Service launch, default restoration, service restart, and removal checks have
 passed on the reference Wave:3. Reconnect, sleep, and login recovery still need
 acceptance runs. GPUI tests check command mapping, pointer geometry, state
@@ -201,14 +203,18 @@ daemon-connected view before and after reading the real Wave:3 API 5.4 controls,
 the loaded device stage at the minimum window size, and the Settings dialog.
 The loaded-control review leaves audio inactive and hardware controls unchanged.
 The captures do not validate native mouse or keyboard interaction, active audio,
-or behavior on other desktops.
+or behavior on other desktops. A separate physical selector and touch-mute
+check confirmed automatic updates in the native UI with audio inactive.
+Possible knob rotation during that check leaves the cause of its small gain
+change uncertain. It does not invalidate the selector and mute result.
 Longer stability on the current startup and routing implementation also
 requires validation.
 Channel and output fader tracks support drag, click, and keyboard input.
-Hardware level bars are not draggable. Linked levels and output controls passed
-software tests, and grouped application routing passed a private WirePlumber
-test. Native interaction and real audio acceptance of these controls remain
-pending. Effects and output destination selection remain work for later increments.
+Hardware level bars are not draggable. A bounded Wave:3 run through the CLI
+verified linked and independent levels, separate mutes, software output mute
+and attenuation, and disposable application moves between System and a named
+input. Native interaction with these software controls remains pending.
+Effects and output destination selection remain work for later increments.
 
 The Linux application uses upstream Zed GPUI and `gpui_platform` from
 Zed tag `v0.233.9`, commit `236e6ddf54e0763d0343f4d3e369d2ae00fe9670`,

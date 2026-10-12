@@ -1,6 +1,6 @@
 # Linux audio integration
 
-Status: The daemon has an explicit experimental audio lifecycle that composes the ALSA workers, independent-clock bridge, and PipeWire graph. A fresh daemon leaves audio inactive. Accepted audio intent survives daemon restart. The CLI and GPUI can start the installed service, suspend one selected user fragment, and restore desktop ownership. Private PipeWire tests use fake PCMs. The new application lifecycle still needs physical ownership, recovery, and latency validation.
+Status: The daemon has an explicit experimental audio lifecycle that composes the ALSA workers, independent-clock bridge, and PipeWire graph. A fresh daemon leaves audio inactive. Accepted audio intent survives daemon restart. The CLI and GPUI can start the installed service, suspend one selected user fragment, and restore desktop ownership. Private PipeWire tests use fake PCMs. A bounded Wave:3 run verified startup, software mixing, application moves, and exact restoration through normal Stop. Complete recovery, latency, and long-duration validation remain required.
 
 ## Reference system
 
