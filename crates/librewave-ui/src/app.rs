@@ -170,7 +170,13 @@ impl Shell {
 
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
         if self.pending
-            || (self.settings_modal.is_some() && matches!(command, Command::SetMixerRoute { .. }))
+            || (self.settings_modal.is_some()
+                && matches!(
+                    command,
+                    Command::SetMixerRoute { .. }
+                        | Command::InspectDevice { .. }
+                        | Command::SetWave3Control { .. }
+                ))
         {
             return;
         }
@@ -358,11 +364,11 @@ impl Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.settings_trigger_focus.is_none() {
             self.settings_trigger_focus = Some(cx.focus_handle());
         }
-        self.mixer_frame(cx)
+        self.mixer_frame(window.viewport_size().width < px(1050.), cx)
     }
 }
 
@@ -559,20 +565,35 @@ impl Shell {
     }
 
     fn hardware_writable(&self, access: DeviceWriteAccess) -> bool {
-        matches!(access, DeviceWriteAccess::Ready) && !self.pending && !self.hardware_state_stale
+        matches!(access, DeviceWriteAccess::Ready)
+            && !self.pending
+            && !self.hardware_state_stale
+            && self.settings_modal.is_none()
     }
 
     #[allow(clippy::too_many_lines)]
     fn device_panel(
         &self,
         device: Option<&librewave_core::DeviceSnapshot>,
+        stacked: bool,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> gpui::AnyElement {
         let mut panel = div().w_full().flex().flex_col().gap(px(SPACE_MD));
         let Some(device) = device else {
             return panel
-                .child(section_label("Device"))
-                .child(div().text_color(rgb(MUTED)).child("No Wave:3 connected."));
+                .child(
+                    div()
+                        .text_size(px(HEADING))
+                        .line_height(px(HEADING_LINE))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child("Microphone"),
+                )
+                .child(div().text_color(rgb(MUTED)).child(if self.snapshot.is_some() {
+                    "No Wave:3 connected."
+                } else {
+                    "Device status unavailable."
+                }))
+                .into_any_element();
         };
         panel = panel
             .child(
@@ -623,7 +644,8 @@ impl Shell {
                 write_access,
                 config: Some(config),
             } => {
-                let writable = self.hardware_writable(*write_access);
+                let writable = self.hardware_writable(*write_access)
+                    && device.connection == librewave_core::DeviceConnection::Connected;
                 panel = panel
                     .child(
                         div()
@@ -714,21 +736,26 @@ impl Shell {
                 "inspect",
                 "Read controls",
                 Tone::Primary,
-                !self.pending,
+                !self.pending
+                    && self.settings_modal.is_none()
+                    && device.connection == librewave_core::DeviceConnection::Connected,
                 cx,
                 move |this, _, cx| {
                     this.send(Command::InspectDevice { id }, cx);
                 },
             ));
         div()
+            .id("device-panel")
+            .debug_selector(|| "device-panel".to_owned())
             .w_full()
             .flex()
-            .items_center()
+            .when(stacked, gpui::Styled::flex_col)
+            .when(!stacked, gpui::Styled::items_center)
             .gap(px(SPACE_XL))
             .child(
                 div()
-                    .w(px(200.))
-                    .h(px(300.))
+                    .when(stacked, |view| view.w_full().h(px(270.)))
+                    .when(!stacked, |view| view.w(px(144.)).h(px(216.)))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
@@ -737,16 +764,13 @@ impl Shell {
                         gpui::img(device_art::image(device.admission.config().filter(|_| {
                             device.connection == librewave_core::DeviceConnection::Connected
                         })))
-                        .w(px(180.))
-                        .h(px(270.)),
+                        .when(stacked, |view| view.w(px(180.)).h(px(270.)))
+                        .when(!stacked, |view| view.w(px(144.)).h(px(216.))),
                     ),
             )
-            .child(controls.flex_1().min_w_0())
+            .child(controls.min_w_0().when(!stacked, gpui::Styled::flex_1))
+            .into_any_element()
     }
-}
-
-fn section_label(label: &'static str) -> impl IntoElement {
-    div().text_size(px(CAPTION)).line_height(px(CAPTION_LINE)).text_color(rgb(MUTED)).child(label)
 }
 
 fn control_button(
@@ -1246,6 +1270,7 @@ mod tests {
                 let modal = view.settings_modal.as_ref().expect("opened");
                 assert!(modal.close_focus.is_focused(window));
                 assert!(modal.focus.contains_focused(window, cx));
+                assert!(!view.hardware_writable(DeviceWriteAccess::Ready));
             });
         });
         for key in ["tab", "shift-tab"] {
@@ -1269,6 +1294,7 @@ mod tests {
             view.update(cx, |view, _| {
                 assert!(view.settings_modal.is_none());
                 assert!(trigger.is_focused(window));
+                assert!(view.hardware_writable(DeviceWriteAccess::Ready));
             });
         });
     }

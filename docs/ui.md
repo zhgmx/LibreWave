@@ -20,21 +20,26 @@ The start action launches the installed daemon service and waits for ready audio
 Use `cargo run -p librewave -- --settings` to open Settings at launch.
 Settings takes keyboard focus. Tab and Shift+Tab stay inside the panel.
 Escape, **Close**, or a click outside the panel closes it and restores the
-previous focus. Background mixer input is blocked while Settings is open.
+previous focus. Background mixer and hardware input are blocked while Settings
+is open.
 
 Select **Stop and restore** to release audio and restore desktop ownership. Closing the window keeps audio running. Lifecycle operations run on the background executor. The application prevents overlapping actions and preserves a restoration error while status polling continues. A deliberate stop clears the active snapshot and suppresses the expected disconnect error.
 
 For device and mixer development without an installation, run `cargo run -p librewaved` separately. The application checks status every two seconds and removes old status after an unexpected disconnect. It shows a new snapshot when the daemon becomes available again. Opening the window does not read hardware controls. `LIBREWAVE_SOCKET` selects a development IPC socket; installed service lifecycle controls use the normal session socket.
 
-The main view fills the window with a slim header, input channel strips,
-and output rows. Each input has paired vertical Monitor and Stream faders.
+The main view fills the window with a slim header, a microphone area, input
+channel strips, and output rows. The microphone area shows the product,
+connection state, and hardware controls beside the mixer. At narrower window
+widths, it sits above the mixer. Each input has paired vertical Monitor and
+Stream faders.
 The application uses Geist type, neutral surfaces, mint Monitor icons, and
 blue Stream icons. The header shows whether audio is running, stopped, or
 disconnected. Only the Microphone and System inputs are currently supported.
 
-Setup actions, device controls, and connection details are in Settings. When
-the daemon is unavailable, the mixer shows a concise connection message. It
-does not expose socket diagnostics on the main canvas or invent channel state.
+Audio setup and daemon connection options are in Settings. When the daemon is
+unavailable, the main view marks device status and outputs as unavailable.
+It does not expose socket diagnostics on the main canvas or invent device
+or channel state.
 Live meters, effects, linked levels, additional inputs, and output master
 controls remain unavailable and have no controls on the canvas. Connection
 status and the IPC socket are visible directly in Settings.
@@ -43,7 +48,7 @@ Shared layout values use 4, 8, 12, 16, and 24 px gaps. Captions, body text,
 and headings use 12, 14, and 16 px type. Buttons use a common 32 px height
 with visible focus, hover, selected, and disabled states.
 
-In Settings, select **Read controls** to open the daemon's device connection and read the
+In the microphone area, select **Read controls** to open the daemon's device connection and read the
 Wave:3 configuration. This command can also restore hardware values that
 LibreWave saved earlier. The application shows the admitted API version,
 write access, hardware values, and transaction errors.

@@ -14,7 +14,7 @@ pub(super) fn icon(name: &'static str, color: u32, extent: f32) -> Svg {
 }
 
 impl Shell {
-    pub(super) fn mixer_frame(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn mixer_frame(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
             .relative()
@@ -71,12 +71,41 @@ impl Shell {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(self.mixer_channels(cx))
-                    .child(self.output_rows()),
+                    .child(self.home_content(compact, cx)),
             )
             .when_some(self.settings_modal.as_ref(), |view, modal| {
                 view.child(self.settings_overlay(modal, cx))
             })
+    }
+
+    fn home_content(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let device = self.snapshot.as_ref().and_then(|snapshot| snapshot.devices.first());
+        div()
+            .flex()
+            .when(compact, gpui::Styled::flex_col)
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .p(px(SPACE_XL))
+                    .when(compact, |view| view.w_full().border_b_1())
+                    .when(!compact, |view| view.w(px(380.)).border_r_1())
+                    .border_color(rgb(BORDER))
+                    .child(self.device_panel(device, !compact, cx)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(self.mixer_channels(cx))
+                    .child(self.output_rows())
+                    .when(self.settings_modal.is_none(), |view| {
+                        view.when_some(self.action_error.clone(), |view, error| {
+                            view.child(div().p(px(SPACE_XL)).text_color(rgb(WARNING)).child(error))
+                        })
+                    }),
+            )
     }
 
     fn titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -144,10 +173,11 @@ impl Shell {
     }
 
     fn output_rows(&self) -> impl IntoElement {
-        let active = self
-            .snapshot
-            .as_ref()
-            .is_some_and(|s| matches!(s.mixer.runtime, MixerRuntimeState::Active));
+        let status = match self.snapshot.as_ref().map(|snapshot| snapshot.mixer.runtime) {
+            Some(MixerRuntimeState::Active) => "Ready",
+            Some(MixerRuntimeState::Inactive { .. }) => "Stopped",
+            None => "Unavailable",
+        };
         let mut outputs = div()
             .p(px(SPACE_XL))
             .border_t_1()
@@ -178,7 +208,7 @@ impl Shell {
                             .text_size(px(CAPTION))
                             .line_height(px(CAPTION_LINE))
                             .text_color(rgb(MUTED))
-                            .child(if active { "Ready" } else { "Stopped" }),
+                            .child(status),
                     ),
             );
         }
@@ -186,7 +216,6 @@ impl Shell {
     }
 
     fn settings_overlay(&self, modal: &SettingsModal, cx: &mut Context<Self>) -> impl IntoElement {
-        let device = self.snapshot.as_ref().and_then(|s| s.devices.first());
         let close = action_button(
             "close-settings",
             "Close",
@@ -210,7 +239,7 @@ impl Shell {
                 div()
                     .id("settings-panel")
                     .debug_selector(|| "settings-panel".to_owned())
-                    .w(px(720.))
+                    .w(px(640.))
                     .max_h_full()
                     .overflow_y_scroll()
                     .track_focus(&modal.focus)
@@ -244,7 +273,6 @@ impl Shell {
                             )
                             .child(close),
                     )
-                    .child(self.device_panel(device, cx))
                     .child(self.lifecycle_controls(cx))
                     .when_some(self.action_error.clone(), |view, error| {
                         view.child(div().text_color(rgb(WARNING)).child(error))

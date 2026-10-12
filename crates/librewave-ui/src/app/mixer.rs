@@ -3,7 +3,7 @@ use super::{ACCENT, BORDER, INK, MUTED, PANEL, RAISED, STREAM, Shell};
 use super::{
     controls::{Tone, action_button},
     theme::{
-        BODY, BODY_LINE, CAPTION, CAPTION_LINE, HEADING, HEADING_LINE, ICON, ICON_SMALL, RADIUS,
+        BODY, BODY_LINE, CAPTION, CAPTION_LINE, HEADING, HEADING_LINE, ICON_SMALL, RADIUS,
         SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS,
     },
 };
@@ -109,7 +109,7 @@ impl Shell {
             .flex()
             .flex_col()
             .gap(px(SPACE_XL))
-            .child(channel_heading(source, cx).tab_index(0).tab_stop(self.settings_modal.is_none()))
+            .child(channel_heading(source))
             .child(
                 div()
                     .flex()
@@ -135,27 +135,17 @@ impl Shell {
     }
 }
 
-fn channel_heading(
-    source: &librewave_core::MixerSourceSnapshot,
-    cx: &mut Context<Shell>,
-) -> Stateful<Div> {
+fn channel_heading(source: &librewave_core::MixerSourceSnapshot) -> Div {
     let microphone = source.role == librewave_core::SourceRole::Microphone;
     div()
-        .id(format!("channel-settings-{}", source.controls.source().get()))
         .flex()
         .flex_col()
         .gap(px(SPACE_XS))
-        .cursor_pointer()
-        .focusable()
-        .child(
-            div()
-                .h(px(24.))
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(icon(if microphone { "mic" } else { "system" }, INK, ICON))
-                .child(icon("chevron", MUTED, ICON_SMALL)),
-        )
+        .child(div().h(px(24.)).flex().items_center().justify_between().child(icon(
+            if microphone { "mic" } else { "system" },
+            INK,
+            ICON_SMALL,
+        )))
         .child(
             div()
                 .text_size(px(BODY))
@@ -170,17 +160,6 @@ fn channel_heading(
                 .text_color(rgb(MUTED))
                 .child(if microphone { "Elgato Wave:3" } else { "Desktop audio" }),
         )
-        .hover(|style| style.text_color(rgb(MUTED)))
-        .focus_visible(|style| style.bg(rgb(RAISED)))
-        .on_click(cx.listener(|this, _, window, cx| {
-            this.open_settings(window, cx);
-        }))
-        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                this.open_settings(window, cx);
-                cx.stop_propagation();
-            }
-        }))
 }
 
 fn fader_lane(
