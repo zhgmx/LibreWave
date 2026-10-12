@@ -1,5 +1,12 @@
 use super::chrome::icon;
-use super::{ACCENT, BORDER, INK, MUTED, PANEL, RAISED, STREAM, Shell, WARNING, button};
+use super::{ACCENT, BORDER, INK, MUTED, PANEL, RAISED, STREAM, Shell};
+use super::{
+    controls::{Tone, action_button},
+    theme::{
+        BODY, BODY_LINE, CAPTION, CAPTION_LINE, HEADING, HEADING_LINE, ICON, ICON_SMALL, RADIUS,
+        SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS,
+    },
+};
 use gpui::{
     Bounds, Context, Div, DragMoveEvent, MouseButton, Stateful, canvas, div, prelude::*, px, rgb,
 };
@@ -42,65 +49,40 @@ struct FaderDrag {
 
 impl Shell {
     pub(super) fn mixer_channels(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut mixer = div().w_full().p(px(24.)).flex().flex_col().gap(px(16.)).child(
+        let mut mixer = div().w_full().p(px(SPACE_XL)).flex().flex_col().gap(px(SPACE_LG)).child(
             div()
-                .h(px(32.))
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div().text_size(px(16.)).font_weight(gpui::FontWeight::MEDIUM).child("Inputs"),
-                )
-                .child(
-                    div()
-                        .h(px(32.))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .text_size(px(12.))
-                        .text_color(rgb(MUTED))
-                        .opacity(0.45)
-                        .child(icon("plus", MUTED, 16.))
-                        .child("Add input"),
-                ),
+                .text_size(px(HEADING))
+                .line_height(px(HEADING_LINE))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child("Inputs"),
         );
         if let Some(snapshot) = &self.snapshot {
-            let mut channels = div().id("input-channels").flex().gap(px(8.)).overflow_x_scroll();
+            let mut channels =
+                div().id("input-channels").flex().gap(px(SPACE_LG)).overflow_x_scroll();
             for source in &snapshot.mixer.profile.sources {
                 channels =
                     channels.child(self.channel_strip(source, snapshot.mixer.generation(), cx));
             }
-            channels = channels.child(
-                div()
-                    .w(px(160.))
-                    .h(px(480.))
-                    .flex_shrink_0()
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .rounded(px(6.))
-                    .opacity(0.45)
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(12.))
-                    .child(icon("plus", MUTED, 24.))
-                    .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child("Add input")),
-            );
             mixer = mixer.child(channels);
         } else {
             mixer = mixer.child(
                 div()
-                    .h(px(480.))
+                    .h(px(400.))
                     .flex()
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap(px(12.))
-                    .child(div().text_size(px(16.)).child("Mixer is offline"))
+                    .gap(px(SPACE_MD))
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(px(HEADING))
+                            .line_height(px(HEADING_LINE))
+                            .child("Mixer is offline"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(BODY))
+                            .line_height(px(BODY_LINE))
                             .text_color(rgb(MUTED))
                             .child("Open Settings to connect and set up audio."),
                     ),
@@ -117,48 +99,22 @@ impl Shell {
     ) -> impl IntoElement {
         let controls = source.controls;
         div()
-            .w(px(160.))
-            .h(px(480.))
+            .w(px(192.))
             .flex_shrink_0()
-            .p(px(12.))
-            .rounded(px(6.))
+            .p(px(SPACE_LG))
+            .rounded(px(RADIUS))
             .border_1()
             .border_color(rgb(BORDER))
             .bg(rgb(PANEL))
             .flex()
             .flex_col()
-            .gap(px(16.))
-            .child(channel_heading(source, cx))
+            .gap(px(SPACE_XL))
+            .child(channel_heading(source, cx).tab_index(0).tab_stop(self.settings_modal.is_none()))
             .child(
                 div()
-                    .h(px(32.))
-                    .px(px(8.))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .rounded(px(6.))
-                    .opacity(0.45)
                     .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(icon("effects", MUTED, 16.))
-                    .child(div().text_size(px(12.)).child("Effects")),
-            )
-            .child(
-                div()
-                    .relative()
-                    .flex()
-                    .justify_center()
-                    .gap(px(12.))
-                    .child(
-                        div()
-                            .absolute()
-                            .top(px(32.))
-                            .left(px(66.))
-                            .w(px(4.))
-                            .h(px(200.))
-                            .rounded(px(2.))
-                            .bg(rgb(BORDER)),
-                    )
+                    .justify_between()
+                    .gap(px(SPACE_SM))
                     .child(fader_lane(
                         controls.source(),
                         MixTarget::Monitor,
@@ -176,30 +132,19 @@ impl Shell {
                         cx,
                     )),
             )
-            .child(
-                div()
-                    .h(px(32.))
-                    .opacity(0.45)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(8.))
-                    .child(icon("link", MUTED, 16.))
-                    .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child("Link")),
-            )
     }
 }
 
 fn channel_heading(
     source: &librewave_core::MixerSourceSnapshot,
     cx: &mut Context<Shell>,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     let microphone = source.role == librewave_core::SourceRole::Microphone;
     div()
         .id(format!("channel-settings-{}", source.controls.source().get()))
         .flex()
         .flex_col()
-        .gap(px(4.))
+        .gap(px(SPACE_XS))
         .cursor_pointer()
         .focusable()
         .child(
@@ -208,23 +153,33 @@ fn channel_heading(
                 .flex()
                 .items_center()
                 .justify_between()
-                .child(icon(if microphone { "mic" } else { "system" }, INK, 20.))
-                .child(icon("chevron", MUTED, 12.)),
+                .child(icon(if microphone { "mic" } else { "system" }, INK, ICON))
+                .child(icon("chevron", MUTED, ICON_SMALL)),
         )
         .child(
             div()
-                .text_size(px(14.))
+                .text_size(px(BODY))
+                .line_height(px(BODY_LINE))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .child(source.name.clone()),
         )
-        .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child(if microphone {
-            "Elgato Wave:3"
-        } else {
-            "Desktop audio"
+        .child(
+            div()
+                .text_size(px(CAPTION))
+                .line_height(px(CAPTION_LINE))
+                .text_color(rgb(MUTED))
+                .child(if microphone { "Elgato Wave:3" } else { "Desktop audio" }),
+        )
+        .hover(|style| style.text_color(rgb(MUTED)))
+        .focus_visible(|style| style.bg(rgb(RAISED)))
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.open_settings(window, cx);
         }))
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.settings_view = super::SettingsView::Open;
-            cx.notify();
+        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                this.open_settings(window, cx);
+                cx.stop_propagation();
+            }
         }))
 }
 
@@ -253,17 +208,27 @@ fn fader_lane(
         route,
         generation,
         shown,
-        !shell.pending || shell.in_flight_fader.is_some(),
+        shell.settings_modal.is_none() && (!shell.pending || shell.in_flight_fader.is_some()),
         cx,
     );
-    let pending = shell.pending;
+    let pending = shell.pending || shell.settings_modal.is_some();
 
     div()
-        .w(px(48.))
+        .w(px(76.))
         .flex()
         .flex_col()
         .items_center()
-        .gap(px(12.))
+        .gap(px(SPACE_MD))
+        .child(
+            div()
+                .text_size(px(CAPTION))
+                .line_height(px(CAPTION_LINE))
+                .text_color(rgb(color))
+                .child(match target {
+                    MixTarget::Monitor => "Monitor",
+                    MixTarget::Stream => "Stream",
+                }),
+        )
         .child(
             mixer_button(
                 &format!("{key}-reset"),
@@ -282,30 +247,20 @@ fn fader_lane(
             .border_0()
             .p_0()
             .h(px(20.))
-            .text_size(px(12.))
+            .text_size(px(CAPTION))
+            .line_height(px(CAPTION_LINE))
             .text_color(rgb(MUTED)),
         )
         .child(track)
         .child(
             mixer_button(
                 &format!("{key}-toggle"),
-                "",
+                if route.enabled() { "Mute" } else { "Unmute" },
                 Some(route_toggle_command(source, target, route, generation)),
                 pending,
                 cx,
             )
-            .size(px(32.))
-            .p_0()
-            .border_0()
-            .bg(rgb(PANEL))
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(icon(
-                if target == MixTarget::Monitor { "headphones" } else { "stream" },
-                if route.enabled() { color } else { WARNING },
-                20.,
-            )),
+            .when(!route.enabled(), |view| view.bg(rgb(BORDER)).text_color(rgb(INK))),
         )
 }
 
@@ -329,6 +284,8 @@ fn fader_track(
         .h(px(200.))
         .relative()
         .focusable()
+        .tab_index(0)
+        .tab_stop(enabled)
         .focus_visible(|style| style.bg(rgb(RAISED)))
         .child(div().absolute().left(px(14.)).w(px(4.)).h_full().rounded(px(2.)).bg(rgb(BORDER)))
         .child(
@@ -464,21 +421,11 @@ fn mixer_button(
     pending: bool,
     cx: &mut Context<Shell>,
 ) -> Stateful<Div> {
-    let mut element =
-        button(key, label).focusable().focus_visible(|style| style.border_color(rgb(0x0070_B7FF)));
-    if !pending && let Some(command) = command {
-        element = element
-            .on_click(cx.listener(move |this, _, _, cx| this.send(command, cx)))
-            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    cx.stop_propagation();
-                    this.send(command, cx);
-                }
-            }));
-    } else {
-        element = element.text_color(rgb(MUTED));
-    }
-    element
+    action_button(key, label, Tone::Quiet, !pending && command.is_some(), cx, move |this, _, cx| {
+        if let Some(command) = command {
+            this.send(command, cx);
+        }
+    })
 }
 
 pub(super) fn route_toggle_command(

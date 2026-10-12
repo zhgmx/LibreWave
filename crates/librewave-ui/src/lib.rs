@@ -7,4 +7,4 @@ mod app;
 mod assets;
 
 #[cfg(feature = "gpui")]
-pub use app::run;
+pub use app::{LaunchView, run};

@@ -1,7 +1,12 @@
-use super::{BACKGROUND, BORDER, INK, MUTED, PANEL, RAISED, SettingsView, Shell, WARNING, button};
-use gpui::{
-    Context, FontWeight, IntoElement, SharedString, Svg, div, prelude::*, px, rgb, rgba, svg,
+use super::{
+    BACKGROUND, BORDER, INK, MUTED, SettingsModal, Shell, WARNING, action_button,
+    controls::Tone,
+    theme::{
+        BODY, BODY_LINE, CAPTION, CAPTION_LINE, CONTROL, HEADING, HEADING_LINE, ICON, RADIUS,
+        SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL,
+    },
 };
+use gpui::{Context, FontWeight, IntoElement, Svg, div, prelude::*, px, rgb, rgba, svg};
 use librewave_core::{Command, MixerRuntimeState};
 
 pub(super) fn icon(name: &'static str, color: u32, extent: f32) -> Svg {
@@ -10,18 +15,55 @@ pub(super) fn icon(name: &'static str, color: u32, extent: f32) -> Svg {
 
 impl Shell {
     pub(super) fn mixer_frame(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mixer = div()
-            .w_full()
-            .h(px(850.))
-            .max_h_full()
-            .max_w(px(1280.))
-            .rounded(px(6.))
-            .border_1()
-            .border_color(rgb(BORDER))
+        div()
+            .size_full()
+            .relative()
             .bg(rgb(BACKGROUND))
-            .overflow_hidden()
+            .text_color(rgb(INK))
+            .font_family("Geist")
+            .text_size(px(BODY))
+            .line_height(px(BODY_LINE))
             .flex()
             .flex_col()
+            .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if this.settings_modal.is_some() {
+                    match event.keystroke.key.as_str() {
+                        "escape" => this.close_settings(window, cx),
+                        "tab" => {
+                            if event.keystroke.modifiers.shift {
+                                window.focus_prev(cx);
+                            } else {
+                                window.focus_next(cx);
+                            }
+                            if let Some(modal) = &this.settings_modal
+                                && !modal.focus.contains_focused(window, cx)
+                            {
+                                modal.close_focus.focus(window, cx);
+                            }
+                        }
+                        _ => {
+                            if let Some(modal) = &this.settings_modal
+                                && !modal.focus.contains_focused(window, cx)
+                            {
+                                modal.close_focus.focus(window, cx);
+                                cx.stop_propagation();
+                            }
+                            return;
+                        }
+                    }
+                    cx.stop_propagation();
+                } else if event.keystroke.key == "," && event.keystroke.modifiers.control {
+                    this.open_settings(window, cx);
+                    cx.stop_propagation();
+                } else if event.keystroke.key == "tab" {
+                    if event.keystroke.modifiers.shift {
+                        window.focus_prev(cx);
+                    } else {
+                        window.focus_next(cx);
+                    }
+                    cx.stop_propagation();
+                }
+            }))
             .child(self.titlebar(cx))
             .child(
                 div()
@@ -31,102 +73,92 @@ impl Shell {
                     .overflow_y_scroll()
                     .child(self.mixer_channels(cx))
                     .child(self.output_rows()),
-            );
-        div()
-            .size_full()
-            .relative()
-            .p(px(32.))
-            .bg(rgb(0x0000_0000))
-            .text_color(rgb(INK))
-            .font_family("Geist")
-            .text_size(px(14.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" && this.settings_view != SettingsView::Closed {
-                    this.settings_view = SettingsView::Closed;
-                    cx.stop_propagation();
-                    cx.notify();
-                }
-            }))
-            .child(mixer)
-            .when(self.settings_view != SettingsView::Closed, |view| {
-                view.child(self.settings_overlay(cx))
+            )
+            .when_some(self.settings_modal.as_ref(), |view, modal| {
+                view.child(self.settings_overlay(modal, cx))
             })
     }
 
     fn titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let state =
-            match (self.action_error.is_some(), self.snapshot.as_ref().map(|s| s.mixer.runtime)) {
-                (true, _) => "Needs attention",
-                (false, None) => "Not connected",
-                (false, Some(MixerRuntimeState::Inactive { .. })) => "Audio stopped",
-                (false, Some(MixerRuntimeState::Active)) => "Audio running",
-            };
-        let mut mark = div().h(px(24.)).flex().items_center().gap(px(3.));
+        let state = match (
+            self.pending,
+            self.action_error.is_some(),
+            self.snapshot.as_ref().map(|s| s.mixer.runtime),
+        ) {
+            (true, _, _) => "Working…",
+            (_, true, _) => "Needs attention",
+            (_, _, None) => "Not connected",
+            (_, _, Some(MixerRuntimeState::Inactive { .. })) => "Audio stopped",
+            (_, _, Some(MixerRuntimeState::Active)) => "Audio running",
+        };
+        let mut mark = div().h(px(SPACE_XL)).flex().items_center().gap(px(3.));
         for height in [12., 20., 24., 20., 12.] {
             mark = mark.child(div().w(px(3.)).h(px(height)).rounded(px(2.)).bg(rgb(INK)));
+        }
+        let enabled = self.settings_modal.is_none();
+        let mut settings =
+            action_button("settings", "Settings", Tone::Quiet, enabled, cx, |this, window, cx| {
+                this.open_settings(window, cx);
+            })
+            .gap(px(SPACE_SM))
+            .child(icon("settings", INK, ICON));
+        if let Some(focus) = &self.settings_trigger_focus {
+            settings = settings.track_focus(focus).tab_stop(enabled);
         }
         div()
             .h(px(64.))
             .flex_shrink_0()
-            .px(px(24.))
+            .px(px(SPACE_XL))
             .border_b_1()
             .border_color(rgb(BORDER))
             .flex()
             .items_center()
             .justify_between()
-            .child(div().flex().items_center().gap(px(12.)).child(mark).child(
-                div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child("LibreWave"),
-            ))
+            .child(
+                div().flex().items_center().gap(px(SPACE_MD)).child(mark).child(
+                    div()
+                        .text_size(px(HEADING))
+                        .line_height(px(HEADING_LINE))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("LibreWave"),
+                ),
+            )
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(16.))
-                    .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child(state))
+                    .gap(px(SPACE_LG))
                     .child(
                         div()
-                            .id("settings")
-                            .size(px(32.))
-                            .rounded(px(6.))
-                            .focusable()
-                            .focus_visible(|s| s.bg(rgb(RAISED)))
-                            .hover(|s| s.bg(rgb(RAISED)))
-                            .cursor_pointer()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon("settings", MUTED, 20.))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_view = SettingsView::Open;
-                                cx.notify();
+                            .text_size(px(CAPTION))
+                            .line_height(px(CAPTION_LINE))
+                            .text_color(rgb(if self.action_error.is_some() {
+                                WARNING
+                            } else {
+                                MUTED
                             }))
-                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                    this.settings_view = SettingsView::Open;
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                }
-                            })),
-                    ),
+                            .child(state),
+                    )
+                    .child(settings),
             )
     }
 
     fn output_rows(&self) -> impl IntoElement {
-        let connected = self.snapshot.is_some();
+        let active = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| matches!(s.mixer.runtime, MixerRuntimeState::Active));
         let mut outputs = div()
-            .p(px(24.))
+            .p(px(SPACE_XL))
             .border_t_1()
             .border_color(rgb(BORDER))
             .flex()
             .flex_col()
-            .gap(px(16.))
+            .gap(px(SPACE_LG))
             .child(
                 div()
-                    .h(px(32.))
-                    .text_size(px(16.))
+                    .text_size(px(HEADING))
+                    .line_height(px(HEADING_LINE))
                     .font_weight(FontWeight::MEDIUM)
                     .child("Outputs"),
             );
@@ -135,59 +167,69 @@ impl Shell {
         {
             outputs = outputs.child(
                 div()
-                    .h(px(48.))
+                    .min_h(px(CONTROL))
                     .flex()
                     .items_center()
-                    .gap(px(16.))
-                    .child(icon(glyph, if connected { color } else { MUTED }, 20.))
+                    .gap(px(SPACE_MD))
+                    .child(icon(glyph, color, ICON))
+                    .child(div().flex_1().child(name))
                     .child(
                         div()
-                            .w(px(200.))
-                            .h(px(32.))
-                            .px(px(8.))
-                            .border_1()
-                            .border_color(rgb(BORDER))
-                            .rounded(px(6.))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(div().text_size(px(12.)).child(name))
-                            .child(icon("chevron", MUTED, 12.)),
-                    )
-                    .child(div().flex_1().h(px(4.)).rounded(px(2.)).bg(rgb(BORDER)))
-                    .child(icon("speaker", MUTED, 20.))
-                    .child(div().w(px(128.)).h(px(4.)).rounded(px(2.)).bg(rgb(BORDER)))
-                    .child(div().w(px(36.)).text_size(px(12.)).text_color(rgb(MUTED)).child("—"))
-                    .child(icon("listen", MUTED, 20.)),
+                            .text_size(px(CAPTION))
+                            .line_height(px(CAPTION_LINE))
+                            .text_color(rgb(MUTED))
+                            .child(if active { "Ready" } else { "Stopped" }),
+                    ),
             );
         }
         outputs
     }
 
-    fn settings_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn settings_overlay(&self, modal: &SettingsModal, cx: &mut Context<Self>) -> impl IntoElement {
         let device = self.snapshot.as_ref().and_then(|s| s.devices.first());
+        let close = action_button(
+            "close-settings",
+            "Close",
+            Tone::Secondary,
+            true,
+            cx,
+            Shell::close_settings,
+        )
+        .track_focus(&modal.close_focus);
         div()
             .absolute()
             .inset_0()
-            .bg(rgba(0x0000_0099))
-            .p(px(24.))
+            .occlude()
+            .bg(rgba(0x0000_00AA))
+            .p(px(SPACE_XL))
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .flex()
             .items_center()
             .justify_center()
             .child(
                 div()
                     .id("settings-panel")
-                    .w(px(620.))
+                    .debug_selector(|| "settings-panel".to_owned())
+                    .w(px(720.))
                     .max_h_full()
                     .overflow_y_scroll()
-                    .p(px(24.))
-                    .rounded(px(6.))
+                    .track_focus(&modal.focus)
+                    .tab_group()
+                    .tab_index(0)
+                    .tab_stop(false)
+                    .occlude()
+                    .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                        this.close_settings(window, cx);
+                        cx.stop_propagation();
+                    }))
+                    .p(px(SPACE_XL))
+                    .rounded(px(RADIUS))
                     .bg(rgb(BACKGROUND))
                     .border_1()
                     .border_color(rgb(BORDER))
                     .flex()
                     .flex_col()
-                    .gap(px(16.))
+                    .gap(px(SPACE_XL))
                     .child(
                         div()
                             .flex()
@@ -195,57 +237,68 @@ impl Shell {
                             .justify_between()
                             .child(
                                 div()
-                                    .text_size(px(16.))
+                                    .text_size(px(HEADING))
+                                    .line_height(px(HEADING_LINE))
                                     .font_weight(FontWeight::MEDIUM)
                                     .child("Settings"),
                             )
-                            .child(button("close-settings", "Close").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    this.settings_view = SettingsView::Closed;
-                                    cx.notify();
-                                },
-                            ))),
+                            .child(close),
                     )
-                    .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child("Additional inputs, effects, linked levels, live meters and output master controls are not available yet."))
-                .child(self.lifecycle_controls(cx))
+                    .child(self.device_panel(device, cx))
+                    .child(self.lifecycle_controls(cx))
                     .when_some(self.action_error.clone(), |view, error| {
                         view.child(div().text_color(rgb(WARNING)).child(error))
                     })
-                    .child(
-                        button("refresh", "Refresh status").on_click(
-                            cx.listener(|this, _, _, cx| this.send(Command::GetStatus, cx)),
-                        ),
-                    )
-                    .child(self.device_panel(device, cx))
-                    .child(
-                        button(
-                            "connection-details",
-                            if self.settings_view == SettingsView::ConnectionDetails {
-                                "Hide connection details"
-                            } else {
-                                "Connection details"
-                            },
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.settings_view = if this.settings_view == SettingsView::ConnectionDetails { SettingsView::Open } else { SettingsView::ConnectionDetails };
-                            cx.notify();
-                        })),
-                    )
-                    .when(self.settings_view == SettingsView::ConnectionDetails, |view| {
-                        view.child(
-                            div()
-                                .p(px(12.))
-                                .rounded(px(6.))
-                                .bg(rgb(PANEL))
-                                .text_size(px(12.))
-                                .text_color(rgb(MUTED))
-                                .child(SharedString::from(
-                                    self.connection_error.clone().unwrap_or_else(|| {
-                                        "Connected to the local daemon.".to_owned()
-                                    }),
-                                )),
-                        )
-                    }),
+                    .child(self.connection_panel(cx)),
             )
+    }
+
+    fn connection_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let status = if self.snapshot.is_some() { "Connected" } else { "Not connected" };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(SPACE_MD))
+            .border_t_1()
+            .border_color(rgb(BORDER))
+            .pt(px(SPACE_XL))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(HEADING))
+                            .line_height(px(HEADING_LINE))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Connection"),
+                    )
+                    .child(action_button(
+                        "refresh",
+                        "Refresh",
+                        Tone::Secondary,
+                        !self.pending,
+                        cx,
+                        |this, _, cx| this.send(Command::GetStatus, cx),
+                    )),
+            )
+            .child(div().flex().items_center().justify_between().child("Status").child(status))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(SPACE_LG))
+                    .child(div().w(px(72.)).text_color(rgb(MUTED)).child("Socket"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(CAPTION))
+                            .line_height(px(CAPTION_LINE))
+                            .child(super::configured_socket_path().display().to_string()),
+                    ),
+            )
+            .when_some(self.connection_error.clone(), |view, error| {
+                view.child(div().text_color(rgb(WARNING)).child(error))
+            })
     }
 }

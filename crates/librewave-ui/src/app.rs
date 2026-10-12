@@ -1,5 +1,13 @@
 mod chrome;
+mod controls;
+mod device_art;
 mod mixer;
+mod theme;
+use controls::{Tone, action_button};
+use theme::{
+    BODY, BODY_LINE, CAPTION, CAPTION_LINE, HEADING, HEADING_LINE, SPACE_LG, SPACE_MD, SPACE_SM,
+    SPACE_XL,
+};
 
 use mixer::FaderEdit;
 
@@ -14,8 +22,8 @@ use gpui::{
     rgb, size,
 };
 use librewave_core::{
-    Command, ControlAccessState, DeviceAdmissionSnapshot, DeviceGeneration, DeviceId,
-    DeviceWriteAccess, FixedPointValue, Snapshot, Wave3Control,
+    Command, DeviceAdmissionSnapshot, DeviceGeneration, DeviceId, DeviceWriteAccess,
+    FixedPointValue, Snapshot, Wave3Control,
 };
 use librewave_ipc::{IpcErrorKind, Response};
 use librewave_platform_linux::ipc::{Client, ClientError, configured_socket_path};
@@ -38,8 +46,8 @@ const STATUS_INTERVAL: Duration = Duration::from_secs(2);
 /// # Panics
 ///
 /// Panics if GPUI cannot open its initial window.
-pub fn run() {
-    gpui_platform::application().with_assets(crate::assets::Assets).run(|cx: &mut App| {
+pub fn run(view: LaunchView) {
+    gpui_platform::application().with_assets(crate::assets::Assets).run(move |cx: &mut App| {
         cx.text_system().add_fonts(crate::assets::fonts()).expect("embedded Geist fonts must load");
         let bounds = Bounds::centered(None, size(px(1240.), px(900.)), cx);
         let options = WindowOptions {
@@ -52,9 +60,24 @@ pub fn run() {
             app_id: Some("dev.librewave.LibreWave".to_owned()),
             ..WindowOptions::default()
         };
-        cx.open_window(options, |_, cx| cx.new(Shell::new))
-            .expect("failed to open the LibreWave application window");
+        cx.open_window(options, move |window, cx| {
+            cx.new(|cx| {
+                let mut shell = Shell::new(cx);
+                if view == LaunchView::Settings {
+                    shell.open_settings(window, cx);
+                }
+                shell
+            })
+        })
+        .expect("failed to open the LibreWave application window");
     });
+}
+
+/// The view requested when the native client starts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LaunchView {
+    Mixer,
+    Settings,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,11 +86,10 @@ enum SessionExpectation {
     Stopped,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SettingsView {
-    Closed,
-    Open,
-    ConnectionDetails,
+struct SettingsModal {
+    focus: gpui::FocusHandle,
+    close_focus: gpui::FocusHandle,
+    restore_focus: Option<gpui::FocusHandle>,
 }
 
 struct Shell {
@@ -84,7 +106,8 @@ struct Shell {
     suspend_config: Option<std::path::PathBuf>,
     lifecycle_message: Option<String>,
     session_expectation: SessionExpectation,
-    settings_view: SettingsView,
+    settings_modal: Option<SettingsModal>,
+    settings_trigger_focus: Option<gpui::FocusHandle>,
 }
 
 impl Shell {
@@ -103,7 +126,8 @@ impl Shell {
             suspend_config: None,
             lifecycle_message: None,
             session_expectation: SessionExpectation::Connect,
-            settings_view: SettingsView::Closed,
+            settings_modal: None,
+            settings_trigger_focus: None,
         };
         shell.send(Command::GetStatus, cx);
         cx.spawn(async move |this, cx| {
@@ -118,8 +142,36 @@ impl Shell {
         shell
     }
 
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_modal.is_some() {
+            return;
+        }
+        let modal = SettingsModal {
+            focus: cx.focus_handle(),
+            close_focus: cx.focus_handle(),
+            restore_focus: window.focused(cx).or_else(|| self.settings_trigger_focus.clone()),
+        };
+        self.queued_fader = None;
+        cx.stop_active_drag(window);
+        modal.close_focus.focus(window, cx);
+        self.settings_modal = Some(modal);
+        cx.notify();
+    }
+
+    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(modal) = self.settings_modal.take() {
+            let restore = if self.snapshot.is_some() { modal.restore_focus } else { None };
+            if let Some(focus) = restore.or_else(|| self.settings_trigger_focus.clone()) {
+                focus.focus(window, cx);
+            }
+            cx.notify();
+        }
+    }
+
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
-        if self.pending {
+        if self.pending
+            || (self.settings_modal.is_some() && matches!(command, Command::SetMixerRoute { .. }))
+        {
             return;
         }
         self.in_flight_fader = None;
@@ -174,6 +226,9 @@ impl Shell {
     }
 
     fn defer_fader(&mut self, edit: FaderEdit) -> bool {
+        if self.settings_modal.is_some() {
+            return true;
+        }
         if !self.pending {
             return false;
         }
@@ -304,6 +359,9 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.settings_trigger_focus.is_none() {
+            self.settings_trigger_focus = Some(cx.focus_handle());
+        }
         self.mixer_frame(cx)
     }
 }
@@ -386,27 +444,118 @@ impl Shell {
     }
 
     fn lifecycle_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div().p(px(16.)).rounded(px(8.)).bg(rgb(PANEL)).flex().flex_col().gap(px(10.))
-            .child(div().text_sm().child("Experimental audio ownership"))
-            .child(div().text_sm().text_color(rgb(MUTED)).child(
-                "Start requires setup and USB access. The selected fragment is backed up and restored on stop. Closing this window keeps audio running."))
-            .child(div().flex().gap(px(8.))
-                .child(button("session-start", if self.pending { "Working…" } else { "Start experimental audio" })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.run_lifecycle(librewavectl::SessionAction::Start { suspend_config: this.suspend_config.clone() }, cx);
-                    })))
-                .child(button("session-stop", "Stop and restore")
-                    .on_click(cx.listener(|this, _, _, cx| this.run_lifecycle(librewavectl::SessionAction::Stop, cx))))
-                .child(button("setup-plan", "View setup plan")
-                    .on_click(cx.listener(|this, _, _, cx| this.run_lifecycle(librewavectl::SessionAction::SetupPlan, cx)))))
-            .child(div().flex().gap(px(8.))
-                .child(button("choose-fragment", "Choose fragment…").on_click(cx.listener(|this, _, _, cx| this.choose_fragment(cx))))
-                .child(button("clear-fragment", "Clear selection").on_click(cx.listener(|this, _, _, cx| {
-                    if !this.pending { this.suspend_config = None; cx.notify(); }
-                }))))
-            .child(div().text_sm().text_color(rgb(MUTED)).child(self.suspend_config.as_ref().map_or_else(
-                || "No user fragment selected.".to_owned(), |path| format!("Temporarily suspend: {}", path.display()))))
-            .when_some(self.lifecycle_message.clone(), |view, message| view.child(div().text_sm().child(message)))
+        let enabled = !self.pending;
+        div()
+            .border_t_1()
+            .border_color(rgb(BORDER))
+            .pt(px(SPACE_XL))
+            .flex()
+            .flex_col()
+            .gap(px(SPACE_LG))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(HEADING))
+                            .line_height(px(HEADING_LINE))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child("Audio"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(CAPTION))
+                            .line_height(px(CAPTION_LINE))
+                            .text_color(rgb(MUTED))
+                            .child("Experimental"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(SPACE_SM))
+                    .child(action_button(
+                        "session-start",
+                        "Start audio",
+                        Tone::Primary,
+                        enabled,
+                        cx,
+                        |this, _, cx| {
+                            this.run_lifecycle(
+                                librewavectl::SessionAction::Start {
+                                    suspend_config: this.suspend_config.clone(),
+                                },
+                                cx,
+                            );
+                        },
+                    ))
+                    .child(action_button(
+                        "session-stop",
+                        "Stop and restore",
+                        Tone::Secondary,
+                        enabled,
+                        cx,
+                        |this, _, cx| this.run_lifecycle(librewavectl::SessionAction::Stop, cx),
+                    ))
+                    .child(action_button(
+                        "setup-plan",
+                        "Setup plan",
+                        Tone::Quiet,
+                        enabled,
+                        cx,
+                        |this, _, cx| {
+                            this.run_lifecycle(librewavectl::SessionAction::SetupPlan, cx);
+                        },
+                    )),
+            )
+            .child(self.audio_configuration(cx))
+            .when_some(self.lifecycle_message.clone(), |view, message| {
+                view.child(div().child(message))
+            })
+    }
+
+    fn audio_configuration(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let enabled = !self.pending;
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(div().text_color(rgb(MUTED)).child("Audio configuration"))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(SPACE_SM))
+                    .child(action_button(
+                        "choose-fragment",
+                        "Choose file…",
+                        Tone::Secondary,
+                        enabled,
+                        cx,
+                        |this, _, cx| this.choose_fragment(cx),
+                    ))
+                    .child(action_button(
+                        "clear-fragment",
+                        "Clear",
+                        Tone::Quiet,
+                        enabled && self.suspend_config.is_some(),
+                        cx,
+                        |this, _, cx| {
+                            this.suspend_config = None;
+                            cx.notify();
+                        },
+                    )),
+            )
+            .when_some(self.suspend_config.as_ref(), |view, path| {
+                view.child(
+                    div()
+                        .text_size(px(CAPTION))
+                        .line_height(px(CAPTION_LINE))
+                        .text_color(rgb(MUTED))
+                        .child(path.display().to_string()),
+                )
+            })
     }
 
     fn hardware_writable(&self, access: DeviceWriteAccess) -> bool {
@@ -419,59 +568,51 @@ impl Shell {
         device: Option<&librewave_core::DeviceSnapshot>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut panel = div()
-            .w_full()
-            .p(px(20.))
-            .rounded(px(10.))
-            .bg(rgb(PANEL))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .flex()
-            .flex_col()
-            .gap(px(12.));
+        let mut panel = div().w_full().flex().flex_col().gap(px(SPACE_MD));
         let Some(device) = device else {
             return panel
-                .child(section_label("DEVICE"))
-                .child(div().text_color(rgb(MUTED)).child("No Wave:3 is available."));
+                .child(section_label("Device"))
+                .child(div().text_color(rgb(MUTED)).child("No Wave:3 connected."));
         };
         panel = panel
-            .child(section_label("DEVICE"))
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(div().text_xl().child("Wave:3 hardware"))
-                    .child(status_badge(
-                        &device.admission.control_access().to_string(),
-                        if matches!(device.admission.control_access(), ControlAccessState::Writable)
-                        {
-                            ACCENT
-                        } else {
-                            WARNING
-                        },
-                    )),
+                    .text_size(px(HEADING))
+                    .line_height(px(HEADING_LINE))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child("Wave:3"),
             )
             .child(
                 div()
-                    .text_sm()
+                    .text_size(px(CAPTION))
+                    .line_height(px(CAPTION_LINE))
                     .text_color(rgb(MUTED))
-                    .child(format!("Connection: {}", device.connection)),
+                    .child(device.connection.to_string()),
             );
         match &device.admission {
             DeviceAdmissionSnapshot::NotInspected => {
-                panel = panel.child(div().text_sm().text_color(rgb(MUTED)).child(
-                    "Read controls to open the daemon connection. This can restore saved hardware values.",
-                ));
+                panel = panel.child(
+                    div()
+                        .text_size(px(BODY))
+                        .line_height(px(BODY_LINE))
+                        .text_color(rgb(MUTED))
+                        .child("Controls not loaded."),
+                );
             }
             DeviceAdmissionSnapshot::Failed { error } => {
-                panel =
-                    panel.child(div().text_sm().text_color(rgb(WARNING)).child(error.to_string()));
+                panel = panel.child(
+                    div()
+                        .text_size(px(BODY))
+                        .line_height(px(BODY_LINE))
+                        .text_color(rgb(WARNING))
+                        .child(error.to_string()),
+                );
             }
             DeviceAdmissionSnapshot::Admitted { api, config: None, .. } => {
                 panel = panel.child(
                     div()
-                        .text_sm()
+                        .text_size(px(BODY))
+                        .line_height(px(BODY_LINE))
                         .text_color(rgb(WARNING))
                         .child(format!("API {api}: the configuration is unavailable.")),
                 );
@@ -486,12 +627,13 @@ impl Shell {
                 panel = panel
                     .child(
                         div()
-                            .text_sm()
+                            .text_size(px(BODY))
+                            .line_height(px(BODY_LINE))
                             .text_color(rgb(MUTED))
                             .child(format!("API {api}  ·  Generation {generation}")),
                     )
                     .child(level_row(
-                        "Microphone preamp",
+                        "Microphone gain",
                         config.input_gain,
                         0,
                         40 * 256,
@@ -502,7 +644,7 @@ impl Shell {
                         cx,
                     ))
                     .child(level_row(
-                        "Headphone hardware level",
+                        "Headphone level",
                         config.headphone_volume,
                         -60 * 256,
                         0,
@@ -560,51 +702,51 @@ impl Shell {
             }
         }
         let id = device.id;
-        panel
-            .child(div().h(px(1.)).w_full().bg(rgb(BORDER)))
+        let controls = panel
             .child(
                 div()
-                    .text_xs()
+                    .text_size(px(CAPTION))
+                    .line_height(px(CAPTION_LINE))
                     .text_color(rgb(MUTED))
-                    .child("Physical hardware values. Desktop and mixer volume remain separate."),
+                    .child("Reading may restore saved device settings."),
             )
+            .child(action_button(
+                "inspect",
+                "Read controls",
+                Tone::Primary,
+                !self.pending,
+                cx,
+                move |this, _, cx| {
+                    this.send(Command::InspectDevice { id }, cx);
+                },
+            ));
+        div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(SPACE_XL))
             .child(
-                button("inspect", if self.pending { "Working…" } else { "Read controls" })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.send(Command::InspectDevice { id }, cx);
-                    })),
+                div()
+                    .w(px(200.))
+                    .h(px(300.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        gpui::img(device_art::image(device.admission.config().filter(|_| {
+                            device.connection == librewave_core::DeviceConnection::Connected
+                        })))
+                        .w(px(180.))
+                        .h(px(270.)),
+                    ),
             )
+            .child(controls.flex_1().min_w_0())
     }
 }
 
 fn section_label(label: &'static str) -> impl IntoElement {
-    div().text_xs().text_color(rgb(MUTED)).child(label)
-}
-
-fn status_badge(label: &str, color: u32) -> impl IntoElement {
-    div()
-        .px(px(9.))
-        .py(px(5.))
-        .rounded(px(5.))
-        .bg(rgb(RAISED))
-        .text_xs()
-        .text_color(rgb(color))
-        .child(label.to_owned())
-}
-
-fn button(id: &str, label: &str) -> Stateful<Div> {
-    div()
-        .id(id.to_owned())
-        .px(px(12.))
-        .py(px(8.))
-        .rounded(px(7.))
-        .bg(rgb(RAISED))
-        .border_1()
-        .border_color(rgb(BORDER))
-        .hover(|style| style.bg(rgb(0x0026_2626)))
-        .cursor_pointer()
-        .text_sm()
-        .child(label.to_owned())
+    div().text_size(px(CAPTION)).line_height(px(CAPTION_LINE)).text_color(rgb(MUTED)).child(label)
 }
 
 fn control_button(
@@ -616,18 +758,21 @@ fn control_button(
     writable: bool,
     cx: &mut Context<Shell>,
 ) -> Stateful<Div> {
-    let mut element = button(key, label);
-    if writable && let Some(control) = control {
-        element = element.on_click(cx.listener(move |this, _, _, cx| {
-            this.send(
-                Command::SetWave3Control { id, expected_generation: generation, control },
-                cx,
-            );
-        }));
-    } else {
-        element = element.text_color(rgb(MUTED));
-    }
-    element
+    action_button(
+        key,
+        label,
+        Tone::Secondary,
+        writable && control.is_some(),
+        cx,
+        move |this, _, cx| {
+            if let Some(control) = control {
+                this.send(
+                    Command::SetWave3Control { id, expected_generation: generation, control },
+                    cx,
+                );
+            }
+        },
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -648,11 +793,16 @@ fn level_row(
         .flex()
         .items_center()
         .justify_between()
-        .child(div().text_sm().child(format!("{label}: {:.1} dB", f64::from(value.raw) / 256.)))
+        .child(
+            div()
+                .text_size(px(BODY))
+                .line_height(px(BODY_LINE))
+                .child(format!("{label}: {:.2} dB", f64::from(value.raw) / 256.)),
+        )
         .child(
             div()
                 .flex()
-                .gap(px(5.))
+                .gap(px(SPACE_SM))
                 .child(control_button(
                     &format!("{label}-down"),
                     "−",
@@ -684,17 +834,28 @@ fn toggle_row(
     writable: bool,
     cx: &mut Context<Shell>,
 ) -> impl IntoElement {
-    div().flex().items_center().justify_between().child(div().text_sm().child(label)).child(
-        control_button(
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(div().text_size(px(BODY)).line_height(px(BODY_LINE)).child(label))
+        .child(action_button(
             label,
             if value { "On" } else { "Off" },
-            Some(constructor(!value)),
-            id,
-            generation,
+            if value { Tone::Selected } else { Tone::Secondary },
             writable,
             cx,
-        ),
-    )
+            move |this, _, cx| {
+                this.send(
+                    Command::SetWave3Control {
+                        id,
+                        expected_generation: generation,
+                        control: constructor(!value),
+                    },
+                    cx,
+                );
+            },
+        ))
 }
 
 fn stepped(
@@ -732,7 +893,8 @@ mod tests {
             suspend_config: None,
             lifecycle_message: None,
             session_expectation: SessionExpectation::Connect,
-            settings_view: SettingsView::Closed,
+            settings_modal: None,
+            settings_trigger_focus: None,
         }
     }
 
@@ -1070,5 +1232,62 @@ mod tests {
             Response::MixerRouteChanged { mixer: mixer.clone() },
         );
         assert_eq!(shell.snapshot.as_ref().map(|snapshot| &snapshot.mixer), Some(&mixer));
+    }
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
+    fn modal_keyboard_focus_is_contained_and_restored(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| shell_with(Snapshot::empty()));
+        let trigger =
+            view.read_with(cx, |view, _| view.settings_trigger_focus.clone().expect("trigger"));
+        cx.update(|window, cx| trigger.focus(window, cx));
+        cx.simulate_keystrokes("ctrl-,");
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                let modal = view.settings_modal.as_ref().expect("opened");
+                assert!(modal.close_focus.is_focused(window));
+                assert!(modal.focus.contains_focused(window, cx));
+            });
+        });
+        for key in ["tab", "shift-tab"] {
+            for _ in 0..30 {
+                cx.simulate_keystrokes(key);
+                cx.update(|window, cx| {
+                    view.update(cx, |view, cx| {
+                        assert!(
+                            view.settings_modal
+                                .as_ref()
+                                .expect("still open")
+                                .focus
+                                .contains_focused(window, cx)
+                        );
+                    });
+                });
+            }
+        }
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| {
+            view.update(cx, |view, _| {
+                assert!(view.settings_modal.is_none());
+                assert!(trigger.is_focused(window));
+            });
+        });
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
+    fn modal_backdrop_click_dismisses_without_activating_background(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| shell_with(Snapshot::empty()));
+        let before = view.read_with(cx, |view, _| view.snapshot.clone());
+        let settings = cx.debug_bounds("settings").expect("settings bounds");
+        cx.simulate_click(settings.center(), gpui::Modifiers::none());
+        assert!(view.read_with(cx, |view, _| view.settings_modal.is_some()));
+        // This point is outside the modal, over the first source strip.
+        cx.simulate_click(gpui::point(px(70.), px(180.)), gpui::Modifiers::none());
+        view.read_with(cx, |view, _| {
+            assert!(view.settings_modal.is_none());
+            assert_eq!(view.snapshot, before);
+            assert!(!view.pending);
+            assert!(view.in_flight_fader.is_none() && view.queued_fader.is_none());
+        });
     }
 }

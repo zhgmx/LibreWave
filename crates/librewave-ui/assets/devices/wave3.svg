@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="900" viewBox="278 -7 600 900" fill="none">
+  <title>Wave:3 microphone with studio lighting</title>
+  <desc>Original vector illustration based on the supplied front view. Black perforated grille, illuminated dial, metal yoke, desk stand, on a transparent background.</desc>
+  <defs>
+    <!-- Paint slots are replaced by the UI from observed state. -->
+    <linearGradient id="mode-0"><stop stop-color="#10141a"/></linearGradient>
+    <linearGradient id="mode-1"><stop stop-color="#10141a"/></linearGradient>
+    <linearGradient id="mode-2"><stop stop-color="#10141a"/></linearGradient>
+    <linearGradient id="level-0"><stop stop-color="#10141a"/></linearGradient>
+    <linearGradient id="level-1"><stop stop-color="#10141a"/></linearGradient>
+    <linearGradient id="level-2"><stop stop-color="#10141a"/></linearGradient>
+    <linearGradient id="level-3"><stop stop-color="#10141a"/></linearGradient>
+    <linearGradient id="level-4"><stop stop-color="#10141a"/></linearGradient>
+    <linearGradient id="level-5"><stop stop-color="#10141a"/></linearGradient>
+    <linearGradient id="level-6"><stop stop-color="#10141a"/></linearGradient>
+    <linearGradient id="mute-ring"><stop stop-color="#505864"/></linearGradient>
+
+    <linearGradient id="metal" x1="0" x2="1">
+      <stop stop-color="#080a0e"/><stop offset=".09" stop-color="#525862"/><stop offset=".18" stop-color="#24272d"/><stop offset=".39" stop-color="#15171b"/><stop offset=".68" stop-color="#20232b"/><stop offset=".84" stop-color="#3e4758"/><stop offset=".95" stop-color="#171d26"/><stop offset="1" stop-color="#080a0e"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="1" y2=".7">
+      <stop stop-color="#d4dbe1"/><stop offset=".2" stop-color="#656c76"/><stop offset=".43" stop-color="#161a21"/><stop offset=".7" stop-color="#4a5669"/><stop offset="1" stop-color="#9caec6"/>
+    </linearGradient>
+    <linearGradient id="grille" x1="0" x2="1">
+      <stop stop-color="#101419"/><stop offset=".09" stop-color="#48525e"/><stop offset=".23" stop-color="#31373e"/><stop offset=".46" stop-color="#15191d"/><stop offset=".7" stop-color="#303945"/><stop offset=".86" stop-color="#52637a"/><stop offset="1" stop-color="#111820"/>
+    </linearGradient>
+    <linearGradient id="base" x1="0" x2="1">
+      <stop stop-color="#646970"/><stop offset=".17" stop-color="#25282f"/><stop offset=".5" stop-color="#080a10"/><stop offset=".83" stop-color="#272f3e"/><stop offset="1" stop-color="#68758a"/>
+    </linearGradient>
+    <linearGradient id="top" x1="0" y1="0" x2=".6" y2="1">
+      <stop stop-color="#343942"/><stop offset=".48" stop-color="#181b22"/><stop offset="1" stop-color="#090c12"/>
+    </linearGradient>
+    <linearGradient id="silver" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#fff"/><stop offset=".22" stop-color="#edf2f7"/><stop offset=".42" stop-color="#737b85"/><stop offset=".64" stop-color="#fff"/><stop offset="1" stop-color="#a2aab5"/>
+    </linearGradient>
+    <radialGradient id="softbox" cx=".2" cy="0" r="1">
+      <stop stop-color="#dce5ec" stop-opacity=".18"/><stop offset=".45" stop-color="#bbc8d8" stop-opacity=".06"/><stop offset="1" stop-color="#bbc8d8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="shadow"><stop stop-color="#000" stop-opacity=".45"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
+    <pattern id="mesh" width="13" height="11.25" patternUnits="userSpaceOnUse">
+      <path d="M3.25 .35 6.1 2v3.3L3.25 6.95.4 5.3V2ZM9.75 5.98l2.85 1.65v3.3l-2.85 1.65-2.85-1.65v-3.3Z" fill="#05070a" stroke="#a8b6c6" stroke-opacity=".27" stroke-width=".65"/>
+      <path d="m.7 5.2 2.55 1.5L5.8 5.2M7.2 10.8l2.55 1.5 2.55-1.5" stroke="#c1cedd" stroke-opacity=".38" stroke-width=".6"/>
+    </pattern>
+    <pattern id="knurl" width="4" height="5" patternUnits="userSpaceOnUse">
+      <path d="m0 0 4 3M0 3l4 2" stroke="#8993a1" stroke-opacity=".4" stroke-width=".7"/>
+      <path d="M1 0v5" stroke="#000" stroke-opacity=".7"/>
+    </pattern>
+    <clipPath id="grille-clip"><path d="M463 360V55Q463 6 504 6H650Q692 6 692 55V360Z"/></clipPath>
+    <linearGradient id="marking-face" x1="0" y1="0" x2=".25" y2="1">
+      <stop stop-color="#59616b"/><stop offset=".24" stop-color="#414953"/><stop offset=".75" stop-color="#303741"/><stop offset="1" stop-color="#444e5a"/>
+    </linearGradient>
+    <linearGradient id="marking-edge" x1="0" y1="0" x2=".2" y2="1">
+      <stop stop-color="#a1aab3" stop-opacity=".8"/><stop offset=".18" stop-color="#78828e" stop-opacity=".7"/><stop offset=".42" stop-color="#48515e"/><stop offset=".82" stop-color="#343d49"/><stop offset="1" stop-color="#7a899b" stop-opacity=".6"/>
+    </linearGradient>
+    <radialGradient id="badge-face" cx=".28" cy=".15" r=".9">
+      <stop stop-color="#24282e"/><stop offset=".55" stop-color="#111419"/><stop offset="1" stop-color="#090c10"/>
+    </radialGradient>
+    <linearGradient id="badge-ink" x1="0" y1="0" x2=".6" y2="1">
+      <stop stop-color="#e0e3e6"/><stop offset=".48" stop-color="#c3c8cf"/><stop offset="1" stop-color="#8e98a5"/>
+    </linearGradient>
+    <!-- Front markings follow the user's close-up: solid earcups and an interrupted crossing. -->
+    <g id="mode-markings">
+      <rect x="532" y="418" width="5" height="10" rx="2.5"/>
+      <path d="M529 425v2a5.5 5.5 0 0 0 11 0v-2M534.5 433v3m-2.5 0h5" fill="none" stroke-width="1.4"/>
+      <path d="M567.5 431v-3.5a8.5 8.5 0 0 1 17 0v3.5" fill="none" stroke-width="1.5"/>
+      <rect x="569" y="427" width="3" height="7" rx=".8"/>
+      <rect x="580" y="427" width="3" height="7" rx=".8"/>
+      <path d="M608 433h2.1c5.2 0 8.2-12 13.1-12h2.1M608 421h2.1c2.1 0 3.8 1.8 5.1 3.7M619 429.3c1.5 2 2.8 3.7 5.1 3.7h1.2" fill="none" stroke-width="1.5"/>
+    </g>
+  </defs>
+  <!-- Ground contact. -->
+  <ellipse cx="576" cy="866" rx="216" ry="20" fill="url(#shadow)"/>
+  <!-- Elliptical weighted foot and cylindrical riser. -->
+  <ellipse cx="579" cy="852" rx="182" ry="22" fill="#07090d"/>
+  <path d="M377 830V846C389 879 762 880 780 846V830Z" fill="url(#base)"/>
+  <ellipse cx="579" cy="830" rx="202" ry="25" fill="url(#top)"/>
+  <path d="M377 831C401 860 748 860 780 831" stroke="url(#silver)" stroke-opacity=".75" stroke-width="1.5"/>
+  <path d="M558 637H602V824Q581 833 558 824Z" fill="url(#metal)"/>
+  <path d="M558 680Q580 686 602 680" stroke="#080a0d" stroke-width="2"/>
+  <path d="M563 646V820" stroke="#9da9ba" stroke-opacity=".22" stroke-width="2"/>
+  <!-- Pivot blocks and adjustment screws. -->
+  <rect x="419" y="340" width="40" height="43" rx="8" fill="url(#metal)"/>
+  <rect x="695" y="340" width="44" height="43" rx="8" fill="url(#metal)"/>
+  <rect x="442" y="334" width="17" height="57" rx="5" fill="url(#metal)"/>
+  <rect x="695" y="334" width="18" height="57" rx="5" fill="url(#metal)"/>
+  <rect x="395" y="333" width="25" height="59" rx="4" fill="url(#metal)" stroke="#616976" stroke-width=".8"/>
+  <rect x="395" y="333" width="25" height="59" rx="4" fill="url(#knurl)"/>
+  <rect x="737" y="333" width="24" height="59" rx="4" fill="url(#metal)" stroke="#667589" stroke-width=".8"/>
+  <rect x="737" y="333" width="24" height="59" rx="4" fill="url(#knurl)"/>
+  <!-- One continuous U-shaped support. -->
+  <path d="M436 348C437 401 435 541 442 580Q447 629 491 632Q578 640 664 632Q711 629 716 580C723 520 720 406 722 348" stroke="#080b10" stroke-width="16"/>
+  <path d="M433 348C434 410 432 541 439 580Q444 631 491 635Q578 643 665 635Q714 631 719 580C726 520 723 406 725 348" stroke="url(#rim)" stroke-width="3"/>
+  <path d="M442 351V555Q441 618 480 624M714 351V555Q714 619 676 624" stroke="#a8b2c0" stroke-opacity=".33" stroke-width="1.5"/>
+  <!-- Rounded capsule enclosure. -->
+  <path d="M457 55Q457 1 503 1H650Q698 1 698 55V564Q698 615 654 618H503Q457 618 457 568Z" fill="url(#metal)" stroke="#080b10" stroke-width="3"/>
+  <path d="M461 56Q461 5 504 5H650Q694 5 694 56V564Q694 610 653 613H505Q461 613 461 568Z" stroke="url(#rim)" stroke-width="2"/>
+  <path d="M464 361H691V564Q691 609 650 609H507Q464 609 464 566Z" fill="url(#metal)"/>
+  <path d="M470 369V561Q470 598 495 603" stroke="#c1cbd6" stroke-opacity=".16" stroke-width="3"/>
+  <path d="M682 369V558Q682 595 664 601" stroke="#849cbc" stroke-opacity=".2" stroke-width="4"/>
+  <!-- Perforated metal: a repeating vector mesh with shaped studio reflections. -->
+  <g clip-path="url(#grille-clip)">
+    <path d="M460 4H695V363H460Z" fill="url(#grille)"/>
+    <path d="M460 4H695V363H460Z" fill="url(#mesh)"/>
+    <path d="M460 4H695V363H460Z" fill="url(#softbox)"/>
+    <path d="M466 351V58Q466 12 507 12H649Q685 12 687 56" stroke="#e0e8f3" stroke-opacity=".24" stroke-width="3"/>
+  </g>
+  <path d="M464 362H691" stroke="#929eaf" stroke-opacity=".54" stroke-width="1.5"/>
+  <path d="M464 365H691" stroke="#05070a" stroke-width="3"/>
+  <!-- LibreWave's five-bar placeholder mark, matching the application header. -->
+  <g id="librewave-badge">
+    <circle cx="576" cy="83.7" r="32.6" fill="#040609" fill-opacity=".65"/>
+    <circle cx="576" cy="83" r="32" fill="url(#badge-face)" stroke="url(#rim)" stroke-opacity=".4" stroke-width=".9"/>
+    <g fill="url(#badge-ink)">
+      <rect x="562.5" y="77" width="3" height="12" rx="1.5"/>
+      <rect x="568.5" y="73" width="3" height="20" rx="1.5"/>
+      <rect x="574.5" y="71" width="3" height="24" rx="1.5"/>
+      <rect x="580.5" y="73" width="3" height="20" rx="1.5"/>
+      <rect x="586.5" y="77" width="3" height="12" rx="1.5"/>
+    </g>
+  </g>
+  <!-- Engraved mode icons and seven level indicators. -->
+  <g fill="#06090d" stroke="#06090d" opacity=".6" stroke-width=".45" stroke-linecap="round" stroke-linejoin="round">
+    <use href="#mode-markings" transform="translate(.15 .5)"/>
+  </g>
+  <g fill="url(#marking-face)" stroke="url(#marking-edge)" stroke-width=".45" stroke-linecap="round" stroke-linejoin="round">
+    <use href="#mode-markings"/>
+  </g>
+  <g fill="#10141a" stroke="#66717f" stroke-opacity=".5" stroke-width=".7">
+    <circle cx="534" cy="447" r="3" fill="url(#mode-0)"/><circle cx="576" cy="447" r="3" fill="url(#mode-1)"/><circle cx="617" cy="447" r="3" fill="url(#mode-2)"/>
+    <circle cx="534" cy="483" r="3" fill="url(#level-0)"/><circle cx="548" cy="483" r="3" fill="url(#level-1)"/><circle cx="562" cy="483" r="3" fill="url(#level-2)"/><circle cx="576" cy="483" r="3" fill="url(#level-3)"/><circle cx="589" cy="483" r="3" fill="url(#level-4)"/><circle cx="603" cy="483" r="3" fill="url(#level-5)"/><circle cx="617" cy="483" r="3" fill="url(#level-6)"/>
+  </g>
+  <!-- Recessed dial, polished rim, and luminous white ring. -->
+  <circle cx="576" cy="536" r="36" fill="#07090d" fill-opacity=".5"/>
+  <circle cx="576" cy="534" r="32" fill="url(#metal)" stroke="#080b10" stroke-width="2"/>
+  <circle cx="576" cy="534" r="30" stroke="url(#silver)" stroke-width="1.5"/>
+  <circle cx="576" cy="534" r="28" stroke="url(#mute-ring)" stroke-width="2.5"/>
+  <circle cx="576" cy="534" r="26.5" fill="url(#top)" stroke="#69727f" stroke-width="1"/>
+  <path d="M555 526a22 22 0 0 1 33-10" stroke="#9aa4b0" stroke-opacity=".3" stroke-width="1"/>
+</svg>
