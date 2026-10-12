@@ -1,0 +1,259 @@
+{
+  "model": "Wave:3",
+  "api": {
+    "major": 5,
+    "minor": 4
+  },
+  "mode": "Microphone",
+  "fractional_bits": 8,
+  "write_step_raw": 128,
+  "conditions": {
+    "microphone_mute": false,
+    "all_leds_off": false,
+    "leds_flip": false
+  },
+  "provenance": {
+    "collection": "User-authorized physical test through the sole daemon; exact gain readback and manual count.",
+    "source_revision": "bb60565216ad50ec233bfc0c059734506ea83c24",
+    "method": "Coarse samples and binary search on the 0.5 dB grid, with rising intermediate probes approached from 0 dB. The falling boundary sequence began at 40 dB and approached lower values from above.",
+    "limitations": "Counts only. Fractional cutoffs, physical positions, other APIs and modes, flip and mute behavior are not established.",
+    "documentation": "docs/protocol-evidence.md"
+  },
+  "observations": [
+    {
+      "gain_raw": 0,
+      "lit_count": 0,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 2560,
+      "lit_count": 2,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 5120,
+      "lit_count": 3,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 7680,
+      "lit_count": 5,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 10240,
+      "lit_count": 7,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 1280,
+      "lit_count": 1,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 640,
+      "lit_count": 0,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 896,
+      "lit_count": 1,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 768,
+      "lit_count": 1,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 1920,
+      "lit_count": 1,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 2176,
+      "lit_count": 1,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 2304,
+      "lit_count": 2,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 3840,
+      "lit_count": 3,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 3200,
+      "lit_count": 2,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 3456,
+      "lit_count": 2,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 3584,
+      "lit_count": 2,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 3712,
+      "lit_count": 2,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 6400,
+      "lit_count": 4,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 5760,
+      "lit_count": 4,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 5376,
+      "lit_count": 4,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 5248,
+      "lit_count": 3,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 7040,
+      "lit_count": 5,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 6656,
+      "lit_count": 4,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 6784,
+      "lit_count": 4,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 6912,
+      "lit_count": 5,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 8960,
+      "lit_count": 6,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 8320,
+      "lit_count": 5,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 8576,
+      "lit_count": 6,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 8448,
+      "lit_count": 6,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 9600,
+      "lit_count": 6,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 9856,
+      "lit_count": 6,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 9984,
+      "lit_count": 6,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 10112,
+      "lit_count": 6,
+      "direction": "rising"
+    },
+    {
+      "gain_raw": 10240,
+      "lit_count": 7,
+      "direction": "falling"
+    },
+    {
+      "gain_raw": 10112,
+      "lit_count": 6,
+      "direction": "falling"
+    },
+    {
+      "gain_raw": 8448,
+      "lit_count": 6,
+      "direction": "falling"
+    },
+    {
+      "gain_raw": 8320,
+      "lit_count": 5,
+      "direction": "falling"
+    },
+    {
+      "gain_raw": 6912,
+      "lit_count": 5,
+      "direction": "falling"
+    },
+    {
+      "gain_raw": 6784,
+      "lit_count": 4,
+      "direction": "falling"
+    },
+    {
+      "gain_raw": 5376,
+      "lit_count": 4,
+      "direction": "falling"
+    },
+    {
+      "gain_raw": 5248,
+      "lit_count": 3,
+      "direction": "falling"
+    },
+    {
+      "gain_raw": 3840,
+      "lit_count": 3,
+      "direction": "falling"
+    },
+    {
+      "gain_raw": 3712,
+      "lit_count": 2,
+      "direction": "falling"
+    },
+    {
+      "gain_raw": 2304,
+      "lit_count": 2,
+      "direction": "falling"
+    },
+    {
+      "gain_raw": 2176,
+      "lit_count": 1,
+      "direction": "falling"
+    },
+    {
+      "gain_raw": 768,
+      "lit_count": 1,
+      "direction": "falling"
+    },
+    {
+      "gain_raw": 640,
+      "lit_count": 0,
+      "direction": "falling"
+    }
+  ]
+}

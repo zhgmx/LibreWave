@@ -91,10 +91,42 @@ Hash matching identifies the analyzed inputs. It does not verify their vendor
 signatures or physical behavior.
 
 These facts support a device-side display derived from the selected value,
-rather than a reported segment pattern. This is an inference. The thresholds,
-rounding, zero and maximum patterns, mix direction, and effects of mute remain
-unverified. The application keeps the seven dots dark until those details have
-physical evidence. Software audio peaks cannot substitute for this evidence.
+rather than a reported segment pattern. This is an inference. A physical
+Wave:3 API 5.4 test now brackets Microphone-mode count transitions on the
+reviewed 0.5 dB write grid. Fractional thresholds, LED positions, the other
+modes, flip behavior, and effects of mute remain unverified. The application
+keeps the seven dots dark until the behavior it draws has physical evidence.
+Software audio peaks cannot substitute for this evidence.
+
+### Observed Microphone-mode LED counts
+
+The test used only the daemon's `InputGain` control path. Each requested value
+was read back before the operator counted fully lit LEDs. Audio stayed off
+and playback stayed paused. The operator confirmed that the IEMs were out
+before the first write. The selector stayed in Microphone mode. Microphone
+mute, `all_leds_off`, and `leds_flip` were off.
+Other configuration fields stayed unchanged.
+
+There were 33 rising observations and 14 falling confirmations. Rising probes
+approached intermediate values from 0 dB. The falling sequence began at
+40 dB and approached lower values from above. Both sequences agreed at every
+tested boundary. At 0 dB, no level LED was lit. At 40 dB, all seven were lit.
+
+| New lit count | Lower tested gain and count | Upper tested gain and count |
+| --- | --- | --- |
+| 1 | 2.5 dB: 0 | 3.0 dB: 1 |
+| 2 | 8.5 dB: 1 | 9.0 dB: 2 |
+| 3 | 14.5 dB: 2 | 15.0 dB: 3 |
+| 4 | 20.5 dB: 3 | 21.0 dB: 4 |
+| 5 | 26.5 dB: 4 | 27.0 dB: 5 |
+| 6 | 32.5 dB: 5 | 33.0 dB: 6 |
+| 7 | 39.5 dB: 6 | 40.0 dB: 7 |
+
+These are transition brackets, not exact fractional thresholds. Do not infer
+the seventh transition from the spacing of the first six. The sanitized
+[observations](../crates/librewave-ui/tests/fixtures/wave3-api5-4-microphone-led-counts.json)
+record raw Q8.8 gain and manual counts. They apply to the tested device and
+API only. Headphone and Mix modes need separate tests.
 
 ### Physical observation plan
 
@@ -115,6 +147,8 @@ do not restore it with an unapproved USB write. This observation can identify
 which values affect the pattern, but it cannot establish every threshold.
 A later approved threshold sweep must name each physical value it can change,
 protect headphone listening levels, and review restoration before it starts.
+Normal gain writes use 0.5 dB steps. If the observed baseline is between those
+steps, agree on the final gain before the first write. Do not round it silently.
 
 ## Generated catalog
 
