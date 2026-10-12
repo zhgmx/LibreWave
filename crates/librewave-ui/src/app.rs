@@ -24,7 +24,7 @@ use librewave_ipc::{IpcErrorKind, Response};
 use librewave_platform_linux::ipc::{Client, ClientError, configured_socket_path};
 use std::time::Duration;
 
-const STATUS_INTERVAL: Duration = Duration::from_secs(2);
+const STATUS_INTERVAL: Duration = Duration::from_millis(500);
 const TITLEBAR: f32 = 52.;
 
 /// Opens the optional desktop client.
@@ -269,10 +269,14 @@ impl Shell {
         }
         match result {
             Ok(Response::Status { snapshot }) => {
+                let changed = self.snapshot.as_ref() != Some(&snapshot)
+                    || self.connection_error.is_some()
+                    || self.hardware_state_stale;
                 self.snapshot = Some(snapshot);
                 self.session_expectation = SessionExpectation::Connect;
                 self.connection_error = None;
                 self.hardware_state_stale = false;
+                return changed;
             }
             Ok(_) => {
                 self.snapshot = None;
@@ -849,6 +853,18 @@ mod tests {
         assert!(shell.apply_poll_result(1, Ok(Response::Status { snapshot: Snapshot::empty() }),));
         assert!(shell.snapshot.is_some());
         assert!(shell.connection_error.is_none());
+    }
+
+    #[test]
+    fn unchanged_status_does_not_redraw_and_changed_status_does() {
+        let snapshot = Snapshot::empty();
+        let mut shell = shell_with(snapshot.clone());
+        assert!(!shell.apply_poll_result(0, Ok(Response::Status { snapshot: snapshot.clone() })));
+        let mut changed = snapshot;
+        changed.generation = 1;
+        assert!(shell.apply_poll_result(0, Ok(Response::Status { snapshot: changed.clone() })));
+        assert_eq!(shell.snapshot, Some(changed));
+        assert!(!shell.poll_in_flight);
     }
 
     #[test]

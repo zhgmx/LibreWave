@@ -100,7 +100,7 @@ pub fn run(socket_path: impl Into<PathBuf>) -> std::io::Result<()> {
     let serving = librewave_platform_linux::ipc::serve_with_tick(
         &socket_path,
         |command| daemon.borrow_mut().handle(command, librewave_core::Origin::Client),
-        || daemon.borrow_mut().audio_tick(),
+        || daemon.borrow_mut().control_tick(),
         || daemon.borrow_mut().audio_maintenance_tick(),
         |error| eprintln!("librewaved: connection error: {error}"),
         || signals.requested(),

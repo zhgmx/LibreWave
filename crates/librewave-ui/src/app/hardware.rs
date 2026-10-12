@@ -198,7 +198,7 @@ fn level_row(level: &Level, target: Target, cx: &mut Context<Shell>) -> Div {
         if muted { DANGER } else { INK },
         target.writable,
         cx,
-        move |this, _, cx| this.send(control_command(target, mute_control(!muted)), cx),
+        move |this, _, cx| this.send(mute_command(target, muted, mute_control), cx),
     )
     .size(px(40.))
     .when(muted, |view| view.bg(rgba(alpha(DANGER, 0x24))));
@@ -337,6 +337,10 @@ const fn control_command(target: Target, control: Wave3Control) -> Command {
     Command::SetWave3Control { id: target.id, expected_generation: target.generation, control }
 }
 
+fn mute_command(target: Target, muted: bool, control: Toggle) -> Command {
+    control_command(target, control(!muted))
+}
+
 fn decibels(value: FixedPointValue) -> String {
     format!("{:.2}", f64::from(value.raw) / 256.).replace('-', "−")
 }
@@ -364,6 +368,30 @@ pub(super) fn stepped(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hardware_mute_uses_the_observed_value_and_device_generation() {
+        let generation = DeviceGeneration::new([7; 16], 19);
+        let target = Target { id: DeviceId(3), generation, writable: true };
+        for muted in [false, true] {
+            assert_eq!(
+                mute_command(target, muted, Wave3Control::MicrophoneMute),
+                Command::SetWave3Control {
+                    id: target.id,
+                    expected_generation: generation,
+                    control: Wave3Control::MicrophoneMute(!muted)
+                }
+            );
+            assert_eq!(
+                mute_command(target, muted, Wave3Control::HeadphoneMute),
+                Command::SetWave3Control {
+                    id: target.id,
+                    expected_generation: generation,
+                    control: Wave3Control::HeadphoneMute(!muted)
+                }
+            );
+        }
+    }
 
     #[test]
     fn level_bar_spans_the_reviewed_range_and_never_overflows_it() {

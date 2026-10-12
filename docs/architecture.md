@@ -75,7 +75,9 @@ Desired hardware state contains only controls that a client explicitly changed t
 
 On first adoption, LibreWave reads the current device state as its observed baseline. It does not store every observed hardware field as desired state, and it does not reset the microphone to project defaults.
 
-An explicit client command places that hardware control under LibreWave management. Managed controls are authoritative during reconnect. Unmanaged controls keep the value reported by the device. An explicit inspection or refresh treats a changed configuration as device input. Continuous physical-event polling remains required work.
+An explicit client command places that hardware control under LibreWave management. Unmanaged controls keep the value reported by the device. Automatic observation reads current values without restoring saved controls. Explicit inspection after automatic adoption restores managed controls once. Later inspection and refresh treat a changed configuration as device input.
+
+The daemon checks the host inventory once per second and reads each admitted configuration at a 500 ms interval while it runs, including when audio is inactive or the window is closed. The control loop reads at most one device per turn and schedules the next read from completion. Reads serialize with transactions. A permission failure or disconnect retries after five seconds. A malformed or unsupported response requires explicit inspection or a new connection. Polling does not save profiles, restore desired controls, or enter the audio callback. An unchanged read leaves both generations unchanged. Each USB transfer has a 500 ms timeout, so a stalled device can delay control requests before it is dropped. The UI requests status every 500 ms; a physical change normally appears within about one second plus transfer and scheduling time.
 
 An explicit unmanage operation releases the audio graph and restores setup files that LibreWave replaced. Setup does not change Gain Lock, so unmanage does not restore a saved Gain Lock value.
 
@@ -83,7 +85,7 @@ An explicit unmanage operation releases the audio graph and restores setup files
 
 The daemon models startup, device reconnect, PipeWire restart, WirePlumber restart, and shutdown as state transitions. Recovery reuses the same reconciliation path as initial startup.
 
-Reconnect first repeats exact model and API admission on a new connection. It then restores managed controls in a fixed sequence of one-field, complete-payload transactions. This sequence is not atomic. If a later control fails, earlier verified controls can already be applied. The daemon reports the verified partial state and locks more writes. An unverified restoration reports no observed configuration. A disconnect drops the connection and reports the device as disconnected.
+Reconnect first repeats exact model and API admission on a new connection. Automatic observation leaves the hardware unchanged. Explicit inspection can then restore managed controls in a fixed sequence of one-field, complete-payload transactions. This sequence is not atomic. If a later control fails, earlier verified controls can already be applied. The daemon reports the verified partial state and locks more writes. An unverified restoration reports no observed configuration. A disconnect drops the connection and reports the device as disconnected.
 
 The daemon must not alternate between two competing graph layouts or repeatedly fight another volume owner. If the required ownership cannot be obtained, it reports the conflict and leaves hardware writes stopped.
 

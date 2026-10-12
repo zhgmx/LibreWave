@@ -18,7 +18,7 @@ The start action launches the installed daemon service and waits for ready audio
 
 While audio runs, the title bar shows **Audio running** and a **Stop** button. **Stop** releases audio and restores desktop ownership. Closing the window keeps audio running. Lifecycle operations run on the background executor. The application prevents overlapping actions and preserves a restoration error while status polling continues. A deliberate stop clears the active snapshot and suppresses the expected disconnect error.
 
-For device and mixer development without an installation, run `cargo run -p librewaved` separately. The application checks status every two seconds and removes old status after an unexpected disconnect. It shows a new snapshot when the daemon becomes available again. Opening the window does not read hardware controls. `LIBREWAVE_SOCKET` selects a development IPC socket; installed service lifecycle controls use the normal session socket.
+For device and mixer development without an installation, run `cargo run -p librewaved` separately. The application checks status every 500 ms and removes old status after an unexpected disconnect. It shows a new snapshot when the daemon becomes available again. The daemon reads hardware controls automatically while it runs. Opening the window requests its latest snapshot. `LIBREWAVE_SOCKET` selects a development IPC socket; installed service lifecycle controls use the normal session socket.
 
 ## Main view
 
@@ -49,13 +49,14 @@ with the first frame. The lights are drawn over it from the daemon snapshot.
 
 The mode light shows the reported knob target. The ring is white when reported
 microphone mute is off and red when it is on. The light behind the
-illustration follows the ring. All lights are dark when controls have not been
-read, the device is disconnected, or hardware LEDs are disabled. The seven
-level dots stay dark because their hardware mapping is unverified.
+illustration follows the ring. All lights are dark when controls are
+unavailable, the device is disconnected, or hardware LEDs are disabled.
+The seven level dots stay dark because their hardware mapping is unverified.
 
-Select **Read controls** to open the daemon's device connection and read the
-Wave:3 configuration. This command can also restore hardware values that
-LibreWave saved earlier. The application shows that caution under the button.
+The daemon reads the Wave:3 configuration every 500 ms while connected.
+The mode light, mute ring, and controls follow its observed state. Polling
+never changes hardware values. Select **Read controls** to retry admission.
+This command can also restore hardware values that LibreWave saved earlier. The application shows that caution under the button.
 After a read, the same command is the circular arrow beside the device name.
 
 The hardware controls sit under the illustration:

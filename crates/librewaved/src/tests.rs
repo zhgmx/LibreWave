@@ -1630,3 +1630,169 @@ fn audio_commands_preserve_profiles_and_repeated_start_is_idempotent() {
     daemon.audio_tick();
     assert_eq!(daemon.snapshot().generation, generation);
 }
+
+#[test]
+fn automatic_observation_adopts_without_restoring_managed_values_or_saving() {
+    let mut desired = DesiredState::default();
+    desired
+        .stage("1-8.3".into(), Wave3Control::MicrophoneMute(true))
+        .expect("valid observation fixture");
+    desired.promote("1-8.3").expect("valid observation fixture");
+    let mut h = harness(desired.clone(), wave3_config(), vec![], vec![]);
+    h.daemon.observe_controls(Instant::now());
+    let first = h.daemon.snapshot().clone();
+    assert!(!first.devices[0].admission.config().expect("valid observation fixture").input_mute);
+    assert_eq!(*h.connections.borrow(), 1);
+    assert!(h.calls.borrow().is_empty());
+    assert_eq!(*h.saves.borrow(), 0);
+    let due = h.daemon.control_reads[&DeviceId(1)];
+    h.daemon.observe_controls(due);
+    assert_eq!(h.daemon.snapshot(), &first, "unchanged reads cannot churn generations");
+    assert_eq!(*h.store_state.borrow(), desired);
+}
+
+#[test]
+fn timed_observation_preserves_physical_changes_and_mixer_generation() {
+    let mut h = harness(DesiredState::default(), wave3_config(), vec![], vec![]);
+    h.daemon.observe_controls(Instant::now());
+    let due = h.daemon.control_reads[&DeviceId(1)];
+    let mixer = h.daemon.snapshot().mixer.clone();
+    let mut physical = wave3_config();
+    physical.input_mute = true;
+    physical.volume_select = librewave_core::VolumeSelection::Headphone;
+    physical.input_gain.raw = 4726;
+    h.refreshes.borrow_mut().push_back(ConnectionRefreshOutcome::Changed(physical.clone()));
+    h.daemon.observe_controls(due.checked_sub(Duration::from_millis(1)).expect("read deadline"));
+    assert_eq!(h.refreshes.borrow().len(), 1);
+    h.daemon.observe_controls(due);
+    assert!(h.refreshes.borrow().is_empty());
+    assert_eq!(h.daemon.snapshot().devices[0].admission.config(), Some(&physical));
+    assert_eq!(h.daemon.snapshot().devices[0].admission.generation(), Some(SECOND_GENERATION));
+    assert_eq!(h.daemon.snapshot().mixer, mixer);
+    assert!(h.calls.borrow().is_empty());
+    assert_eq!(*h.saves.borrow(), 0);
+    assert_eq!(*h.store_state.borrow(), DesiredState::default());
+}
+
+#[test]
+fn automatic_observation_keeps_pending_writes_locked() {
+    let mut desired = DesiredState::default();
+    desired
+        .stage("1-8.3".into(), Wave3Control::MicrophoneMute(true))
+        .expect("valid observation fixture");
+    let mut h = harness(desired.clone(), wave3_config(), vec![], vec![]);
+    h.daemon.observe_controls(Instant::now());
+    assert!(matches!(
+        h.daemon.snapshot().devices[0].admission,
+        DeviceAdmissionSnapshot::Admitted {
+            write_access: DeviceWriteAccess::Locked {
+                reason: DeviceWriteLockReason::PersistenceAmbiguous
+            },
+            ..
+        }
+    ));
+    let due = h.daemon.control_reads[&DeviceId(1)];
+    h.daemon.observe_controls(due);
+    assert!(h.calls.borrow().is_empty());
+    assert_eq!(*h.store_state.borrow(), desired);
+    assert_eq!(*h.saves.borrow(), 0);
+}
+
+#[test]
+fn automatic_observation_fails_closed_and_backs_off_disconnects() {
+    for error in [
+        AdmissionError::MalformedResponse,
+        AdmissionError::Disconnected,
+        AdmissionError::PermissionDenied,
+    ] {
+        let mut h = harness(DesiredState::default(), wave3_config(), vec![], vec![]);
+        h.daemon.observe_controls(Instant::now());
+        let due = h.daemon.control_reads[&DeviceId(1)];
+        h.refreshes.borrow_mut().push_back(ConnectionRefreshOutcome::Failed(error.clone()));
+        h.daemon.observe_controls(due);
+        assert!(h.daemon.connections.is_empty());
+        assert_eq!(
+            h.daemon.snapshot().devices[0].admission,
+            DeviceAdmissionSnapshot::Failed { error: error.clone() }
+        );
+        let retry = h.daemon.control_reads[&DeviceId(1)];
+        assert!(retry >= due + Duration::from_secs(5));
+        h.daemon
+            .observe_controls(retry.checked_sub(Duration::from_millis(1)).expect("retry deadline"));
+        assert_eq!(*h.connections.borrow(), 1);
+        h.daemon.observe_controls(retry);
+        assert_eq!(
+            *h.connections.borrow(),
+            if error == AdmissionError::MalformedResponse { 1 } else { 2 }
+        );
+        assert!(h.calls.borrow().is_empty());
+    }
+}
+
+#[test]
+fn microphone_mute_after_observation_changes_only_the_requested_control() {
+    let mut physical = wave3_config();
+    physical.input_gain.raw = 4726;
+    physical.headphone_mute = true;
+    let mut muted = physical.clone();
+    muted.input_mute = true;
+    let mut h = harness(
+        DesiredState::default(),
+        physical.clone(),
+        vec![
+            ConnectionOutcome::Applied(muted.clone()),
+            ConnectionOutcome::Applied(physical.clone()),
+        ],
+        vec![],
+    );
+    h.daemon.observe_controls(Instant::now());
+    for (value, expected) in [(true, &muted), (false, &physical)] {
+        let generation = h.daemon.snapshot().devices[0]
+            .admission
+            .generation()
+            .expect("valid observation fixture");
+        let response = h
+            .daemon
+            .handle(
+                Command::SetWave3Control {
+                    id: DeviceId(1),
+                    expected_generation: generation,
+                    control: Wave3Control::MicrophoneMute(value),
+                },
+                librewave_core::Origin::Client,
+            )
+            .expect("valid observation fixture");
+        assert!(matches!(response, Response::ControlChanged { .. }));
+        assert_eq!(h.daemon.snapshot().devices[0].admission.config(), Some(expected));
+    }
+    assert_eq!(
+        *h.calls.borrow(),
+        vec![Wave3Control::MicrophoneMute(true), Wave3Control::MicrophoneMute(false)]
+    );
+    assert_eq!(*h.connections.borrow(), 1);
+    let saved = h.store_state.borrow();
+    assert!(saved.get("1-8.3").expect("valid observation fixture").pending.is_none());
+    let managed = &saved.get("1-8.3").expect("valid observation fixture").managed;
+    assert_eq!(managed.microphone_mute, Some(false));
+    assert_eq!(managed.input_gain, None);
+    assert_eq!(managed.headphone_mute, None);
+}
+
+#[test]
+fn managed_restoration_requires_explicit_inspection_after_automatic_adoption() {
+    let mut desired = DesiredState::default();
+    desired.stage("1-8.3".into(), Wave3Control::MicrophoneMute(true)).expect("stage");
+    desired.promote("1-8.3").expect("promote");
+    let mut muted = wave3_config();
+    muted.input_mute = true;
+    let mut h =
+        harness(desired, wave3_config(), vec![ConnectionOutcome::Applied(muted.clone())], vec![]);
+    h.daemon.observe_controls(Instant::now());
+    assert!(h.calls.borrow().is_empty());
+    let inspected = inspect(&mut h.daemon);
+    assert_eq!(inspected.admission.config(), Some(&muted));
+    assert_eq!(*h.calls.borrow(), vec![Wave3Control::MicrophoneMute(true)]);
+    let due = h.daemon.control_reads[&DeviceId(1)];
+    h.daemon.observe_controls(due);
+    assert_eq!(h.calls.borrow().len(), 1, "polling never restores managed values");
+}

@@ -1,3 +1,4 @@
+mod observation;
 mod session;
 use crate::audio_session::{
     AudioSession, AudioSessionStore, FileAudioSessionStore, MemoryAudioSessionStore,
@@ -53,6 +54,8 @@ pub struct Daemon {
     audio_session_store: Box<dyn AudioSessionStore>,
     defaults_recovery_pending: bool,
     next_defaults_recovery: Instant,
+    next_control_inventory: Instant,
+    control_reads: BTreeMap<DeviceId, Instant>,
 }
 
 type AudioAccessCheck = dyn FnMut(&UsbDeviceCandidate) -> Result<(), AdmissionError>;
@@ -64,12 +67,19 @@ struct OwnedConnection {
     topology: String,
     connection: Box<dyn ManagedWave3Connection>,
     locked: Option<DeviceWriteLockReason>,
+    observed_only: bool,
 }
 
 enum RestoreResult {
     Ready(Wave3ConfigSnapshot),
     Locked { config: Option<Wave3ConfigSnapshot>, reason: DeviceWriteLockReason },
     Disconnected,
+}
+
+#[derive(Clone, Copy)]
+enum AdmissionPurpose {
+    Observe,
+    RestoreManaged,
 }
 
 impl Daemon {
@@ -148,6 +158,8 @@ impl Daemon {
             audio_session_store: Box::new(MemoryAudioSessionStore(AudioSession::default())),
             defaults_recovery_pending: false,
             next_defaults_recovery: Instant::now(),
+            next_control_inventory: Instant::now(),
+            control_reads: BTreeMap::new(),
             audio_endpoints: Box::new(librewave_platform_linux::desktop_defaults::audio_endpoints),
             audio_access: Box::new(|candidate| {
                 librewave_platform_linux::probe_wave3_usb(candidate)
@@ -189,6 +201,8 @@ impl Daemon {
             audio_session_store: Box::new(MemoryAudioSessionStore(AudioSession::default())),
             defaults_recovery_pending: false,
             next_defaults_recovery: Instant::now(),
+            next_control_inventory: Instant::now(),
+            control_reads: BTreeMap::new(),
         }
     }
 
@@ -509,9 +523,21 @@ impl Daemon {
     }
 
     fn inspect(&mut self, id: DeviceId, origin: librewave_core::Origin) -> Result<(), IpcError> {
+        self.admit(id, origin, AdmissionPurpose::RestoreManaged)
+    }
+
+    fn admit(
+        &mut self,
+        id: DeviceId,
+        origin: librewave_core::Origin,
+        purpose: AdmissionPurpose,
+    ) -> Result<(), IpcError> {
         self.device(id)?;
         if self.connections.get(&id).is_some_and(|owned| {
             matches!(owned.locked, None | Some(DeviceWriteLockReason::PersistenceAmbiguous))
+                && !(matches!(purpose, AdmissionPurpose::RestoreManaged)
+                    && owned.observed_only
+                    && self.desired.get(&owned.topology).is_some())
         }) {
             return self.refresh_connection(id);
         }
@@ -543,8 +569,10 @@ impl Daemon {
                 config: Some(observed),
                 reason: DeviceWriteLockReason::PersistenceAmbiguous,
             },
-            Some(device) => Self::restore_desired(connection.as_mut(), observed, &device.managed),
-            None => RestoreResult::Ready(observed),
+            Some(device) if matches!(purpose, AdmissionPurpose::RestoreManaged) => {
+                Self::restore_desired(connection.as_mut(), observed, &device.managed)
+            }
+            Some(_) | None => RestoreResult::Ready(observed),
         };
         if matches!(restore, RestoreResult::Disconnected) {
             self.update_admission(
@@ -569,7 +597,15 @@ impl Daemon {
             DeviceAdmissionSnapshot::Admitted { api, generation, write_access, config },
             origin,
         )?;
-        self.connections.insert(id, OwnedConnection { topology, connection, locked });
+        self.connections.insert(
+            id,
+            OwnedConnection {
+                topology,
+                connection,
+                locked,
+                observed_only: matches!(purpose, AdmissionPurpose::Observe),
+            },
+        );
         Ok(())
     }
 
