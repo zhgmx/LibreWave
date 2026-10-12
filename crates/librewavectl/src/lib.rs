@@ -129,6 +129,15 @@ where
                 Err(error) => write_client_error(error, errors),
             }
         }
+        [apps, list] if apps == "apps" && list == "list" => request_applications(
+            socket_path,
+            librewave_core::Command::GetApplications,
+            output,
+            errors,
+        ),
+        [apps, route, kind, identity, source] if apps == "apps" && route == "route" => {
+            request_application_route(socket_path, kind, identity, source, output, errors)
+        }
         [mixer, show] if mixer == "mixer" && show == "show" => {
             request_mixer(socket_path, output, errors)
         }
@@ -244,6 +253,74 @@ fn request_input_change<O: Write, E: Write>(
         }
         Ok(_) => {
             writeln!(errors, "error: daemon returned an unexpected input response")?;
+            Ok(1)
+        }
+        Err(error) => write_client_error(error, errors),
+    }
+}
+
+fn request_application_route<O: Write, E: Write>(
+    socket: &Path,
+    kind: &str,
+    identity: &str,
+    source: &str,
+    output: &mut O,
+    errors: &mut E,
+) -> io::Result<i32> {
+    match request(socket, librewave_core::Command::GetApplications) {
+        Ok(Response::Applications {
+            applications: librewave_core::ApplicationSnapshot::Ready { generation, .. },
+        }) => match parse_application_route(kind, identity, source, generation) {
+            Ok(command) => request_applications(socket, command, output, errors),
+            Err(error) => {
+                writeln!(errors, "error: {error}")?;
+                Ok(2)
+            }
+        },
+        Ok(_) => {
+            writeln!(errors, "error: audio must be ready before moving an application")?;
+            Ok(1)
+        }
+        Err(error) => write_client_error(error, errors),
+    }
+}
+
+fn parse_application_route(
+    kind: &str,
+    identity: &str,
+    source: &str,
+    generation: librewave_core::ApplicationGeneration,
+) -> Result<librewave_core::Command, String> {
+    let name = librewave_core::InputName::try_new(identity).map_err(|e| e.to_string())?;
+    let application = match kind {
+        "desktop" => librewave_core::ApplicationId::Desktop(name),
+        "executable" => librewave_core::ApplicationId::Executable(name),
+        _ => return Err("identity kind must be desktop or executable".into()),
+    };
+    Ok(librewave_core::Command::RouteApplication {
+        expected_generation: generation,
+        application,
+        source: SourceId::new(source.parse().map_err(|_| "invalid source identity")?),
+    })
+}
+
+fn request_applications<O: Write, E: Write>(
+    socket: &Path,
+    command: librewave_core::Command,
+    output: &mut O,
+    errors: &mut E,
+) -> io::Result<i32> {
+    match request(socket, command) {
+        Ok(Response::Applications { applications }) => {
+            writeln!(
+                output,
+                "{}",
+                serde_json::to_string_pretty(&applications).map_err(io::Error::other)?
+            )?;
+            Ok(0)
+        }
+        Ok(_) => {
+            writeln!(errors, "error: daemon returned an unexpected application response")?;
             Ok(1)
         }
         Err(error) => write_client_error(error, errors),
@@ -776,6 +853,11 @@ fn write_help<W: Write>(output: &mut W) -> io::Result<()> {
     writeln!(output)?;
     writeln!(output, "Commands:")?;
     writeln!(output, "  status          Show daemon, device, and audio status")?;
+    writeln!(
+        output,
+        "  apps list       Show active playback application groups and route progress"
+    )?;
+    writeln!(output, "  apps route <desktop|executable> <identity> <source>")?;
     writeln!(output, "  refresh         Refresh inventory and retained device state")?;
     writeln!(output, "  audio start --experimental  Request experimental audio ownership")?;
     writeln!(output, "  audio stop      Release audio resources and disable recovery")?;
@@ -850,7 +932,7 @@ mod tests {
         write_status(&mut output, &snapshot()).expect("render status");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "Daemon: connected\nProtocol: 9\nState generation: 4\nDevices: 1\nMixer: generation 0, inactive, 2 sources\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
+            "Daemon: connected\nProtocol: 10\nState generation: 4\nDevices: 1\nMixer: generation 0, inactive, 2 sources\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
         );
     }
 

@@ -18,12 +18,36 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
 const RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 pub(super) trait SupervisedAudioHost: AudioHost<Error = LinuxAudioError> {
+    fn applications(&self) -> librewave_core::ApplicationSnapshot {
+        librewave_core::ApplicationSnapshot::Unavailable {
+            reason: MixerInactiveReason::AudioHostEngineNotConnected,
+        }
+    }
+    fn route_application(
+        &mut self,
+        _revision: u64,
+        _application: librewave_core::ApplicationId,
+        _source: librewave_core::SourceId,
+    ) -> Result<(), String> {
+        Err("Application routing is unavailable on this audio host.".into())
+    }
     fn poll(&mut self) -> Result<(), LinuxAudioError>;
     fn stage_profile(&mut self, profile: &MixerProfile) -> Result<(), LinuxAudioError>;
     fn take_meters(&mut self) -> Option<librewave_engine::BlockMeters>;
 }
 
 impl SupervisedAudioHost for ComposedAudioHost {
+    fn applications(&self) -> librewave_core::ApplicationSnapshot {
+        Self::applications(self)
+    }
+    fn route_application(
+        &mut self,
+        revision: u64,
+        application: librewave_core::ApplicationId,
+        source: librewave_core::SourceId,
+    ) -> Result<(), String> {
+        Self::route_application(self, revision, application, source)
+    }
     fn take_meters(&mut self) -> Option<librewave_engine::BlockMeters> {
         Self::take_meters(self)
     }
@@ -51,6 +75,7 @@ pub(super) struct AudioSupervisor<H = ComposedAudioHost> {
     enabled: bool,
     reason: MixerInactiveReason,
     next_epoch: u64,
+    daemon_epoch: [u8; 16],
     retry_at: Instant,
     next_reconcile: Instant,
     invocations: Option<HostServiceInvocations>,
@@ -60,15 +85,48 @@ pub(super) struct AudioSupervisor<H = ComposedAudioHost> {
 }
 
 impl AudioSupervisor {
-    pub(super) fn new() -> Self {
-        Self::with_factory(|epoch, profile| {
+    pub(super) fn new(daemon_epoch: [u8; 16]) -> Self {
+        let mut supervisor = Self::with_factory(|epoch, profile| {
             AudioAttemptPolicy::conservative(epoch)
                 .map(|policy| ComposedAudioHost::new(policy, profile.clone()))
-        })
+        });
+        supervisor.daemon_epoch = daemon_epoch;
+        supervisor
     }
 }
 
 impl<H: SupervisedAudioHost> AudioSupervisor<H> {
+    pub(super) fn applications(&self) -> librewave_core::ApplicationSnapshot {
+        if self.runtime() != MixerRuntimeState::Active {
+            return librewave_core::ApplicationSnapshot::Unavailable { reason: self.reason };
+        }
+        let mut snapshot =
+            self.attempt.as_ref().expect("active runtime has one attempt").host.applications();
+        if let librewave_core::ApplicationSnapshot::Ready { generation, .. } = &mut snapshot {
+            generation.epoch = self.next_epoch - 1;
+            generation.daemon = self.daemon_epoch;
+        }
+        snapshot
+    }
+    pub(super) fn route_application(
+        &mut self,
+        expected: librewave_core::ApplicationGeneration,
+        application: librewave_core::ApplicationId,
+        source: librewave_core::SourceId,
+    ) -> Result<librewave_core::ApplicationSnapshot, String> {
+        if self.runtime() != MixerRuntimeState::Active {
+            return Err("Audio must be ready before moving an application.".into());
+        }
+        if expected.daemon != self.daemon_epoch || expected.epoch != self.next_epoch - 1 {
+            return Err("The audio attempt changed; refresh the application list.".into());
+        }
+        self.attempt.as_mut().expect("active runtime has one attempt").host.route_application(
+            expected.revision,
+            application,
+            source,
+        )?;
+        Ok(self.applications())
+    }
     fn with_factory(
         factory: impl FnMut(ClockAttemptEpoch, &MixerProfile) -> Result<H, LinuxAudioError> + 'static,
     ) -> Self {
@@ -79,6 +137,7 @@ impl<H: SupervisedAudioHost> AudioSupervisor<H> {
             enabled: true,
             reason: MixerInactiveReason::Starting,
             next_epoch: 1,
+            daemon_epoch: [0; 16],
             retry_at: now,
             next_reconcile: now,
             invocations: None,

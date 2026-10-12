@@ -1,3 +1,4 @@
+mod applications;
 mod chrome;
 mod controls;
 mod device_art;
@@ -81,6 +82,11 @@ struct SettingsModal {
 
 struct Shell {
     snapshot: Option<Snapshot>,
+    applications: Option<librewave_core::ApplicationSnapshot>,
+    applications_received: Option<std::time::Instant>,
+    application_error: Option<String>,
+    application_request_epoch: Option<u64>,
+    application_input: Option<librewave_core::SourceId>,
     meters: Option<librewave_core::MeterFrame>,
     meter_error: Option<String>,
     meter_request_epoch: Option<u64>,
@@ -106,6 +112,11 @@ impl Shell {
     fn new(cx: &mut Context<Self>) -> Self {
         let mut shell = Self {
             snapshot: None,
+            applications: None,
+            applications_received: None,
+            application_error: None,
+            application_request_epoch: None,
+            application_input: None,
             meters: None,
             meter_error: None,
             meter_request_epoch: None,
@@ -139,7 +150,13 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(STATUS_INTERVAL).await;
-                if this.update(cx, Shell::poll_status).is_err() {
+                if this
+                    .update(cx, |this, cx| {
+                        this.poll_status(cx);
+                        this.poll_applications(cx);
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -327,6 +344,10 @@ impl Shell {
 
     fn apply_response(&mut self, command: Command, response: Response) {
         match (command, response) {
+            (Command::RouteApplication { .. }, Response::Applications { applications }) => {
+                self.applications = Some(applications);
+                self.applications_received = Some(std::time::Instant::now());
+            }
             (Command::GetStatus, Response::Status { snapshot })
             | (Command::Refresh, Response::Refreshed { snapshot }) => {
                 self.snapshot = Some(snapshot);
@@ -499,6 +520,11 @@ mod tests {
     pub(super) fn shell_with(snapshot: Snapshot) -> Shell {
         Shell {
             snapshot: Some(snapshot),
+            applications: None,
+            applications_received: None,
+            application_error: None,
+            application_request_epoch: None,
+            application_input: None,
             meters: None,
             meter_error: None,
             meter_request_epoch: None,

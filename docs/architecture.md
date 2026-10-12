@@ -98,6 +98,37 @@ A reading older than 350 ms becomes unavailable. Stop and a new audio attempt
 clear the old frame. No meter value is saved or changes a device, mixer, or
 profile generation. The CLI exposes `librewavectl mixer meters`.
 
+## Application routing
+
+The active graph observes playback streams through its existing PipeWire
+registry connection. It groups streams by `application.id`, or by
+`application.process.binary` when no valid application ID exists. It does not
+use process IDs or window titles. Streams without a verified identity remain
+unassigned. Observation is limited to 128 streams. Routing refuses an incomplete
+list above that limit.
+
+`GetApplications` returns a transient list. Its generation identifies the
+daemon process, audio attempt, and registry revision. `RouteApplication` rejects
+stale requests and permits only configured LibreWave input sinks. It writes
+`target.object` in the default metadata. WirePlumber owns the resulting links.
+LibreWave does not create application links or save a second assignment cache.
+WirePlumber can remember targets according to its existing stream settings.
+
+A move covers the group's currently observed streams. It remains pending until
+every audio output port links only to the chosen input. Missing policy metadata,
+disabled movement, and `node.dont-move` block the request. A changed stream group,
+replaced input, desktop override, policy restart, or two-second timeout cancels
+the move. Rollback restores an exact previous metadata value only while the
+same stream incarnation retains the value written by LibreWave. Stop cancels
+a pending move before graph teardown. No automatic retry fights the desktop.
+
+The private PipeWire and WirePlumber test moves two silent playback streams to
+one input and verifies their actual links. It also checks disabled movement.
+Fakes cover stale generations, rollback, replacement IDs, and desktop overrides.
+Real desktop application routing still needs controlled live validation. The
+interface does not promise browser-tab identities or prevent initial audio from
+reaching an application's previous destination.
+
 ## Device adoption
 
 On first adoption, LibreWave reads the current device state as its observed baseline. It does not store every observed hardware field as desired state, and it does not reset the microphone to project defaults.

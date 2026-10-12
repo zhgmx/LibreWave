@@ -103,9 +103,19 @@ be removed. The strips scroll sideways when they do not fit.
 
 The CLI accepts a name: `librewavectl mixer add <generation> "Music"`.
 Each input has a stable public sink name, such as `librewave.input.3`.
-Select its LibreWave device in an application's audio settings. Per-application
-assignment inside LibreWave is still under development. Layout changes remain
-unavailable until audio stops and cleanup completes.
+Select its LibreWave device in an application's audio settings. While audio is
+ready, the application button on a software input opens the active playback
+application list. Select an application's plus button to move its current
+streams to that input. The panel shows pending, verified, or failed movement.
+Protected streams and disabled WirePlumber movement cannot be assigned.
+Layout changes remain unavailable until audio stops and cleanup completes.
+
+The CLI lists groups with `librewavectl apps list`. To move a group, use
+`librewavectl apps route desktop "org.example.Player" 3`, or replace `desktop`
+with `executable` for an executable identity from the list. The clients use
+the same daemon commands. Application grouping and routing passed a private
+software-session test. Native interaction and real desktop routing remain
+unverified. The list identifies applications, not individual browser tabs.
 
 **Outputs** is under the inputs and has one row for each mix. A row names the
 mix and where it goes. The Monitor mix plays in the Wave:3 headphones. The

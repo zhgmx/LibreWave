@@ -114,6 +114,7 @@ impl Shell {
             .flex_col()
             .gap(px(SPACE_XL))
             .child(div().flex().flex_col().gap(px(SPACE_MD)).child(label("Inputs")).child(strips))
+            .child(self.application_panel(snapshot, cx))
             .child(
                 div().flex().flex_col().gap(px(SPACE_MD)).child(label("Outputs")).child(
                     div()
@@ -220,6 +221,23 @@ impl Shell {
                         "Application audio"
                     })),
             )
+            .when(!microphone, |view| {
+                view.child(icon_button(
+                    &format!("applications-{id}"),
+                    "system",
+                    "Assign an active application",
+                    Tone::Quiet,
+                    FAINT,
+                    !self.pending && self.audio_active(),
+                    cx,
+                    move |this, _, cx| {
+                        this.application_input =
+                            if this.application_input == Some(id) { None } else { Some(id) };
+                        this.poll_applications(cx);
+                        cx.notify();
+                    },
+                ))
+            })
             .when(source.role == SourceRole::Software, |view| {
                 view.child(icon_button(
                     &format!("remove-input-{id}"),

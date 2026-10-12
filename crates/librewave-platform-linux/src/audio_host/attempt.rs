@@ -51,6 +51,19 @@ fn wave3_capture_rate_estimator(
 }
 
 trait GraphRuntime {
+    fn applications(&self) -> librewave_core::ApplicationSnapshot {
+        librewave_core::ApplicationSnapshot::Unavailable {
+            reason: librewave_core::MixerInactiveReason::AudioHostEngineNotConnected,
+        }
+    }
+    fn route_application(
+        &mut self,
+        _revision: u64,
+        _application: librewave_core::ApplicationId,
+        _source: librewave_core::SourceId,
+    ) -> Result<(), String> {
+        Err("Application routing is unavailable on this graph.".into())
+    }
     fn iterate(&mut self, timeout: Duration);
     fn cycles(&self) -> u64;
     fn fault_reason(&self) -> Option<String>;
@@ -110,6 +123,17 @@ impl GraphFactory for RealGraphFactory {
 }
 
 impl GraphRuntime for RealGraphRuntime {
+    fn applications(&self) -> librewave_core::ApplicationSnapshot {
+        self.0.applications()
+    }
+    fn route_application(
+        &mut self,
+        revision: u64,
+        application: librewave_core::ApplicationId,
+        source: librewave_core::SourceId,
+    ) -> Result<(), String> {
+        self.0.route_application(revision, application, source)
+    }
     fn iterate(&mut self, timeout: Duration) {
         self.0.iterate(timeout);
     }
@@ -239,6 +263,30 @@ pub struct ComposedAudioHost {
 }
 
 impl ComposedAudioHost {
+    /// Reads active playback applications on the owned graph connection.
+    #[must_use]
+    pub fn applications(&self) -> librewave_core::ApplicationSnapshot {
+        self.graph.as_ref().map_or(
+            librewave_core::ApplicationSnapshot::Unavailable {
+                reason: librewave_core::MixerInactiveReason::AudioHostEngineNotConnected,
+            },
+            |g| g.applications(),
+        )
+    }
+    /// Requests a session-policy move; later observations verify actual links.
+    /// # Errors
+    /// Returns a stale-observation, policy, or missing-graph error before writing.
+    pub fn route_application(
+        &mut self,
+        revision: u64,
+        application: librewave_core::ApplicationId,
+        source: librewave_core::SourceId,
+    ) -> Result<(), String> {
+        self.graph
+            .as_mut()
+            .ok_or_else(|| "The audio graph is inactive.".to_owned())?
+            .route_application(revision, application, source)
+    }
     /// Takes one actual processed-block observation without waiting.
     pub fn take_meters(&mut self) -> Option<librewave_engine::BlockMeters> {
         self.meters.as_mut().and_then(MeterReader::try_take)

@@ -9,6 +9,8 @@ use std::rc::Rc;
 
 #[derive(Default)]
 struct Control {
+    application_revision: Cell<u64>,
+    application_moves: Cell<usize>,
     events: RefCell<Vec<&'static str>>,
     meters: RefCell<std::collections::VecDeque<librewave_engine::BlockMeters>>,
     creates: Cell<usize>,
@@ -73,6 +75,31 @@ impl AudioHost for FakeHost {
     }
 }
 impl SupervisedAudioHost for FakeHost {
+    fn applications(&self) -> librewave_core::ApplicationSnapshot {
+        librewave_core::ApplicationSnapshot::Ready {
+            generation: librewave_core::ApplicationGeneration {
+                daemon: [0; 16],
+                epoch: 0,
+                revision: self.0.application_revision.get(),
+            },
+            applications: Vec::new(),
+            unidentified_streams: 0,
+            movement: librewave_core::ApplicationMovement::Allowed,
+            route: None,
+        }
+    }
+    fn route_application(
+        &mut self,
+        revision: u64,
+        _: librewave_core::ApplicationId,
+        _: librewave_core::SourceId,
+    ) -> Result<(), String> {
+        if revision != self.0.application_revision.get() {
+            return Err("stale observation".into());
+        }
+        self.0.application_moves.set(self.0.application_moves.get() + 1);
+        Ok(())
+    }
     fn take_meters(&mut self) -> Option<librewave_engine::BlockMeters> {
         self.0.meters.borrow_mut().pop_front()
     }
@@ -147,6 +174,54 @@ fn start_stop_preserves_order_and_repeated_start_keeps_the_owner() {
     tick(&mut audio, Some(&candidate()), true);
     assert_eq!(control.creates.get(), 2);
     assert_eq!(audio.next_epoch, 3, "stop/start preserves the attempt counter");
+}
+
+#[test]
+fn application_requests_cannot_cross_an_audio_attempt_or_use_stale_observations() {
+    use librewave_core::{
+        ApplicationGeneration, ApplicationId, ApplicationSnapshot, InputName, SYSTEM_SOURCE_ID,
+    };
+    let (mut audio, control) = supervisor();
+    let application =
+        ApplicationId::Desktop(InputName::try_new("org.test.Player").expect("identity"));
+    assert!(
+        audio
+            .route_application(
+                ApplicationGeneration { daemon: [0; 16], epoch: 0, revision: 0 },
+                application,
+                SYSTEM_SOURCE_ID
+            )
+            .is_err()
+    );
+    tick(&mut audio, Some(&candidate()), true);
+    let ApplicationSnapshot::Ready { generation, .. } = audio.applications() else {
+        panic!("ready application observations");
+    };
+    assert_eq!(generation.epoch, 1);
+    control.application_revision.set(1);
+    assert!(audio.route_application(generation, application, SYSTEM_SOURCE_ID).is_err());
+    assert_eq!(control.application_moves.get(), 0);
+    audio
+        .route_application(
+            ApplicationGeneration { daemon: [0; 16], epoch: 1, revision: 1 },
+            application,
+            SYSTEM_SOURCE_ID,
+        )
+        .expect("current move");
+    audio.stop().expect("stop");
+    audio.enable().expect("enable");
+    tick(&mut audio, Some(&candidate()), true);
+    assert!(
+        audio
+            .route_application(
+                ApplicationGeneration { daemon: [0; 16], epoch: 1, revision: 1 },
+                application,
+                SYSTEM_SOURCE_ID
+            )
+            .is_err()
+    );
+    assert_eq!(control.application_moves.get(), 1);
+    assert_eq!(MixerProfile::default().generation, librewave_core::MixerGeneration(0));
 }
 
 #[test]

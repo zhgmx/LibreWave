@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// The current local request/response protocol version.
-pub const PROTOCOL_VERSION: u16 = 9;
+pub const PROTOCOL_VERSION: u16 = 10;
 /// The maximum encoded JSON payload accepted by the local protocol.
 pub const MAX_FRAME_SIZE: usize = 1024 * 1024;
 
@@ -27,6 +27,8 @@ pub struct RequestEnvelope {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub enum Response {
+    /// Active application groups and observed route progress.
+    Applications { applications: librewave_core::ApplicationSnapshot },
     /// The complete current daemon snapshot.
     Status { snapshot: Snapshot },
     /// The devices in the complete current daemon snapshot.
@@ -372,7 +374,7 @@ mod tests {
 
     #[test]
     fn semantic_control_command_and_stale_error_round_trip_at_version_seven() {
-        assert_eq!(PROTOCOL_VERSION, 9);
+        assert_eq!(PROTOCOL_VERSION, 10);
         let request = RequestEnvelope {
             version: PROTOCOL_VERSION,
             request_id: 4,
@@ -385,7 +387,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(request).expect("serialize semantic request"),
             json!({
-                "version": 9,
+                "version": 10,
                 "request_id": 4,
                 "command": {
                     "SetWave3Control": {
@@ -410,7 +412,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response.clone()).expect("serialize stale response"),
             json!({
-                "version": 9,
+                "version": 10,
                 "request_id": 4,
                 "result": {
                     "Err": {
@@ -427,7 +429,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response).expect("serialize control response"),
             json!({
-                "version": 9,
+                "version": 10,
                 "request_id": 4,
                 "result": {
                     "Ok": {
@@ -492,7 +494,7 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "version": 9,
+                "version": 10,
                 "request_id": 18,
                 "command": {
                     "SetMixerRoute": {
@@ -618,5 +620,48 @@ mod meter_tests {
             let wire = encode_response(&response).expect("meter response");
             assert_eq!(decode_response(&wire[4..]).expect("decode meter response"), response);
         }
+    }
+}
+
+#[cfg(test)]
+mod application_tests {
+    use super::*;
+    use librewave_core::{
+        ApplicationGeneration, ApplicationId, ApplicationMovement, ApplicationRoute,
+        ApplicationSnapshot, InputName,
+    };
+    #[test]
+    fn grouped_application_commands_and_pending_results_round_trip() {
+        let application =
+            ApplicationId::Desktop(InputName::try_new("org.test.Player").expect("valid identity"));
+        let generation = ApplicationGeneration { daemon: [0; 16], epoch: 2, revision: 3 };
+        let request = RequestEnvelope {
+            version: PROTOCOL_VERSION,
+            request_id: 1,
+            command: Command::RouteApplication {
+                expected_generation: generation,
+                application,
+                source: SourceId::new(3),
+            },
+        };
+        let wire = encode_request(&request).expect("encode application command");
+        assert_eq!(decode_request(&wire[4..]).expect("decode application command"), request);
+        let response = ResponseEnvelope::success(
+            1,
+            Response::Applications {
+                applications: ApplicationSnapshot::Ready {
+                    generation,
+                    applications: Vec::new(),
+                    unidentified_streams: 0,
+                    movement: ApplicationMovement::Allowed,
+                    route: Some(ApplicationRoute::Pending {
+                        application,
+                        source: SourceId::new(3),
+                    }),
+                },
+            },
+        );
+        let wire = encode_response(&response).expect("encode application response");
+        assert_eq!(decode_response(&wire[4..]).expect("decode application response"), response);
     }
 }

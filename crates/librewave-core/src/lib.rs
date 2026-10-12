@@ -6,7 +6,9 @@ use std::fmt;
 mod device_generation;
 mod input_name;
 pub use input_name::{InputName, InputNameError};
+mod applications;
 mod meters;
+pub use applications::*;
 mod mixer;
 pub use device_generation::{DeviceGeneration, DeviceGenerationError};
 pub use meters::{MAX_MIXER_SOURCES, MeterFrame, MeterSnapshot, SourceLevels, StereoLevels};
@@ -484,6 +486,14 @@ pub enum Command {
     GetMixer,
     /// Return the latest bounded software meter observation without changing profiles.
     GetMeters,
+    /// Observe active playback applications and verified route progress.
+    GetApplications,
+    /// Move every currently observed stream of one application through session policy.
+    RouteApplication {
+        expected_generation: ApplicationGeneration,
+        application: ApplicationId,
+        source: SourceId,
+    },
     /// Add a named software input while audio is stopped.
     AddMixerInput { expected_generation: MixerGeneration, name: InputName },
     /// Remove one software input while audio is stopped.

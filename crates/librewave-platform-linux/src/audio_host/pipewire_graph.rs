@@ -19,6 +19,10 @@ use std::time::{Duration, Instant};
 const ROUNDTRIP_TIMEOUT: Duration = Duration::from_secs(2);
 const LOOP_ITERATION: Duration = Duration::from_millis(10);
 const FILTER_NODE_NAME: &str = "librewave.internal.mixer";
+mod application_observer;
+mod applications;
+use application_observer::MetadataBinding;
+use applications::Router;
 
 #[derive(Clone, Debug)]
 struct ObservedPort {
@@ -41,6 +45,9 @@ struct RegistryState {
     input_generations: Vec<u64>,
     input_presence: Vec<bool>,
     input_link_words: Arc<[AtomicU64; MAX_SOFTWARE_INPUTS]>,
+    node_properties: HashMap<u32, pw::properties::PropertiesBox>,
+    router: Router,
+    owned_application_sinks: Option<HashMap<librewave_core::SourceId, (u32, u64)>>,
 }
 
 impl RegistryState {
@@ -56,6 +63,9 @@ impl RegistryState {
             input_generations: Vec::new(),
             input_presence: Vec::new(),
             input_link_words,
+            node_properties: HashMap::new(),
+            router: Router::default(),
+            owned_application_sinks: None,
         }
     }
 
@@ -82,6 +92,7 @@ impl RegistryState {
 
 impl RegistryState {
     fn observe(&mut self, global: &pw::registry::GlobalObject<&pw::spa::utils::dict::DictRef>) {
+        self.router.changed();
         if global.type_ == ObjectType::Node {
             if let Some(properties) = global.props {
                 if let Some(name) = properties.get("node.name") {
@@ -121,6 +132,8 @@ impl RegistryState {
     }
 
     fn remove(&mut self, id: u32) {
+        self.router.changed();
+        self.node_properties.remove(&id);
         self.objects.remove(&id);
         self.link_inputs.remove(&id);
         self.publish_input_links();
@@ -243,6 +256,9 @@ pub(super) struct InactiveGraph<P: GraphProcessor> {
 }
 
 pub(super) struct ActiveGraph<P: GraphProcessor> {
+    application_nodes: HashMap<u32, (pw::node::NodeListener, pw::node::Node)>,
+    default_metadata: Option<MetadataBinding>,
+    settings_metadata: Option<MetadataBinding>,
     inner: InactiveGraph<P>,
 }
 
@@ -487,7 +503,19 @@ impl<P: GraphProcessor> InactiveGraph<P> {
                 Err(error) => return Err(error),
             }
         }
-        Ok(ActiveGraph { inner: self })
+        {
+            let mut state = self.registry_state.borrow_mut();
+            let (_, _, sinks) = state.application_view(&self.endpoints);
+            state.owned_application_sinks = Some(
+                sinks.into_iter().map(|(source, node, serial)| (source, (node, serial))).collect(),
+            );
+        }
+        Ok(ActiveGraph {
+            inner: self,
+            application_nodes: HashMap::new(),
+            default_metadata: None,
+            settings_metadata: None,
+        })
     }
 
     fn teardown(&mut self) -> Result<(), GraphError> {
@@ -538,6 +566,13 @@ impl<P: GraphProcessor> InactiveGraph<P> {
 impl<P: GraphProcessor> ActiveGraph<P> {
     pub(super) fn iterate(&mut self, timeout: Duration) {
         self.inner.main_loop.loop_().iterate(timeout);
+        self.observe_applications();
+        let writes = {
+            let mut state = self.inner.registry_state.borrow_mut();
+            let (streams, _, sinks) = state.application_view(&self.inner.endpoints);
+            state.router.advance(&streams, &sinks, Instant::now())
+        };
+        self.write_targets(writes);
     }
 
     pub(super) fn diagnostics(&self) -> FilterDiagnostics {
@@ -556,13 +591,13 @@ impl<P: GraphProcessor> ActiveGraph<P> {
     }
 
     pub(super) fn teardown(&mut self) -> Result<(), GraphError> {
+        let writes = {
+            let mut state = self.inner.registry_state.borrow_mut();
+            let (streams, _, _) = state.application_view(&self.inner.endpoints);
+            state.router.cancel(&streams, "The audio graph stopped.")
+        };
+        self.write_targets(writes);
         self.inner.teardown()
-    }
-}
-
-impl<P: GraphProcessor> Drop for InactiveGraph<P> {
-    fn drop(&mut self) {
-        let _ = self.teardown();
     }
 }
 
@@ -858,6 +893,18 @@ fn roundtrip(main_loop: &pw::main_loop::MainLoop, core: &pw::core::Core) -> Resu
 #[allow(clippy::needless_pass_by_value)]
 fn pipewire_error(error: pw::Error) -> GraphError {
     GraphError::PipeWire(error.to_string())
+}
+
+impl<P: GraphProcessor> Drop for InactiveGraph<P> {
+    fn drop(&mut self) {
+        let _ = self.teardown();
+    }
+}
+
+impl<P: GraphProcessor> Drop for ActiveGraph<P> {
+    fn drop(&mut self) {
+        let _ = self.teardown();
+    }
 }
 
 #[cfg(test)]
@@ -1165,6 +1212,106 @@ mod tests {
             child: Child,
             root: PathBuf,
             prior_environment: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        }
+
+        #[test]
+        #[ignore = "requires LIBREWAVE_PIPEWIRE_INTEGRATION=1; moves silent applications only on a private PipeWire/WirePlumber session"]
+        fn private_application_groups_move_through_wireplumber_and_verify_links() {
+            use librewave_core::{
+                ApplicationMovement, ApplicationRoute, ApplicationSnapshot, SourceId,
+            };
+            assert_eq!(std::env::var("LIBREWAVE_PIPEWIRE_INTEGRATION").as_deref(), Ok("1"));
+            let server = PrivatePipeWire::start(128, 30);
+            let _policy = server.start_wireplumber();
+            let mut endpoints = DELIBERATE_ENDPOINTS.to_vec();
+            endpoints.push(librewave_core::EndpointId::Input { source: SourceId::new(3) });
+            let plans = endpoint_plans(&endpoints).expect("application input plans");
+            let processor = LayoutProbe { sources: 2, cycles: Arc::new(AtomicU64::new(0)) };
+            let mut graph = InactiveGraph::construct(
+                REMOTE,
+                &plans,
+                NonZeroU32::new(128).expect("quantum"),
+                AdapterPortMode::WirePlumber,
+                processor,
+            )
+            .expect("private software graph")
+            .activate()
+            .expect("active graph");
+            let players: Vec<_> = (0..2).map(|_| TestChild(server.command("pw-play").args([
+                "--target", "librewave.system", "--raw", "--rate", "48000", "--channels", "2", "--format", "s16",
+                "--properties", "application.id=org.librewave.TestPlayer application.name=TestPlayer", "/dev/zero",
+            ]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("silent private playback stream"))).collect();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (generation, application) = loop {
+                graph.iterate(Duration::from_millis(10));
+                if let ApplicationSnapshot::Ready {
+                    generation,
+                    applications,
+                    movement: ApplicationMovement::Allowed,
+                    ..
+                } = graph.applications()
+                    && let [application] = applications.as_slice()
+                    && application.streams == 2
+                    && application.source == Some(librewave_core::SYSTEM_SOURCE_ID)
+                {
+                    break (generation, application.id);
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "private application observation: {:?}",
+                    graph.applications()
+                );
+            };
+            graph
+                .route_application(generation.revision, application, SourceId::new(3))
+                .expect("move grouped streams");
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                graph.iterate(Duration::from_millis(10));
+                let observed = graph.applications();
+                if let ApplicationSnapshot::Ready {
+                    applications,
+                    route: Some(ApplicationRoute::Verified { source, .. }),
+                    ..
+                } = &observed
+                {
+                    assert_eq!(*source, SourceId::new(3));
+                    assert_eq!(applications[0].source, Some(SourceId::new(3)));
+                    assert_eq!(applications[0].streams, 2);
+                    break;
+                }
+                assert!(Instant::now() < deadline, "private move failed: {observed:?}");
+            }
+            assert!(!graph.diagnostics().failed, "routing interrupted the mixer callback");
+            assert!(
+                server
+                    .command("wpctl")
+                    .args(["settings", "linking.allow-moving-streams", "false"])
+                    .stdout(Stdio::null())
+                    .status()
+                    .expect("disable private movement")
+                    .success()
+            );
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let revision = loop {
+                graph.iterate(Duration::from_millis(10));
+                if let ApplicationSnapshot::Ready {
+                    generation,
+                    movement: ApplicationMovement::Disabled,
+                    ..
+                } = graph.applications()
+                {
+                    break generation.revision;
+                }
+                assert!(Instant::now() < deadline, "private policy setting did not arrive");
+            };
+            assert!(
+                graph
+                    .route_application(revision, application, librewave_core::SYSTEM_SOURCE_ID)
+                    .is_err()
+            );
+            drop(players);
+            graph.teardown().expect("remove private graph");
         }
 
         struct TestChild(Child);

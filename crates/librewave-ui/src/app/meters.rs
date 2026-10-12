@@ -10,7 +10,7 @@ use librewave_ipc::Response;
 use librewave_platform_linux::ipc::{Client, ClientError, configured_socket_path};
 
 impl Shell {
-    fn audio_active(&self) -> bool {
+    pub(super) fn audio_active(&self) -> bool {
         self.snapshot.as_ref().is_some_and(|s| s.mixer.runtime == MixerRuntimeState::Active)
     }
 

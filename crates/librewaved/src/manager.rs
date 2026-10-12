@@ -281,7 +281,7 @@ impl Daemon {
         if let Some(audio) = self.audio.as_mut() {
             audio.enable().map_err(|()| audio_cleanup_error())?;
         } else {
-            self.audio = Some(AudioSupervisor::new());
+            self.audio = Some(AudioSupervisor::new(self.epoch));
         }
         self.next_audio_inventory = Instant::now();
         self.update_mixer_runtime(origin);
@@ -428,6 +428,24 @@ impl Daemon {
                 Ok(Response::ControlChanged { device })
             }
             Command::GetMixer => Ok(Response::Mixer { mixer: self.snapshot().mixer.clone() }),
+            Command::GetApplications => Ok(Response::Applications {
+                applications: self.audio.as_ref().map_or(
+                    librewave_core::ApplicationSnapshot::Unavailable {
+                        reason: librewave_core::MixerInactiveReason::AudioHostEngineNotConnected,
+                    },
+                    AudioSupervisor::applications,
+                ),
+            }),
+            Command::RouteApplication { expected_generation, application, source } => {
+                let audio = self.audio.as_mut().ok_or_else(|| IpcError {
+                    kind: IpcErrorKind::InvalidRequest,
+                    message: "Audio is inactive.".into(),
+                })?;
+                let applications = audio
+                    .route_application(expected_generation, application, source)
+                    .map_err(|message| IpcError { kind: IpcErrorKind::InvalidRequest, message })?;
+                Ok(Response::Applications { applications })
+            }
             Command::AddMixerInput { expected_generation, name } => {
                 self.prepare_input_change(expected_generation)?;
                 let next = self.snapshot().mixer.profile.with_input(name).map_err(|error| {
