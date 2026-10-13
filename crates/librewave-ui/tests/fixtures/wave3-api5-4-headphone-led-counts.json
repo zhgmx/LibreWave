@@ -1,0 +1,543 @@
+{
+  "model": "Wave:3",
+  "api": {
+    "major": 5,
+    "minor": 4
+  },
+  "mode": "Headphone",
+  "fractional_bits": 8,
+  "write_step_raw": 128,
+  "conditions": {
+    "microphone_mute": false,
+    "headphone_mute": false,
+    "all_leds_off": false,
+    "leds_flip": false
+  },
+  "provenance": {
+    "collection": "Approved physical observations through the sole daemon, with exact configuration readback and operator LED entries.",
+    "source_revision": "fa9ad236f779adaecfa37dcc4bb28275cc64b250",
+    "documentation": "docs/protocol-evidence.md",
+    "limitations": "API 5.4 only. Fractional cutoffs, flip, headphone mute, and hardware microphone mute in Headphone mode remain unverified.",
+    "directions": "Rising values approached from -60 dB; falling values approached from 0 dB."
+  },
+  "observations": [
+    {
+      "headphone_raw": -15360,
+      "lit_count": 0,
+      "positions": [],
+      "direction": "initial"
+    },
+    {
+      "headphone_raw": -12800,
+      "lit_count": 1,
+      "positions": [
+        1
+      ],
+      "direction": "initial"
+    },
+    {
+      "headphone_raw": -10240,
+      "lit_count": 1,
+      "positions": [
+        1
+      ],
+      "direction": "initial"
+    },
+    {
+      "headphone_raw": -7680,
+      "lit_count": 1,
+      "positions": [
+        1
+      ],
+      "direction": "initial"
+    },
+    {
+      "headphone_raw": -1152,
+      "lit_count": 5,
+      "positions": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "direction": "initial"
+    },
+    {
+      "headphone_raw": 0,
+      "lit_count": 7,
+      "positions": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -11520,
+      "lit_count": 1,
+      "positions": [
+        1
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -13440,
+      "lit_count": 1,
+      "positions": [
+        1
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -14464,
+      "lit_count": 0,
+      "positions": [],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -13952,
+      "lit_count": 0,
+      "positions": [],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -13696,
+      "lit_count": 1,
+      "positions": [
+        1
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -13824,
+      "lit_count": 1,
+      "positions": [
+        1
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -3840,
+      "lit_count": 3,
+      "positions": [
+        1,
+        2,
+        3
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -5760,
+      "lit_count": 2,
+      "positions": [
+        1,
+        2
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -6784,
+      "lit_count": 1,
+      "positions": [
+        1
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -6272,
+      "lit_count": 2,
+      "positions": [
+        1,
+        2
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -6528,
+      "lit_count": 2,
+      "positions": [
+        1,
+        2
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -6656,
+      "lit_count": 1,
+      "positions": [
+        1
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -4864,
+      "lit_count": 2,
+      "positions": [
+        1,
+        2
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -4352,
+      "lit_count": 2,
+      "positions": [
+        1,
+        2
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -4096,
+      "lit_count": 3,
+      "positions": [
+        1,
+        2,
+        3
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -4224,
+      "lit_count": 3,
+      "positions": [
+        1,
+        2,
+        3
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -1920,
+      "lit_count": 4,
+      "positions": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -2944,
+      "lit_count": 3,
+      "positions": [
+        1,
+        2,
+        3
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -2432,
+      "lit_count": 4,
+      "positions": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -2688,
+      "lit_count": 4,
+      "positions": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -2816,
+      "lit_count": 3,
+      "positions": [
+        1,
+        2,
+        3
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -1024,
+      "lit_count": 5,
+      "positions": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -1536,
+      "lit_count": 5,
+      "positions": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -1792,
+      "lit_count": 4,
+      "positions": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -1664,
+      "lit_count": 4,
+      "positions": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -512,
+      "lit_count": 6,
+      "positions": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -768,
+      "lit_count": 6,
+      "positions": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -896,
+      "lit_count": 5,
+      "positions": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -256,
+      "lit_count": 6,
+      "positions": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -128,
+      "lit_count": 6,
+      "positions": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "direction": "rising"
+    },
+    {
+      "headphone_raw": -13952,
+      "lit_count": 0,
+      "positions": [],
+      "direction": "falling"
+    },
+    {
+      "headphone_raw": -13824,
+      "lit_count": 1,
+      "positions": [
+        1
+      ],
+      "direction": "falling"
+    },
+    {
+      "headphone_raw": -6656,
+      "lit_count": 1,
+      "positions": [
+        1
+      ],
+      "direction": "falling"
+    },
+    {
+      "headphone_raw": -6528,
+      "lit_count": 2,
+      "positions": [
+        1,
+        2
+      ],
+      "direction": "falling"
+    },
+    {
+      "headphone_raw": -4352,
+      "lit_count": 2,
+      "positions": [
+        1,
+        2
+      ],
+      "direction": "falling"
+    },
+    {
+      "headphone_raw": -4224,
+      "lit_count": 3,
+      "positions": [
+        1,
+        2,
+        3
+      ],
+      "direction": "falling"
+    },
+    {
+      "headphone_raw": -2816,
+      "lit_count": 3,
+      "positions": [
+        1,
+        2,
+        3
+      ],
+      "direction": "falling"
+    },
+    {
+      "headphone_raw": -2688,
+      "lit_count": 4,
+      "positions": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "direction": "falling"
+    },
+    {
+      "headphone_raw": -1664,
+      "lit_count": 4,
+      "positions": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "direction": "falling"
+    },
+    {
+      "headphone_raw": -1536,
+      "lit_count": 5,
+      "positions": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "direction": "falling"
+    },
+    {
+      "headphone_raw": -896,
+      "lit_count": 5,
+      "positions": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "direction": "falling"
+    },
+    {
+      "headphone_raw": -768,
+      "lit_count": 6,
+      "positions": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "direction": "falling"
+    },
+    {
+      "headphone_raw": -128,
+      "lit_count": 6,
+      "positions": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "direction": "falling"
+    },
+    {
+      "headphone_raw": 0,
+      "lit_count": 7,
+      "positions": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "direction": "falling"
+    }
+  ],
+  "usb": {
+    "vendor_id": "0fd9",
+    "product_id": "0070",
+    "bcd_device": "0124"
+  },
+  "final_baseline": {
+    "microphone_gain_raw": 4096,
+    "microphone_mute": false,
+    "headphone_raw": -1152,
+    "headphone_mute": false,
+    "blend_raw": 0,
+    "selector": "Microphone",
+    "clipguard": true,
+    "low_cut": false,
+    "all_leds_off": false,
+    "leds_flip": false,
+    "gain_lock": false
+  }
+}

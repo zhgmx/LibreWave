@@ -1,0 +1,73 @@
+{
+  "model": "Wave:3",
+  "api": {
+    "major": 5,
+    "minor": 4
+  },
+  "mode": "Microphone",
+  "gain_raw": 4096,
+  "fractional_bits": 8,
+  "conditions": {
+    "all_leds_off": false,
+    "leds_flip": false,
+    "headphone_raw": -1152,
+    "headphone_mute": false,
+    "blend_raw": 0
+  },
+  "provenance": {
+    "collection": "Approved physical observations through the sole daemon, with exact configuration readback and operator LED entries.",
+    "source_revision": "fa9ad236f779adaecfa37dcc4bb28275cc64b250",
+    "documentation": "docs/protocol-evidence.md",
+    "limitations": "Muted level positions were observed only at exact gain raw 4096 (16 dB). The test generated no audio and does not verify mute attenuation or native UI pointer input."
+  },
+  "observations": [
+    {
+      "origin": "physical_tap",
+      "microphone_mute": true,
+      "ring": "red",
+      "positions": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "origin": "physical_tap",
+      "microphone_mute": false,
+      "ring": "white",
+      "positions": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "origin": "application",
+      "microphone_mute": true,
+      "ring": "red",
+      "positions": [
+        1,
+        2,
+        3
+      ]
+    }
+  ],
+  "usb": {
+    "vendor_id": "0fd9",
+    "product_id": "0070",
+    "bcd_device": "0124"
+  },
+  "final_baseline": {
+    "microphone_gain_raw": 4096,
+    "microphone_mute": false,
+    "headphone_raw": -1152,
+    "headphone_mute": false,
+    "blend_raw": 0,
+    "selector": "Microphone",
+    "clipguard": true,
+    "low_cut": false,
+    "all_leds_off": false,
+    "leds_flip": false,
+    "gain_lock": false
+  }
+}

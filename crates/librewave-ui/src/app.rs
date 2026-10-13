@@ -696,6 +696,60 @@ mod tests {
 
     #[cfg(feature = "gpui-tests")]
     #[gpui::test]
+    fn hardware_led_positions_follow_observed_headphone_mix_and_mute_snapshots(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use librewave_core::VolumeSelection;
+        const DOTS: [&str; 7] = [
+            "device-level-0",
+            "device-level-1",
+            "device-level-2",
+            "device-level-3",
+            "device-level-4",
+            "device-level-5",
+            "device-level-6",
+        ];
+        let (view, cx) =
+            cx.add_window_view(|_, _| shell_with(snapshot_with_controls(DeviceWriteAccess::Ready)));
+        for (target, microphone_mute, blend_raw, expected) in [
+            (VolumeSelection::Microphone, true, 0, vec![0, 1, 2]),
+            (VolumeSelection::Headphone, false, 0, vec![0, 1, 2, 3, 4]),
+            (VolumeSelection::Mix, false, 0, vec![6]),
+            (VolumeSelection::Mix, false, 12800, vec![3]),
+            (VolumeSelection::Mix, false, 25600, vec![0]),
+        ] {
+            cx.update(|_, cx| {
+                view.update(cx, |view, cx| {
+                    let mut snapshot = snapshot_with_controls(DeviceWriteAccess::Ready);
+                    let librewave_core::DeviceAdmissionSnapshot::Admitted {
+                        config: Some(config),
+                        ..
+                    } = &mut snapshot.devices[0].admission
+                    else {
+                        panic!("loaded fixture");
+                    };
+                    config.volume_select = target;
+                    config.input_gain.raw = 4096;
+                    config.input_mute = microphone_mute;
+                    config.headphone_volume.raw = -1152;
+                    config.headphone_mute = false;
+                    config.direct_monitor.raw = blend_raw;
+                    view.snapshot = Some(snapshot);
+                    cx.notify();
+                });
+            });
+            for (index, selector) in DOTS.into_iter().enumerate() {
+                assert_eq!(
+                    cx.debug_bounds(selector).is_some(),
+                    expected.contains(&index),
+                    "{target:?}, blend {blend_raw}, LED {index}"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
     fn loaded_controls_fit_the_short_window_and_settings_remains_modal(
         cx: &mut gpui::TestAppContext,
     ) {

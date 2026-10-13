@@ -54,9 +54,15 @@ illustration follows the ring. All lights are dark when controls are
 unavailable, the device is disconnected, or hardware LEDs are disabled.
 The knob face is drawn in front of the ring. In Microphone mode on API 5.4,
 the level dots follow the measured gain brackets. The seventh dot lights at
-40 dB; it stays dark at 39.5 dB. Unmeasured fractional transition intervals,
-other modes and APIs, and muted or flipped patterns stay dark. Hover over the
-illustration to see when the level mapping is unverified.
+40 dB; it stays dark at 39.5 dB. At exactly 16 dB, the three left dots stay
+lit when hardware microphone mute is on. Other muted gain values remain
+unverified. In Headphone mode on API 5.4, the dots fill from left to right
+using the measured headphone-level brackets. In Mix mode, one dot moves from
+the right at 0 percent to the left at 100 percent. Each 5-percent value has a
+verified position. Unmeasured fractional transitions, other APIs, flipped
+patterns, and other mute states stay dark. Hover over the illustration to see
+when the level mapping is unverified. See [Protocol evidence](protocol-evidence.md)
+for the observations and limits.
 
 The daemon reads the Wave:3 configuration every 500 ms while connected.
 The mode light, mute ring, level dots, and controls follow its observed state.
@@ -197,9 +203,12 @@ peak and RMS values over a separate IPC request. The UI reads meters every
 100 ms while audio is active. Readings expire after 350 ms without a block.
 Meters report individual processed blocks, not a peak hold over the interval.
 Default tests check the signal path with fakes. A bounded Wave:3 run verified
-software meters with a quiet disposable test source. Physical write validation
-is limited to the Low-cut control on Wave:3 API 5.4. Other hardware controls
-still require validation.
+software meters with a quiet disposable test source. Wave:3 API 5.4 control
+tests verified Low-cut readback, microphone gain LED counts, hardware microphone
+mute in both directions, headphone LED brackets, and Mix LED positions.
+The LED and mute tests used no audio. They do not verify audio attenuation,
+blend feed weights, or mute timing. Other hardware controls still require
+physical validation.
 Service launch, default restoration, service restart, and removal checks have
 passed on the reference Wave:3. Reconnect, sleep, and login recovery still need
 acceptance runs. GPUI tests check command mapping, pointer geometry, state

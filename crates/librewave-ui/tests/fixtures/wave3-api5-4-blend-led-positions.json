@@ -1,0 +1,274 @@
+{
+  "model": "Wave:3",
+  "api": {
+    "major": 5,
+    "minor": 4
+  },
+  "mode": "Mix",
+  "fractional_bits": 8,
+  "write_step_raw": 1280,
+  "conditions": {
+    "microphone_mute": false,
+    "headphone_mute": false,
+    "all_leds_off": false,
+    "leds_flip": false
+  },
+  "provenance": {
+    "collection": "Approved physical observations through the sole daemon, with exact configuration readback and operator LED entries.",
+    "source_revision": "fa9ad236f779adaecfa37dcc4bb28275cc64b250",
+    "documentation": "docs/protocol-evidence.md",
+    "limitations": "API 5.4 only. Values between tested 5-percent points, flip, and mute behavior remain unverified. The test used no audio and does not establish audio feed weights at either endpoint.",
+    "directions": "Increasing and decreasing monitor balance on the 5-percent grid."
+  },
+  "observations": [
+    {
+      "blend_raw": 0,
+      "positions": [
+        7
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 1280,
+      "positions": [
+        6
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 2560,
+      "positions": [
+        6
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 3840,
+      "positions": [
+        6
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 5120,
+      "positions": [
+        5
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 6400,
+      "positions": [
+        5
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 7680,
+      "positions": [
+        5
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 8960,
+      "positions": [
+        4
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 10240,
+      "positions": [
+        4
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 11520,
+      "positions": [
+        4
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 12800,
+      "positions": [
+        4
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 14080,
+      "positions": [
+        3
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 15360,
+      "positions": [
+        3
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 16640,
+      "positions": [
+        3
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 17920,
+      "positions": [
+        2
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 19200,
+      "positions": [
+        2
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 20480,
+      "positions": [
+        2
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 21760,
+      "positions": [
+        1
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 23040,
+      "positions": [
+        1
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 24320,
+      "positions": [
+        1
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 25600,
+      "positions": [
+        1
+      ],
+      "direction": "rising"
+    },
+    {
+      "blend_raw": 21760,
+      "positions": [
+        1
+      ],
+      "direction": "falling"
+    },
+    {
+      "blend_raw": 20480,
+      "positions": [
+        2
+      ],
+      "direction": "falling"
+    },
+    {
+      "blend_raw": 17920,
+      "positions": [
+        2
+      ],
+      "direction": "falling"
+    },
+    {
+      "blend_raw": 16640,
+      "positions": [
+        3
+      ],
+      "direction": "falling"
+    },
+    {
+      "blend_raw": 14080,
+      "positions": [
+        3
+      ],
+      "direction": "falling"
+    },
+    {
+      "blend_raw": 12800,
+      "positions": [
+        4
+      ],
+      "direction": "falling"
+    },
+    {
+      "blend_raw": 8960,
+      "positions": [
+        4
+      ],
+      "direction": "falling"
+    },
+    {
+      "blend_raw": 7680,
+      "positions": [
+        5
+      ],
+      "direction": "falling"
+    },
+    {
+      "blend_raw": 5120,
+      "positions": [
+        5
+      ],
+      "direction": "falling"
+    },
+    {
+      "blend_raw": 3840,
+      "positions": [
+        6
+      ],
+      "direction": "falling"
+    },
+    {
+      "blend_raw": 1280,
+      "positions": [
+        6
+      ],
+      "direction": "falling"
+    },
+    {
+      "blend_raw": 0,
+      "positions": [
+        7
+      ],
+      "direction": "falling"
+    }
+  ],
+  "usb": {
+    "vendor_id": "0fd9",
+    "product_id": "0070",
+    "bcd_device": "0124"
+  },
+  "final_baseline": {
+    "microphone_gain_raw": 4096,
+    "microphone_mute": false,
+    "headphone_raw": -1152,
+    "headphone_mute": false,
+    "blend_raw": 0,
+    "selector": "Microphone",
+    "clipguard": true,
+    "low_cut": false,
+    "all_leds_off": false,
+    "leds_flip": false,
+    "gain_lock": false
+  }
+}

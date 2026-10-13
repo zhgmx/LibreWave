@@ -34,12 +34,12 @@ const WHITE: u32 = 0x00F5_F7FF;
 
 /// The lights that the daemon snapshot proves are lit.
 ///
-/// Level counts are available only inside verified Microphone-mode regions.
+/// Level positions are available only inside physically verified regions.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct Lights {
     mode: Option<usize>,
     mute: Option<bool>,
-    levels: Option<usize>,
+    levels: Option<[bool; 7]>,
 }
 
 impl Lights {
@@ -54,7 +54,7 @@ impl Lights {
                 VolumeSelection::Mix => 2,
             }),
             mute: Some(config.input_mute),
-            levels: microphone_level_count(config, api),
+            levels: level_pattern(config, api),
         }
     }
 
@@ -75,22 +75,92 @@ const MICROPHONE_TRANSITIONS: [(i32, i32); 7] = [
     (10112, 10240),
 ];
 
-fn microphone_level_count(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) -> Option<usize> {
+// Physical tap and application mute tests preserved the three left LEDs at
+// exactly 16 dB. Other muted gain values still need physical observations.
+const MUTED_MICROPHONE_GAIN_RAW: i32 = 4096;
+
+/// Physical Headphone-mode transition brackets on the 0.5 dB write grid.
+const HEADPHONE_TRANSITIONS: [(i32, i32); 7] = [
+    (-13952, -13824),
+    (-6656, -6528),
+    (-4352, -4224),
+    (-2816, -2688),
+    (-1664, -1536),
+    (-896, -768),
+    (-128, 0),
+];
+
+// One LED per measured 5-percent value, indexed from left to right. Blend
+// increases from the rightmost LED at 0 percent to the leftmost at 100 percent.
+const MIX_POSITIONS: [usize; 21] = [6, 5, 5, 5, 4, 4, 4, 3, 3, 3, 3, 2, 2, 2, 1, 1, 1, 0, 0, 0, 0];
+
+fn level_pattern(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) -> Option<[bool; 7]> {
+    let count = match config.volume_select {
+        VolumeSelection::Microphone => microphone_level_count(config, api),
+        VolumeSelection::Headphone => headphone_level_count(config, api),
+        VolumeSelection::Mix => return mix_level_pattern(config, api),
+    }?;
+    Some(std::array::from_fn(|index| index < count))
+}
+
+fn mix_level_pattern(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) -> Option<[bool; 7]> {
     if api != Some(ApiVersion::new(5, 4))
-        || config.volume_select != VolumeSelection::Microphone
+        || config.volume_select != VolumeSelection::Mix
         || config.input_mute
+        || config.headphone_mute
         || config.all_leds_off
         || config.leds_flip
-        || config.input_gain.fractional_bits != 8
-        || !(0..=10240).contains(&config.input_gain.raw)
+        || config.direct_monitor.fractional_bits != 8
+        || !(0..=25600).contains(&config.direct_monitor.raw)
+        || config.direct_monitor.raw % 1280 != 0
     {
         return None;
     }
-    let gain = config.input_gain.raw;
-    if MICROPHONE_TRANSITIONS.iter().any(|&(lower, upper)| lower < gain && gain < upper) {
+    let step = usize::try_from(config.direct_monitor.raw / 1280).ok()?;
+    let position = *MIX_POSITIONS.get(step)?;
+    Some(std::array::from_fn(|index| index == position))
+}
+
+fn headphone_level_count(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) -> Option<usize> {
+    if api != Some(ApiVersion::new(5, 4))
+        || config.volume_select != VolumeSelection::Headphone
+        || config.input_mute
+        || config.headphone_mute
+        || config.all_leds_off
+        || config.leds_flip
+        || config.headphone_volume.fractional_bits != 8
+    {
         return None;
     }
-    Some(MICROPHONE_TRANSITIONS.iter().filter(|&&(_, upper)| gain >= upper).count())
+    bracketed_count(config.headphone_volume.raw, -15360, 0, &HEADPHONE_TRANSITIONS)
+}
+
+fn bracketed_count(
+    raw: i32,
+    minimum: i32,
+    maximum: i32,
+    transitions: &[(i32, i32)],
+) -> Option<usize> {
+    if !(minimum..=maximum).contains(&raw)
+        || transitions.iter().any(|&(lower, upper)| lower < raw && raw < upper)
+    {
+        return None;
+    }
+    Some(transitions.iter().filter(|&&(_, upper)| raw >= upper).count())
+}
+
+fn microphone_level_count(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) -> Option<usize> {
+    if api != Some(ApiVersion::new(5, 4))
+        || config.volume_select != VolumeSelection::Microphone
+        || (config.input_mute
+            && (config.input_gain.raw != MUTED_MICROPHONE_GAIN_RAW || config.headphone_mute))
+        || config.all_leds_off
+        || config.leds_flip
+        || config.input_gain.fractional_bits != 8
+    {
+        return None;
+    }
+    bracketed_count(config.input_gain.raw, 0, 10240, &MICROPHONE_TRANSITIONS)
 }
 
 pub(super) fn level_hint(
@@ -98,7 +168,7 @@ pub(super) fn level_hint(
     api: Option<ApiVersion>,
 ) -> Option<&'static str> {
     config
-        .filter(|config| !config.all_leds_off && microphone_level_count(config, api).is_none())
+        .filter(|config| !config.all_leds_off && level_pattern(config, api).is_none())
         .map(|_| "Level indicator mapping is not verified for this state.")
 }
 
@@ -160,8 +230,10 @@ pub(super) fn lights(
             lamp(MODE_CENTERS[mode], MODE_Y, MODE_RADIUS, WHITE).bg(rgb(WHITE)).into_any_element(),
         );
     }
-    if let Some(count) = lights.levels {
-        for (index, &center) in LEVEL_CENTERS.iter().take(count).enumerate() {
+    if let Some(pattern) = lights.levels {
+        for (index, &center) in
+            LEVEL_CENTERS.iter().enumerate().filter(|(index, _)| pattern[*index])
+        {
             let selector = format!("device-level-{index}");
             lit.push(
                 lamp(center, LEVEL_Y, MODE_RADIUS, WHITE)
@@ -327,7 +399,135 @@ mod tests {
     }
 
     #[test]
-    fn unverified_modes_versions_and_muted_or_flipped_patterns_stay_unknown() {
+    fn headphone_positions_match_every_physical_observation() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/wave3-api5-4-headphone-led-counts.json"
+        ))
+        .expect("checked-in physical observations");
+        let mut config = config();
+        config.volume_select = VolumeSelection::Headphone;
+        let observations = fixture["observations"].as_array().expect("observations");
+        assert_eq!(observations.len(), 50);
+        for observation in observations {
+            config.headphone_volume.raw =
+                i32::try_from(observation["headphone_raw"].as_i64().expect("raw level"))
+                    .expect("Q8.8 headphone level fits");
+            let count = usize::try_from(observation["lit_count"].as_u64().expect("count"))
+                .expect("seven LEDs fit");
+            let pattern = level_pattern(&config, Some(ApiVersion::new(5, 4)))
+                .expect("observed headphone pattern");
+            let positions: Vec<_> = pattern
+                .iter()
+                .enumerate()
+                .filter_map(|(index, lit)| lit.then_some(index + 1))
+                .collect();
+            let observed_positions: Vec<_> = observation["positions"]
+                .as_array()
+                .expect("positions")
+                .iter()
+                .map(|position| usize::try_from(position.as_u64().expect("position")).expect("LED"))
+                .collect();
+            assert_eq!(positions, observed_positions);
+            assert_eq!(headphone_level_count(&config, Some(ApiVersion::new(5, 4))), Some(count));
+            assert_eq!(lights(Some(&config), Some(ApiVersion::new(5, 4)), 360.).len(), count + 2);
+        }
+    }
+
+    #[test]
+    fn headphone_fractional_brackets_and_unverified_states_stay_unknown() {
+        let mut config = config();
+        config.volume_select = VolumeSelection::Headphone;
+        for &(lower, upper) in &HEADPHONE_TRANSITIONS {
+            for raw in lower + 1..upper {
+                config.headphone_volume.raw = raw;
+                assert_eq!(headphone_level_count(&config, Some(ApiVersion::new(5, 4))), None);
+                assert!(level_hint(Some(&config), Some(ApiVersion::new(5, 4))).is_some());
+            }
+        }
+        config.headphone_volume.raw = -1152;
+        for mutation in [
+            |config: &mut Wave3ConfigSnapshot| config.input_mute = true,
+            |config: &mut Wave3ConfigSnapshot| config.headphone_mute = true,
+            |config: &mut Wave3ConfigSnapshot| config.all_leds_off = true,
+            |config: &mut Wave3ConfigSnapshot| config.leds_flip = true,
+            |config: &mut Wave3ConfigSnapshot| config.headphone_volume.fractional_bits = 7,
+            |config: &mut Wave3ConfigSnapshot| config.headphone_volume.raw = -15361,
+            |config: &mut Wave3ConfigSnapshot| config.headphone_volume.raw = 1,
+        ] {
+            let mut changed = config.clone();
+            mutation(&mut changed);
+            assert_eq!(headphone_level_count(&changed, Some(ApiVersion::new(5, 4))), None);
+        }
+        for api in [None, Some(ApiVersion::new(5, 3)), Some(ApiVersion::new(5, 5))] {
+            assert_eq!(headphone_level_count(&config, api), None);
+        }
+    }
+
+    #[test]
+    fn mix_positions_match_every_physical_observation() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/wave3-api5-4-blend-led-positions.json"
+        ))
+        .expect("checked-in physical observations");
+        let mut config = config();
+        config.volume_select = VolumeSelection::Mix;
+        let observations = fixture["observations"].as_array().expect("observations");
+        assert_eq!(observations.len(), 33);
+        for observation in observations {
+            config.direct_monitor.raw =
+                i32::try_from(observation["blend_raw"].as_i64().expect("raw blend"))
+                    .expect("Q8.8 blend fits");
+            let pattern =
+                level_pattern(&config, Some(ApiVersion::new(5, 4))).expect("observed Mix pattern");
+            let positions: Vec<_> = pattern
+                .iter()
+                .enumerate()
+                .filter_map(|(index, lit)| lit.then_some(index + 1))
+                .collect();
+            let observed_positions: Vec<_> = observation["positions"]
+                .as_array()
+                .expect("positions")
+                .iter()
+                .map(|position| usize::try_from(position.as_u64().expect("position")).expect("LED"))
+                .collect();
+            assert_eq!(positions, observed_positions);
+            assert_eq!(positions.len(), 1, "Mix moves one dot instead of filling a bar");
+            assert_eq!(lights(Some(&config), Some(ApiVersion::new(5, 4)), 360.).len(), 3);
+        }
+    }
+
+    #[test]
+    fn mix_unmeasured_values_and_unverified_states_stay_unknown() {
+        let mut config = config();
+        config.volume_select = VolumeSelection::Mix;
+        for raw in 0..=25600 {
+            config.direct_monitor.raw = raw;
+            assert_eq!(
+                mix_level_pattern(&config, Some(ApiVersion::new(5, 4))).is_some(),
+                raw % 1280 == 0
+            );
+        }
+        config.direct_monitor.raw = 12800;
+        for mutation in [
+            |config: &mut Wave3ConfigSnapshot| config.input_mute = true,
+            |config: &mut Wave3ConfigSnapshot| config.headphone_mute = true,
+            |config: &mut Wave3ConfigSnapshot| config.all_leds_off = true,
+            |config: &mut Wave3ConfigSnapshot| config.leds_flip = true,
+            |config: &mut Wave3ConfigSnapshot| config.direct_monitor.fractional_bits = 7,
+            |config: &mut Wave3ConfigSnapshot| config.direct_monitor.raw = -1,
+            |config: &mut Wave3ConfigSnapshot| config.direct_monitor.raw = 25601,
+        ] {
+            let mut changed = config.clone();
+            mutation(&mut changed);
+            assert_eq!(mix_level_pattern(&changed, Some(ApiVersion::new(5, 4))), None);
+        }
+        for api in [None, Some(ApiVersion::new(5, 3)), Some(ApiVersion::new(5, 5))] {
+            assert_eq!(mix_level_pattern(&config, api), None);
+        }
+    }
+
+    #[test]
+    fn unverified_modes_versions_and_flipped_patterns_stay_unknown() {
         let mut config = config();
         config.input_gain.raw = 10240;
         for api in [None, Some(ApiVersion::new(5, 3)), Some(ApiVersion::new(5, 5))] {
@@ -350,6 +550,37 @@ mod tests {
             mutation(&mut changed);
             assert_eq!(microphone_level_count(&changed, Some(ApiVersion::new(5, 4))), None);
         }
+    }
+
+    #[test]
+    fn observed_mute_keeps_the_three_left_microphone_leds_at_16_db() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/wave3-api5-4-mute-led-positions.json"
+        ))
+        .expect("checked-in physical mute observations");
+        let mut config = config();
+        config.input_gain.raw = MUTED_MICROPHONE_GAIN_RAW;
+        let observations = fixture["observations"].as_array().expect("observations");
+        assert_eq!(observations.len(), 3);
+        for observation in observations {
+            let muted = observation["microphone_mute"].as_bool().expect("hardware mute");
+            config.input_mute = muted;
+            let observed = Lights::observed(Some(&config), Some(ApiVersion::new(5, 4)));
+            assert_eq!(observed.levels, Some([true, true, true, false, false, false, false]));
+            assert_eq!(observed.ring(), Some(if muted { DANGER } else { WHITE }));
+            assert_eq!(observation["ring"], if muted { "red" } else { "white" });
+            assert_eq!(observation["positions"], serde_json::json!([1, 2, 3]));
+            assert_eq!(lights(Some(&config), Some(ApiVersion::new(5, 4)), 360.).len(), 5);
+            assert!(level_hint(Some(&config), Some(ApiVersion::new(5, 4))).is_none());
+        }
+        config.input_mute = true;
+        for raw in [0, 3968, 4095, 4097, 4224, 10240] {
+            config.input_gain.raw = raw;
+            assert_eq!(microphone_level_count(&config, Some(ApiVersion::new(5, 4))), None);
+        }
+        config.input_gain.raw = MUTED_MICROPHONE_GAIN_RAW;
+        config.headphone_mute = true;
+        assert_eq!(microphone_level_count(&config, Some(ApiVersion::new(5, 4))), None);
     }
 
     #[test]
@@ -402,8 +633,17 @@ mod tests {
                 Lights::observed(Some(&config), Some(ApiVersion::new(5, 4))).mode,
                 Some(index)
             );
-            // Zero gain has no lit level dots. Other modes have no verified mapping.
-            assert_eq!(lights(Some(&config), Some(ApiVersion::new(5, 4)), 360.).len(), 2);
+            // This fixture has zero microphone gain, maximum headphone level,
+            // and zero blend. Each mode includes exactly its own mode light.
+            let expected_lights = match config.volume_select {
+                VolumeSelection::Microphone => 2,
+                VolumeSelection::Headphone => 9,
+                VolumeSelection::Mix => 3,
+            };
+            assert_eq!(
+                lights(Some(&config), Some(ApiVersion::new(5, 4)), 360.).len(),
+                expected_lights
+            );
         }
     }
 }

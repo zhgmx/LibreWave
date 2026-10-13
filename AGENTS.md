@@ -103,6 +103,7 @@ Write public documentation in plain, controlled English influenced by ASD-STE100
 - Give one action per numbered step.
 - Name commands, files, units, and expected results exactly.
 - Separate tested behavior from proposals and open questions.
+- Keep protocol evidence concise. Record raw measurements, units, device and API conditions, direction, provenance, and verification limits. Exclude session chronology, conversational observations, and temporary helper failures unless they are essential to interpret the data. Keep unmeasured transitions as brackets.
 - Do not claim support before the relevant hardware and recovery tests pass.
 - Run the humanizer skill on public prose without changing technical facts.
 
