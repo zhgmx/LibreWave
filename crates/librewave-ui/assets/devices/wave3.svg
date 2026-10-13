@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="600" height="900" viewBox="278 -7 600 900" fill="none">
   <title>Wave:3 microphone with studio lighting</title>
-  <desc>Original vector illustration based on the supplied front view. Black perforated grille, illuminated dial, metal yoke, desk stand, on a transparent background.</desc>
+  <desc>Original front-view vector illustration of a Wave:3 microphone. Black perforated grille, illuminated dial, metal yoke, and desk stand on a transparent background.</desc>
   <defs>
     <!-- Paint slots are replaced by the UI from observed state. -->
     <linearGradient id="mode-0"><stop stop-color="#10141a"/></linearGradient>
@@ -58,7 +58,7 @@
     <linearGradient id="badge-ink" x1="0" y1="0" x2=".6" y2="1">
       <stop stop-color="#e0e3e6"/><stop offset=".48" stop-color="#c3c8cf"/><stop offset="1" stop-color="#8e98a5"/>
     </linearGradient>
-    <!-- Front markings follow the user's close-up: solid earcups and an interrupted crossing. -->
+    <!-- Front markings have solid earcups and an interrupted crossing. -->
     <g id="mode-markings">
       <rect x="532" y="418" width="5" height="10" rx="2.5"/>
       <path d="M529 425v2a5.5 5.5 0 0 0 11 0v-2M534.5 433v3m-2.5 0h5" fill="none" stroke-width="1.4"/>

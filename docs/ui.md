@@ -209,30 +209,27 @@ mute in both directions, headphone LED brackets, and Mix LED positions.
 The LED and mute tests used no audio. They do not verify audio attenuation,
 blend feed weights, or mute timing. Other hardware controls still require
 physical validation.
-Service launch, default restoration, service restart, and removal checks have
-passed on the reference Wave:3. Reconnect, sleep, and login recovery still need
-acceptance runs. GPUI tests check command mapping, pointer geometry, state
-handling, loaded Ready and Locked control layouts, initial keyboard focus,
-modal focus containment, restoration errors across Settings pages, and backdrop
-dismissal. Loaded-control layout tests use fixtures. Native captures check the
-daemon-connected view before and after reading the real Wave:3 API 5.4 controls,
-the loaded device stage at the minimum window size, and the Settings dialog.
-The loaded-control review leaves audio inactive and hardware controls unchanged.
-The captures alone do not validate native mouse or keyboard interaction, active audio,
-or behavior on other desktops. A separate physical selector and touch-mute
-check confirmed automatic updates in the native UI with audio inactive.
-Possible knob rotation during that check leaves the cause of its small gain
-change uncertain. It does not invalidate the selector and mute result.
-Longer stability on the current startup and routing implementation also
-requires validation.
-Channel and output fader tracks support drag, click, and keyboard input.
-Hardware level bars are not draggable. A bounded Wave:3 run through the CLI
-verified linked and independent levels, separate mutes, software output mute
-and attenuation, and disposable application moves between System and a named
-input. A native listening check confirmed headphone playback, channel fader
-movement, linked and independent levels, separate channel mutes, and Monitor
-output level and mute. Native keyboard control, application assignment, and
-Stream output interaction still need checks.
+Service launch, default restoration, service restart, and removal are verified
+on the reference Wave:3. Reconnect, sleep, login recovery, and longer startup
+and routing stability remain unverified.
+
+GPUI fixture tests cover command mapping, pointer geometry, state handling,
+Ready and Locked layouts, initial keyboard focus, modal focus containment,
+Settings restoration errors, and backdrop dismissal. Native Wave:3 API 5.4
+captures cover the connected view, loaded controls, minimum-window device
+stage, and Settings dialog with audio inactive and hardware controls unchanged.
+Captures alone do not verify native input, active audio, or other desktops.
+Physical selector and tap-mute updates in the native UI are verified with
+audio inactive. The cause of a small gain change remains uncertain; incidental
+knob rotation is possible. Selector and mute results remain valid.
+
+CLI and native tests verify linked and independent channel levels and separate
+channel mutes. CLI tests also verify software output mute and attenuation, and
+disposable application moves between System and a named input. Native tests
+also verify headphone playback, channel fader movement, and Monitor output
+level and mute. Native keyboard control, application assignment, and Stream
+output interaction remain unverified. Channel and output fader tracks support
+drag, click, and keyboard input. Hardware level bars are not draggable.
 Effects and output destination selection remain work for later increments.
 
 The Linux application uses upstream Zed GPUI and `gpui_platform` from

@@ -18,14 +18,14 @@
     "source_revision": "fa9ad236f779adaecfa37dcc4bb28275cc64b250",
     "documentation": "docs/protocol-evidence.md",
     "limitations": "API 5.4 only. Fractional cutoffs, flip, headphone mute, and hardware microphone mute in Headphone mode remain unverified.",
-    "directions": "Rising values approached from -60 dB; falling values approached from 0 dB."
+    "directions": "Rising values: approach from -60 dB. Falling values: approach from 0 dB. Null direction: approach unrecorded."
   },
   "observations": [
     {
       "headphone_raw": -15360,
       "lit_count": 0,
       "positions": [],
-      "direction": "initial"
+      "direction": null
     },
     {
       "headphone_raw": -12800,
@@ -33,7 +33,7 @@
       "positions": [
         1
       ],
-      "direction": "initial"
+      "direction": null
     },
     {
       "headphone_raw": -10240,
@@ -41,7 +41,7 @@
       "positions": [
         1
       ],
-      "direction": "initial"
+      "direction": null
     },
     {
       "headphone_raw": -7680,
@@ -49,7 +49,7 @@
       "positions": [
         1
       ],
-      "direction": "initial"
+      "direction": null
     },
     {
       "headphone_raw": -1152,
@@ -61,7 +61,7 @@
         4,
         5
       ],
-      "direction": "initial"
+      "direction": null
     },
     {
       "headphone_raw": 0,

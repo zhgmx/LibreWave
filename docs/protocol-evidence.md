@@ -108,17 +108,15 @@ substitute for this evidence.
 
 ### Observed Microphone-mode LED counts
 
-The test used only the daemon's `InputGain` control path. Each requested value
-was read back before the operator counted fully lit LEDs. Audio stayed off
-and playback stayed paused. The operator confirmed that the IEMs were out
-before the first write. The selector stayed in Microphone mode. Microphone
-mute, `all_leds_off`, and `leds_flip` were off.
-Other configuration fields stayed unchanged.
+Device and API: Wave:3 API 5.4. Control path: daemon `InputGain`.
+Measurement: exact gain readback and manual fully lit LED count. Conditions:
+audio inactive, playback paused, IEMs out, Microphone selector, microphone mute
+and both LED flags off. Other configuration fields unchanged.
 
-There were 33 rising observations and 14 falling confirmations. Rising probes
-approached intermediate values from 0 dB. The falling sequence began at
-40 dB and approached lower values from above. Both sequences agreed at every
-tested boundary. At 0 dB, no level LED was lit. At 40 dB, all seven were lit.
+There are 33 rising observations and 14 falling confirmations. Rising
+intermediate values are approached from 0 dB; falling values from 40 dB.
+Both directions agree at every tested boundary. At 0 dB, the count is 0.
+At 40 dB, the count is 7.
 
 | New lit count | Lower tested gain and count | Upper tested gain and count |
 | --- | --- | --- |
@@ -130,11 +128,11 @@ tested boundary. At 0 dB, no level LED was lit. At 40 dB, all seven were lit.
 | 6 | 32.5 dB: 5 | 33.0 dB: 6 |
 | 7 | 39.5 dB: 6 | 40.0 dB: 7 |
 
-A separate 12-observation check confirmed the last dot. At 38.0, 38.5, 39.0,
-and 39.5 dB, six dots were fully lit and the rightmost dot was off. At all
-three visits to 40.0 dB, seven dots were fully lit and the rightmost dot was
-fully lit. No dim or blinking state was reported. Gain returned to the
-approved 15.5 dB level, and every other hardware field stayed unchanged.
+The rightmost-dot data contains 12 observations. At 38.0, 38.5, 39.0, and
+39.5 dB, six dots are fully lit and the rightmost dot is off. At 40.0 dB,
+all seven dots are fully lit in three observations. No dim or blinking state
+is reported. Historical final gain: 15.5 dB. Every other hardware field is
+unchanged.
 
 These are transition brackets, not exact fractional thresholds. Do not infer
 the seventh transition from the spacing of the first six. The sanitized
