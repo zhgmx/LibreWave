@@ -625,12 +625,14 @@ impl Daemon {
 
     fn prepare_input_change(&self, expected: MixerGeneration) -> Result<(), IpcError> {
         self.check_mixer_generation(expected)?;
-        if self.audio_session.enabled
-            || self.audio.as_ref().is_some_and(AudioSupervisor::needs_tick)
+        if (self.audio_session.enabled
+            || self.audio.as_ref().is_some_and(AudioSupervisor::needs_tick))
+            && self.snapshot().mixer.runtime != MixerRuntimeState::Active
         {
             return Err(IpcError {
                 kind: IpcErrorKind::AudioNotReady,
-                message: "stop audio and finish cleanup before changing input layout".to_owned(),
+                message: "wait for mixer readiness or finish cleanup before changing input layout"
+                    .to_owned(),
             });
         }
         Ok(())
@@ -654,27 +656,8 @@ impl Daemon {
         next: MixerProfile,
         origin: librewave_core::Origin,
     ) -> Result<MixerSnapshot, IpcError> {
-        match self.mixer_store.save(&next) {
-            Ok(()) => {}
-            Err(PersistenceError::SaveAfterRename(_)) => {
-                return Err(IpcError {
-                    kind: IpcErrorKind::MixerPersistenceAmbiguous,
-                    message: "mixer state was replaced, but its crash durability is ambiguous; retained state was not advanced and retrying the command will converge it"
-                        .to_owned(),
-                });
-            }
-            Err(_) => {
-                return Err(IpcError {
-                    kind: IpcErrorKind::MixerPersistence,
-                    message: "mixer state could not be persisted; retained state was not changed"
-                        .to_owned(),
-                });
-            }
-        }
+        persist_mixer_profile(self.audio.as_mut(), &mut *self.mixer_store, &next)?;
         let mut snapshot = self.snapshot().clone();
-        if let Some(audio) = self.audio.as_mut() {
-            audio.stage_profile(&next);
-        }
         snapshot.mixer = match self.audio.as_ref().map(AudioSupervisor::runtime) {
             Some(MixerRuntimeState::Active) => MixerSnapshot::active(next),
             Some(MixerRuntimeState::Inactive { reason }) => {
@@ -1335,6 +1318,56 @@ fn apply_control_snapshot(
         Wave3Control::AllLedsOff(value) => config.all_leds_off = value,
         Wave3Control::LedsFlip(value) => config.leds_flip = value,
         Wave3Control::GainLock(value) => config.gain_lock = value,
+    }
+    Ok(())
+}
+
+pub(crate) fn persist_mixer_profile<H: crate::audio::SupervisedAudioHost>(
+    mut audio: Option<&mut AudioSupervisor<H>>,
+    store: &mut dyn MixerStateStore,
+    next: &MixerProfile,
+) -> Result<(), IpcError> {
+    let prepared = if let Some(audio) = audio.as_deref_mut() {
+        audio.prepare_profile(next).map_err(|error| IpcError {
+            kind: IpcErrorKind::AudioNotReady,
+            message: format!("mixer edit preparation failed; profile was not saved: {error}"),
+        })?
+    } else {
+        false
+    };
+    let saved = store.save(next);
+    if saved.is_err()
+        && prepared
+        && let Some(audio) = audio.as_deref_mut()
+    {
+        audio.finish_profile(false).map_err(|error| {
+            internal_error(format!(
+                "profile save failed and prepared-resource cleanup failed: {error}"
+            ))
+        })?;
+    }
+    match saved {
+        Ok(()) => {}
+        Err(PersistenceError::SaveAfterRename(_)) => {
+            return Err(IpcError {
+                    kind: IpcErrorKind::MixerPersistenceAmbiguous,
+                    message: "mixer state was replaced, but its crash durability is ambiguous; retained state was not advanced and retrying the command will converge it"
+                        .to_owned(),
+                });
+        }
+        Err(_) => {
+            return Err(IpcError {
+                kind: IpcErrorKind::MixerPersistence,
+                message: "mixer state could not be persisted; retained state was not changed"
+                    .to_owned(),
+            });
+        }
+    }
+    if prepared
+        && let Some(audio) = audio
+        && let Err(error) = audio.finish_profile(true)
+    {
+        eprintln!("librewaved: saved profile awaits audio recovery: {error}");
     }
     Ok(())
 }

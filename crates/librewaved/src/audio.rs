@@ -32,7 +32,9 @@ pub(super) trait SupervisedAudioHost: AudioHost<Error = LinuxAudioError> {
         Err("Application routing is unavailable on this audio host.".into())
     }
     fn poll(&mut self) -> Result<(), LinuxAudioError>;
-    fn stage_profile(&mut self, profile: &MixerProfile) -> Result<(), LinuxAudioError>;
+    fn prepare_profile(&mut self, profile: &MixerProfile) -> Result<(), LinuxAudioError>;
+    fn commit_profile(&mut self) -> Result<(), LinuxAudioError>;
+    fn cancel_profile(&mut self) -> Result<(), LinuxAudioError>;
     fn take_meters(&mut self) -> Option<librewave_engine::BlockMeters>;
 }
 
@@ -55,8 +57,14 @@ impl SupervisedAudioHost for ComposedAudioHost {
         Self::poll(self)
     }
 
-    fn stage_profile(&mut self, profile: &MixerProfile) -> Result<(), LinuxAudioError> {
-        Self::stage_profile(self, profile)
+    fn prepare_profile(&mut self, profile: &MixerProfile) -> Result<(), LinuxAudioError> {
+        Self::prepare_profile(self, profile)
+    }
+    fn commit_profile(&mut self) -> Result<(), LinuxAudioError> {
+        Self::commit_profile(self)
+    }
+    fn cancel_profile(&mut self) -> Result<(), LinuxAudioError> {
+        Self::cancel_profile(self)
     }
 }
 
@@ -335,27 +343,38 @@ impl<H: SupervisedAudioHost> AudioSupervisor<H> {
         }
     }
 
-    pub(super) fn stage_profile(&mut self, profile: &MixerProfile) -> bool {
+    pub(super) fn prepare_profile(
+        &mut self,
+        profile: &MixerProfile,
+    ) -> Result<bool, LinuxAudioError> {
         let Some(attempt) = self.attempt.as_mut() else {
-            return false;
+            return Ok(false);
         };
         if !self.enabled || attempt.lifecycle.state() != LifecycleState::Ready {
-            return false;
+            return Ok(false);
         }
-        if let Err(error) = attempt.host.stage_profile(profile) {
-            eprintln!("librewaved: audio profile handoff failed: {error}");
+        attempt.host.prepare_profile(profile)?;
+        Ok(true)
+    }
+
+    pub(super) fn finish_profile(&mut self, commit: bool) -> Result<(), LinuxAudioError> {
+        let Some(attempt) = self.attempt.as_mut() else {
+            return Ok(());
+        };
+        let result =
+            if commit { attempt.host.commit_profile() } else { attempt.host.cancel_profile() };
+        if let Err(error) = result {
             self.reason = host_failure_reason(&error);
-            if let Err(cleanup) = attempt.lifecycle.teardown(&mut attempt.host) {
-                eprintln!("librewaved: audio cleanup pending: {cleanup:?}");
+            if attempt.lifecycle.teardown(&mut attempt.host).is_err() {
                 self.reason = MixerInactiveReason::CleanupPending;
             } else {
                 self.attempt = None;
                 self.invocations = None;
             }
             self.retry_at = Instant::now() + RETRY_INTERVAL;
-            return false;
+            return Err(error);
         }
-        true
+        Ok(())
     }
 }
 

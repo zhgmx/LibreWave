@@ -10,6 +10,7 @@ use std::rc::Rc;
 #[derive(Default)]
 pub(crate) struct Control {
     application_revision: Cell<u64>,
+    prepare_error: Cell<bool>,
     application_moves: Cell<usize>,
     pub(crate) events: RefCell<Vec<&'static str>>,
     meters: RefCell<std::collections::VecDeque<librewave_engine::BlockMeters>>,
@@ -117,7 +118,16 @@ impl SupervisedAudioHost for FakeHost {
     fn poll(&mut self) -> Result<(), LinuxAudioError> {
         if self.0.progress_error.get() { Err(LinuxAudioError::TeardownFailed) } else { Ok(()) }
     }
-    fn stage_profile(&mut self, _: &MixerProfile) -> Result<(), LinuxAudioError> {
+    fn prepare_profile(&mut self, _: &MixerProfile) -> Result<(), LinuxAudioError> {
+        self.0.events.borrow_mut().push("prepare profile");
+        if self.0.prepare_error.get() { Err(LinuxAudioError::TeardownFailed) } else { Ok(()) }
+    }
+    fn commit_profile(&mut self) -> Result<(), LinuxAudioError> {
+        self.0.events.borrow_mut().push("commit profile");
+        Ok(())
+    }
+    fn cancel_profile(&mut self) -> Result<(), LinuxAudioError> {
+        self.0.events.borrow_mut().push("cancel profile");
         Ok(())
     }
 }
@@ -369,4 +379,54 @@ fn software_meter_values_expire_and_cannot_survive_stop_or_restart() {
     audio.enable().expect("enable");
     tick(&mut audio, Some(&candidate), true);
     assert_eq!(audio.meter_snapshot(), MeterSnapshot::Waiting);
+}
+
+#[test]
+fn profile_persistence_commits_only_after_save_and_cancels_on_failure() {
+    struct Store {
+        control: Rc<Control>,
+        failure: u8,
+    }
+    impl crate::persistence::MixerStateStore for Store {
+        fn load(&mut self) -> Result<MixerProfile, crate::PersistenceError> {
+            Ok(MixerProfile::default())
+        }
+        fn save(&mut self, _: &MixerProfile) -> Result<(), crate::PersistenceError> {
+            self.control.events.borrow_mut().push("save profile");
+            match self.failure {
+                1 => Err(crate::PersistenceError::SaveBeforeRename(std::io::Error::other(
+                    "injected",
+                ))),
+                2 => {
+                    Err(crate::PersistenceError::SaveAfterRename(std::io::Error::other("injected")))
+                }
+                _ => Ok(()),
+            }
+        }
+    }
+    for failure in 0..=3 {
+        let (mut audio, control) = supervisor();
+        tick(&mut audio, Some(&candidate()), true);
+        control.events.borrow_mut().clear();
+        control.prepare_error.set(failure == 3);
+        let mut store = Store { control: Rc::clone(&control), failure };
+        let result = crate::manager::persist_mixer_profile(
+            Some(&mut audio),
+            &mut store,
+            &MixerProfile::first_run(),
+        );
+        assert_eq!(result.is_ok(), failure == 0);
+        let expected: &[&str] = match failure {
+            0 => &["prepare profile", "save profile", "commit profile"],
+            3 => &["prepare profile"],
+            _ => &["prepare profile", "save profile", "cancel profile"],
+        };
+        assert_eq!(&*control.events.borrow(), expected);
+        assert_eq!(
+            audio.runtime(),
+            MixerRuntimeState::Active,
+            "rejected edit must retain the healthy audio owner"
+        );
+        assert_eq!(control.creates.get(), 1);
+    }
 }

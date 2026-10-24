@@ -244,12 +244,7 @@ impl Shell {
         let id = source.controls.source();
         let removable = !self.pending
             && self.settings_modal.is_none()
-            && self.snapshot.as_ref().is_some_and(|s| {
-                s.mixer.runtime
-                    == librewave_core::MixerRuntimeState::Inactive {
-                        reason: librewave_core::MixerInactiveReason::AudioHostEngineNotConnected,
-                    }
-            });
+            && self.snapshot.as_ref().is_some_and(|s| input_layout_available(s.mixer.runtime));
         div()
             .flex()
             .items_center()
@@ -308,7 +303,7 @@ impl Shell {
                         if removable {
                             "Remove input"
                         } else {
-                            "Stop audio before removing an input"
+                            "Wait for mixer readiness before removing an input"
                         },
                         Tone::Quiet,
                         FAINT,
@@ -468,15 +463,13 @@ impl Shell {
 
 impl Shell {
     fn add_input(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> Stateful<Div> {
-        let free =
-            (3..=12).map(SourceId::new).find(|id| snapshot.mixer.profile.source(*id).is_none());
+        let free = (snapshot.mixer.profile.sources.len() < librewave_core::MAX_MIXER_SOURCES
+            && snapshot.mixer.profile.next_source_id < u16::MAX)
+            .then_some(snapshot.mixer.profile.next_source_id);
         let enabled = free.is_some()
             && !self.pending
             && self.settings_modal.is_none()
-            && snapshot.mixer.runtime
-                == librewave_core::MixerRuntimeState::Inactive {
-                    reason: librewave_core::MixerInactiveReason::AudioHostEngineNotConnected,
-                };
+            && input_layout_available(snapshot.mixer.runtime);
         let generation = snapshot.mixer.generation();
         let name =
             free.and_then(|id| librewave_core::InputName::try_new(&format!("Input {id}")).ok());
@@ -496,7 +489,7 @@ impl Shell {
                 .tooltip(tip(if free.is_none() {
                     "All 12 input slots are in use"
                 } else if !enabled {
-                    "Stop audio before adding an input"
+                    "Wait for mixer readiness before adding an input"
                 } else {
                     "Add a software input"
                 })),
@@ -1067,5 +1060,31 @@ mod tests {
             assert!(FaderGain::from_decibels(f32::from(level)).is_ok());
         }
         assert!(mixer_min_width() > 2. * STRIP_WIDTH);
+    }
+}
+
+fn input_layout_available(runtime: librewave_core::MixerRuntimeState) -> bool {
+    matches!(
+        runtime,
+        librewave_core::MixerRuntimeState::Active
+            | librewave_core::MixerRuntimeState::Inactive {
+                reason: librewave_core::MixerInactiveReason::AudioHostEngineNotConnected
+            }
+    )
+}
+
+#[cfg(test)]
+mod input_layout_tests {
+    use super::*;
+    use librewave_core::{MixerInactiveReason, MixerRuntimeState};
+    #[test]
+    fn live_edits_are_available_only_when_ready_or_cleanly_stopped() {
+        assert!(input_layout_available(MixerRuntimeState::Active));
+        assert!(input_layout_available(MixerRuntimeState::Inactive {
+            reason: MixerInactiveReason::AudioHostEngineNotConnected
+        }));
+        for reason in [MixerInactiveReason::Starting, MixerInactiveReason::CleanupPending] {
+            assert!(!input_layout_available(MixerRuntimeState::Inactive { reason }));
+        }
     }
 }

@@ -24,6 +24,7 @@ mod attempt;
 mod clock_bridge;
 #[allow(dead_code, reason = "the production graph does not yet own the clock bridge")]
 mod graph_bridge;
+mod input_layout;
 mod pcm;
 mod pipewire;
 #[cfg_attr(not(test), allow(dead_code))]

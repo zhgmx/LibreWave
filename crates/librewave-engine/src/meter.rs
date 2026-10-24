@@ -95,6 +95,18 @@ impl BlockMeters {
         meters
     }
 
+    /// Remaps and filters source observations on the control thread.
+    pub fn map_sources(&mut self, mut map: impl FnMut(SourceId) -> Option<SourceId>) {
+        let mut count = 0;
+        for index in 0..self.source_count {
+            if let Some(source) = map(self.sources[index].source) {
+                self.sources[count] = SourceMeter { source, ..self.sources[index] };
+                count += 1;
+            }
+        }
+        self.source_count = count;
+    }
+
     #[must_use]
     pub fn sources(&self) -> &[SourceMeter] {
         &self.sources[..self.source_count]

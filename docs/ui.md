@@ -120,8 +120,9 @@ levels in the current window. When linked, either fader sets both levels in one
 daemon transaction. Each mix keeps its own mute state. Unlinking permits
 independent levels again. The link preference lasts until the window closes.
 
-An **Add input** panel follows the last strip. Stop audio before adding or
-removing an input. **Add input** creates the next free software input. The
+An **Add input** panel follows the last strip. Add or remove software inputs
+while the mixer is ready or cleanly stopped. **Add input** creates an input
+with a new stable identity. The
 small close button on a software input removes it. The daemon saves each
 complete layout before it acknowledges the change. Built-in inputs cannot
 be removed. The strips scroll sideways when they do not fit.

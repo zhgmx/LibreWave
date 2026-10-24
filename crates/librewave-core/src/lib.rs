@@ -497,7 +497,7 @@ pub enum Command {
     },
     /// Add a named software input while audio is stopped.
     AddMixerInput { expected_generation: MixerGeneration, name: InputName },
-    /// Remove one software input while audio is stopped.
+    /// Remove one software input.
     RemoveMixerInput { expected_generation: MixerGeneration, source: SourceId },
     /// Rename a software input without changing its endpoint identity.
     RenameMixerInput { expected_generation: MixerGeneration, source: SourceId, name: InputName },

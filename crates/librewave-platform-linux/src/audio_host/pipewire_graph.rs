@@ -1,5 +1,6 @@
 //! Inactive construction and deterministic ownership for the `PipeWire` mixer graph.
 
+use super::input_layout::InputLayout;
 use super::pipewire_filter_ffi::{
     FILTER_STATE_STREAMING, FilterDiagnostics, FilterHandle, GraphProcessor, InputActivation,
     MAX_SOFTWARE_INPUTS, ProcessFault, SoftwareLayout,
@@ -21,6 +22,7 @@ const LOOP_ITERATION: Duration = Duration::from_millis(10);
 const FILTER_NODE_NAME: &str = "librewave.internal.mixer";
 mod application_observer;
 mod applications;
+mod input_edit;
 use application_observer::MetadataBinding;
 use applications::Router;
 
@@ -70,8 +72,16 @@ impl RegistryState {
     }
 
     fn set_input_playback_ports(&mut self, ports: Vec<[u32; 2]>) {
-        self.input_generations = vec![0; ports.len()];
-        self.input_presence = vec![false; ports.len()];
+        self.input_generations.resize(ports.len(), 0);
+        self.input_presence.resize(ports.len(), false);
+        for (index, next) in ports.iter().enumerate() {
+            if self.input_playback_ports.get(index).is_some_and(|old| old != next) {
+                self.input_generations[index] = self.input_generations[index].saturating_add(1);
+                self.input_presence[index] = false;
+                self.input_link_words[index]
+                    .store(self.input_generations[index].saturating_mul(2), Ordering::Release);
+            }
+        }
         self.input_playback_ports = ports;
         self.publish_input_links();
     }
@@ -251,7 +261,11 @@ pub(super) struct InactiveGraph<P: GraphProcessor> {
     links: Vec<pw::link::Link>,
     teardown: TeardownState,
     endpoints: Vec<EndpointPlan>,
-    additional_nodes: Vec<pw::node::Node>,
+    additional_nodes: HashMap<librewave_core::SourceId, pw::node::Node>,
+    additional_links: HashMap<librewave_core::SourceId, Vec<pw::link::Link>>,
+    input_layout: Option<InputLayout>,
+    activation: Arc<InputActivation>,
+    quantum: NonZeroU32,
     _context: pw::context::ContextRc,
 }
 
@@ -260,6 +274,9 @@ pub(super) struct ActiveGraph<P: GraphProcessor> {
     default_metadata: Option<MetadataBinding>,
     settings_metadata: Option<MetadataBinding>,
     inner: InactiveGraph<P>,
+    prepared_inputs: Option<input_edit::PreparedInputs>,
+    #[cfg(test)]
+    fail_input_preparation: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -277,7 +294,27 @@ impl<P: GraphProcessor> InactiveGraph<P> {
         port_mode: AdapterPortMode,
         processor: P,
     ) -> Result<Self, GraphError> {
+        Self::construct_with_layout(remote_name, endpoints, quantum, port_mode, processor, None)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn construct_with_layout(
+        remote_name: &str,
+        endpoints: &[EndpointPlan],
+        quantum: NonZeroU32,
+        port_mode: AdapterPortMode,
+        processor: P,
+        input_layout: Option<InputLayout>,
+    ) -> Result<Self, GraphError> {
         validate_endpoints(endpoints)?;
+        let filter_sources = if input_layout.is_some() {
+            (2..=12).map(librewave_core::SourceId::new).collect()
+        } else {
+            software_sources(endpoints)
+        };
+        let activation = Arc::new(InputActivation::new(
+            input_layout.as_ref().map_or((1 << filter_sources.len()) - 1, InputLayout::active_mask),
+        ));
         pw::init();
         let main_loop = pw::main_loop::MainLoopRc::new(None).map_err(pipewire_error)?;
         let context = pw::context::ContextRc::new(&main_loop, None).map_err(pipewire_error)?;
@@ -312,9 +349,12 @@ impl<P: GraphProcessor> InactiveGraph<P> {
         let microphone = create_adapter(&core, &endpoints[1], false, quantum)?;
         let monitor = create_adapter(&core, &endpoints[2], false, quantum)?;
         let stream = create_adapter(&core, &endpoints[3], false, quantum)?;
-        let mut additional_nodes = Vec::new();
+        let mut additional_nodes = HashMap::new();
         for plan in endpoints.iter().skip(4) {
-            additional_nodes.push(create_adapter(&core, plan, false, quantum)?);
+            let librewave_core::EndpointId::Input { source } = plan.endpoint else {
+                return Err(GraphError::InvalidEndpointContract);
+            };
+            additional_nodes.insert(source, create_adapter(&core, plan, false, quantum)?);
         }
         roundtrip(&main_loop, &core)?;
         roundtrip(&main_loop, &core)?;
@@ -367,14 +407,12 @@ impl<P: GraphProcessor> InactiveGraph<P> {
             processor,
             SoftwareLayout {
                 links: Arc::clone(&input_link_words),
-                sources: software_sources(endpoints),
-                active: Arc::new(InputActivation::new(
-                    (1 << software_sources(endpoints).len()) - 1,
-                )),
+                sources: filter_sources.clone(),
+                active: Arc::clone(&activation),
             },
         )
         .map_err(GraphError::PipeWire)?;
-        for (index, output, name, channel) in filter_ports(&software_sources(endpoints)) {
+        for (index, output, name, channel) in filter_ports(&filter_sources) {
             filter
                 .add_port(
                     index,
@@ -395,7 +433,7 @@ impl<P: GraphProcessor> InactiveGraph<P> {
         if filter.node_id() != Some(filter_id) {
             return Err(GraphError::MissingNode(FILTER_NODE_NAME.to_owned()));
         }
-        validate_filter_ports(&registry_state.borrow(), filter_id, &software_sources(endpoints))?;
+        validate_filter_ports(&registry_state.borrow(), filter_id, &filter_sources)?;
         let ids = [
             system_id,
             registry_state.borrow().node_id(&endpoints[1].node_name)?,
@@ -404,32 +442,40 @@ impl<P: GraphProcessor> InactiveGraph<P> {
             filter_id,
         ];
         let ports = internal_ports(&registry_state.borrow(), ids)?;
-        let mut extra_ports = Vec::new();
+        let mut additional_links = HashMap::new();
         let system_playback_ports = [
             registry_state.borrow().port_id(system_id, "in", "playback_FL")?,
             registry_state.borrow().port_id(system_id, "in", "playback_FR")?,
         ];
-        let mut playback_ports = vec![system_playback_ports];
+        let mut playback_ports = vec![[u32::MAX; 2]; filter_sources.len()];
+        playback_ports[0] = system_playback_ports;
         for plan in endpoints.iter().skip(4) {
             let librewave_core::EndpointId::Input { source } = plan.endpoint else {
                 return Err(GraphError::InvalidEndpointContract);
             };
             let state = registry_state.borrow();
             let id = state.node_id(&plan.node_name)?;
-            playback_ports.push([
-                state.port_id(id, "in", "playback_FL")?,
-                state.port_id(id, "in", "playback_FR")?,
-            ]);
+            let slot =
+                input_layout.as_ref().and_then(|layout| layout.slot(source)).unwrap_or(source);
+            let index = filter_sources
+                .iter()
+                .position(|id| *id == slot)
+                .ok_or(GraphError::InvalidEndpointContract)?;
+            playback_ports[index] =
+                [state.port_id(id, "in", "playback_FL")?, state.port_id(id, "in", "playback_FR")?];
+            let mut input_links = Vec::new();
             for channel in ["FL", "FR"] {
-                extra_ports.push((
+                input_links.push(create_link(
+                    &core,
                     state.port_id(id, "out", &format!("monitor_{channel}"))?,
-                    state.port_id(filter_id, "in", &format!("input_{source}_{channel}"))?,
-                ));
+                    state.port_id(filter_id, "in", &format!("input_{slot}_{channel}"))?,
+                )?);
             }
+            additional_links.insert(source, input_links);
         }
         registry_state.borrow_mut().set_input_playback_ports(playback_ports);
         let mut links = Vec::with_capacity(8);
-        for (output, input) in ports.into_iter().chain(extra_ports) {
+        for (output, input) in ports {
             links.push(create_link(&core, output, input)?);
         }
         roundtrip(&main_loop, &core)?;
@@ -453,6 +499,10 @@ impl<P: GraphProcessor> InactiveGraph<P> {
             teardown: TeardownState::default(),
             endpoints: endpoints.to_vec(),
             additional_nodes,
+            additional_links,
+            input_layout,
+            activation,
+            quantum,
             _context: context,
         })
     }
@@ -515,6 +565,9 @@ impl<P: GraphProcessor> InactiveGraph<P> {
         }
         Ok(ActiveGraph {
             inner: self,
+            prepared_inputs: None,
+            #[cfg(test)]
+            fail_input_preparation: false,
             application_nodes: HashMap::new(),
             default_metadata: None,
             settings_metadata: None,
@@ -541,6 +594,7 @@ impl<P: GraphProcessor> InactiveGraph<P> {
             self.main_loop.loop_().iterate(LOOP_ITERATION);
         }
         self.links.clear();
+        self.additional_links.clear();
         self.additional_nodes.clear();
         if let Err(error) = self.filter.destroy() {
             first_error.get_or_insert(GraphError::PipeWire(error));
@@ -594,6 +648,7 @@ impl<P: GraphProcessor> ActiveGraph<P> {
     }
 
     pub(super) fn teardown(&mut self) -> Result<(), GraphError> {
+        self.prepared_inputs.take();
         let writes = {
             let mut state = self.inner.registry_state.borrow_mut();
             let (streams, _, _) = state.application_view(&self.inner.endpoints);
@@ -616,19 +671,18 @@ fn validate_endpoints(endpoints: &[EndpointPlan]) -> Result<(), GraphError> {
     {
         return Err(GraphError::InvalidEndpointContract);
     }
-    let mut previous = librewave_core::SYSTEM_SOURCE_ID;
+    let mut identities = std::collections::HashSet::new();
     for plan in endpoints.iter().skip(4) {
         let librewave_core::EndpointId::Input { source } = plan.endpoint else {
             return Err(GraphError::InvalidEndpointContract);
         };
-        if source <= previous
-            || source.get() > 12
+        if source.get() < 3
+            || !identities.insert(source)
             || plan.direction != PipeWireEndpointDirection::Input
             || plan.node_name != format!("librewave.input.{source}")
         {
             return Err(GraphError::InvalidEndpointContract);
         }
-        previous = source;
     }
     Ok(())
 }
@@ -1210,6 +1264,70 @@ mod tests {
                 !String::from_utf8_lossy(&nodes.stdout).contains("librewave."),
                 "owned input node survived teardown"
             );
+        }
+
+        #[test]
+        #[ignore = "requires LIBREWAVE_PIPEWIRE_INTEGRATION=1; private software graph only"]
+        fn private_live_input_transactions_preserve_graph_and_cancel_prepared_nodes() {
+            assert_eq!(std::env::var("LIBREWAVE_PIPEWIRE_INTEGRATION").as_deref(), Ok("1"));
+            let server = PrivatePipeWire::start(128, 29);
+            let mut profile = MixerProfile::default();
+            let mut layout = InputLayout::new(&profile);
+            let cycles = Arc::new(AtomicU64::new(0));
+            let mut graph = InactiveGraph::construct_with_layout(
+                REMOTE,
+                &endpoint_plans(DELIBERATE_ENDPOINTS).expect("plans"),
+                NonZeroU32::new(128).expect("quantum"),
+                AdapterPortMode::SelfConfigured,
+                LayoutProbe { sources: 11, cycles: Arc::clone(&cycles) },
+                Some(layout.clone()),
+            )
+            .expect("reserved graph")
+            .activate()
+            .expect("activate");
+            let original = graph.node_ids().expect("original nodes");
+            for _ in 0..12 {
+                let next = profile
+                    .with_input(librewave_core::InputName::try_new("Test").expect("name"))
+                    .expect("add");
+                let updated = layout.updated(&next);
+                let source = next.sources.last().expect("added source").controls.source();
+                let mut endpoints = DELIBERATE_ENDPOINTS.to_vec();
+                endpoints.push(EndpointId::Input { source });
+                let plans = endpoint_plans(&endpoints).expect("plans");
+                graph.fail_input_preparation = true;
+                assert!(graph.prepare_inputs(&plans, &updated).is_err());
+                validate_endpoint_count(&graph.inner.registry_state.borrow(), 4)
+                    .expect("failed preparation removed its endpoint");
+                assert_eq!(graph.node_ids().expect("nodes after failure"), original);
+                graph.prepare_inputs(&plans, &updated).expect("prepare");
+                graph.cancel_inputs().expect("cancel");
+                assert_eq!(graph.node_ids().expect("nodes after cancel"), original);
+                validate_endpoint_count(&graph.inner.registry_state.borrow(), 4)
+                    .expect("canceled endpoint removed");
+                graph.prepare_inputs(&plans, &updated).expect("prepare again");
+                graph.commit_inputs().expect("commit add");
+                run_cycles(&mut graph, 4);
+                assert_eq!(graph.node_ids().expect("nodes after add"), original);
+                validate_endpoint_count(&graph.inner.registry_state.borrow(), 5)
+                    .expect("added endpoint");
+                profile = next.without_input(source).expect("remove");
+                layout = updated.updated(&profile);
+                graph
+                    .prepare_inputs(&endpoint_plans(DELIBERATE_ENDPOINTS).expect("plans"), &layout)
+                    .expect("prepare remove");
+                graph.commit_inputs().expect("commit remove");
+                run_cycles(&mut graph, 4);
+                assert_eq!(graph.node_ids().expect("nodes after remove"), original);
+                assert!(!graph.diagnostics().failed);
+            }
+            graph.teardown().expect("teardown");
+            let nodes = server
+                .command("pw-cli")
+                .args(["-r", REMOTE, "ls", "Node"])
+                .output()
+                .expect("inspect cleanup");
+            assert!(!String::from_utf8_lossy(&nodes.stdout).contains("librewave."));
         }
 
         struct PrivatePipeWire {

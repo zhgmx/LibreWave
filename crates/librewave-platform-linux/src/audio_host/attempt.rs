@@ -50,7 +50,22 @@ fn wave3_capture_rate_estimator(
     Ok(ClockRateEstimatorConfig::new(delta, delta, 2_000_000_000, bounds))
 }
 
+use super::input_layout::InputLayout;
+
 trait GraphRuntime {
+    fn prepare_inputs(
+        &mut self,
+        _plans: &[EndpointPlan],
+        _layout: &InputLayout,
+    ) -> Result<(), LinuxAudioError> {
+        Err(attempt_error("inputs", "graph cannot prepare input edits"))
+    }
+    fn commit_inputs(&mut self) -> Result<(), LinuxAudioError> {
+        Err(attempt_error("inputs", "graph cannot commit input edits"))
+    }
+    fn cancel_inputs(&mut self) -> Result<(), LinuxAudioError> {
+        Ok(())
+    }
     fn reconcile_assignments(&mut self, _rules: &[librewave_core::ApplicationAssignment]) {}
     fn applications(&self) -> librewave_core::ApplicationSnapshot {
         librewave_core::ApplicationSnapshot::Unavailable {
@@ -81,6 +96,7 @@ trait GraphFactory {
         plans: &[EndpointPlan],
         quantum: NonZeroU32,
         processor: ClockBridgeGraphProcessor,
+        layout: &InputLayout,
     ) -> Result<Box<dyn GraphRuntime>, LinuxAudioError>;
 }
 
@@ -94,13 +110,15 @@ impl GraphFactory for RealGraphFactory {
         plans: &[EndpointPlan],
         quantum: NonZeroU32,
         processor: ClockBridgeGraphProcessor,
+        layout: &InputLayout,
     ) -> Result<Box<dyn GraphRuntime>, LinuxAudioError> {
-        let graph = InactiveGraph::construct(
+        let graph = InactiveGraph::construct_with_layout(
             remote,
             plans,
             quantum,
             AdapterPortMode::WirePlumber,
             processor,
+            Some(layout.clone()),
         )
         .map_err(|error| attempt_error("graph construction", error))?
         .activate()
@@ -110,6 +128,19 @@ impl GraphFactory for RealGraphFactory {
 }
 
 impl GraphRuntime for RealGraphRuntime {
+    fn prepare_inputs(
+        &mut self,
+        plans: &[EndpointPlan],
+        layout: &InputLayout,
+    ) -> Result<(), LinuxAudioError> {
+        self.0.prepare_inputs(plans, layout).map_err(|e| attempt_error("prepare inputs", e))
+    }
+    fn commit_inputs(&mut self) -> Result<(), LinuxAudioError> {
+        self.0.commit_inputs().map_err(|e| attempt_error("commit inputs", e))
+    }
+    fn cancel_inputs(&mut self) -> Result<(), LinuxAudioError> {
+        self.0.cancel_inputs().map_err(|e| attempt_error("cancel inputs", e))
+    }
     fn reconcile_assignments(&mut self, rules: &[librewave_core::ApplicationAssignment]) {
         self.0.reconcile_assignments(rules);
     }
@@ -226,11 +257,20 @@ impl AudioAttemptPolicy {
     }
 }
 
+struct PreparedProfile {
+    profile: MixerProfile,
+    layout: InputLayout,
+    controls: librewave_engine::PreparedControls,
+    input_edit: bool,
+}
+
 /// One normal hardware writer and all resources for its audio attempt.
 pub struct ComposedAudioHost {
     pipewire: Box<dyn PipeWireFacade>,
     alsa: Box<dyn AlsaFacade>,
     graph_factory: Box<dyn GraphFactory>,
+    layout: InputLayout,
+    prepared_profile: Option<PreparedProfile>,
     policy: AudioAttemptPolicy,
     profile: MixerProfile,
     selected: Option<SelectedPcmCard>,
@@ -278,7 +318,13 @@ impl ComposedAudioHost {
     }
     /// Takes one actual processed-block observation without waiting.
     pub fn take_meters(&mut self) -> Option<librewave_engine::BlockMeters> {
-        self.meters.as_mut().and_then(MeterReader::try_take)
+        self.meters.as_mut().and_then(MeterReader::try_take).map(|mut meters| {
+            let pairs = self.layout.pairs();
+            meters.map_sources(|slot| {
+                pairs.iter().find(|(_, internal)| *internal == slot).map(|(external, _)| *external)
+            });
+            meters
+        })
     }
 
     /// Constructs an inert host. Only [`crate::audio_lifecycle::AudioLifecycle::start`]
@@ -315,6 +361,8 @@ impl ComposedAudioHost {
             pipewire,
             alsa,
             graph_factory,
+            layout: InputLayout::new(&profile),
+            prepared_profile: None,
             policy,
             profile,
             selected: None,
@@ -485,21 +533,82 @@ impl ComposedAudioHost {
         Ok(())
     }
 
-    /// Stages a persisted software mixer profile for the next graph boundary.
-    ///
+    /// Prepares controls and endpoint resources without publishing the profile.
     /// # Errors
-    ///
-    /// Returns a bounded-handoff or profile error; the caller must retain the
-    /// old live profile when this fails.
-    pub fn stage_profile(&mut self, profile: &MixerProfile) -> Result<(), LinuxAudioError> {
-        self.control
+    /// Returns an error if another update is pending or graph preparation fails.
+    pub fn prepare_profile(&mut self, profile: &MixerProfile) -> Result<(), LinuxAudioError> {
+        if self.prepared_profile.is_some() {
+            return Err(attempt_error("profile", "another update is prepared"));
+        }
+        profile.validate().map_err(|e| attempt_error("profile", e))?;
+        let layout = self.layout.updated(profile);
+        let controls = self
+            .control
             .as_mut()
             .ok_or_else(|| attempt_error("profile", "bridge control is absent"))?
-            .try_stage_profile(profile)
-            .map_err(|error| attempt_error("profile", error))?;
-        self.profile = profile.clone();
+            .try_prepare_profile(&layout.profile(profile))
+            .map_err(|e| attempt_error("profile", e))?;
+        let input_edit = layout != self.layout;
+        if input_edit {
+            let plans = profile_plans(profile)?;
+            self.graph
+                .as_mut()
+                .ok_or_else(|| attempt_error("profile", "graph is absent"))?
+                .prepare_inputs(&plans, &layout)?;
+        }
+        self.prepared_profile =
+            Some(PreparedProfile { profile: profile.clone(), layout, controls, input_edit });
         Ok(())
     }
+
+    /// Cancels prepared resources after a rejected persistence operation.
+    /// # Errors
+    /// Returns an error if the graph cannot confirm resource cleanup.
+    pub fn cancel_profile(&mut self) -> Result<(), LinuxAudioError> {
+        if self.prepared_profile.take().is_some_and(|pending| pending.input_edit) {
+            self.graph
+                .as_mut()
+                .ok_or_else(|| attempt_error("profile", "graph is absent"))?
+                .cancel_inputs()?;
+        }
+        Ok(())
+    }
+
+    /// Publishes a persisted profile and commits its prepared graph resources.
+    /// # Errors
+    /// Returns an error if the graph stops before it acknowledges the edit.
+    pub fn commit_profile(&mut self) -> Result<(), LinuxAudioError> {
+        let pending = self
+            .prepared_profile
+            .take()
+            .ok_or_else(|| attempt_error("profile", "no prepared update"))?;
+        pending.controls.commit();
+        if pending.input_edit {
+            self.graph
+                .as_mut()
+                .ok_or_else(|| attempt_error("profile", "graph is absent"))?
+                .commit_inputs()?;
+        }
+        if pending.input_edit {
+            let _ = self.meters.as_mut().and_then(MeterReader::try_take);
+        }
+        self.layout = pending.layout;
+        self.profile = pending.profile;
+        Ok(())
+    }
+}
+
+fn profile_plans(profile: &MixerProfile) -> Result<Vec<EndpointPlan>, LinuxAudioError> {
+    let mut plans = endpoint_plans(&profile_endpoints(profile))?;
+    for plan in &mut plans {
+        if let EndpointId::Input { source } = plan.endpoint {
+            let input = profile
+                .source(source)
+                .ok_or_else(|| attempt_error("input plan", "source is absent"))?;
+            plan.node_description = format!("LibreWave {}", input.name);
+        }
+    }
+    Ok(plans)
 }
 
 fn profile_endpoints(profile: &MixerProfile) -> Vec<EndpointId> {
@@ -535,8 +644,12 @@ impl AudioHost for ComposedAudioHost {
         admission: crate::audio_lifecycle::AudioAdmission<'_>,
     ) -> Result<CaptureConsumption, Self::Error> {
         let candidate = admission.candidate();
-        let parts = ClockBridgeParts::new(self.policy.physical, &self.profile, self.policy.bridge)
-            .map_err(|error| attempt_error("bridge construction", error))?;
+        let parts = ClockBridgeParts::new(
+            self.policy.physical,
+            &self.layout.profile(&self.profile),
+            self.policy.bridge,
+        )
+        .map_err(|error| attempt_error("bridge construction", error))?;
         let selected = self.alsa.select(candidate)?;
         let pcm = self.alsa.open_capture(candidate, &selected)?;
         let ClockBridgeParts { capture_ingress, graph, playback, mut control, meters } = parts;
@@ -626,16 +739,7 @@ impl AudioHost for ComposedAudioHost {
         _candidate: &UsbDeviceCandidate,
         endpoints: &[EndpointId],
     ) -> Result<(), Self::Error> {
-        let mut plans: Vec<EndpointPlan> = endpoint_plans(&profile_endpoints(&self.profile))?;
-        for plan in &mut plans {
-            if let EndpointId::Input { source } = plan.endpoint {
-                let input = self
-                    .profile
-                    .source(source)
-                    .ok_or_else(|| attempt_error("input plan", "source is absent"))?;
-                plan.node_description = format!("LibreWave {}", input.name);
-            }
-        }
+        let plans = profile_plans(&self.profile)?;
         if endpoints != DELIBERATE_ENDPOINTS {
             return Err(attempt_error("graph publication", "endpoint order or count is invalid"));
         }
@@ -652,6 +756,7 @@ impl AudioHost for ComposedAudioHost {
             &plans,
             self.policy.quantum,
             processor,
+            &self.layout,
         )?);
         self.wait_for_graph_state("monitor mix queue", |state| {
             state == BridgeState::PlaybackFilterDelay
@@ -1039,6 +1144,7 @@ pub(in crate::audio_host) mod tests {
             _plans: &[EndpointPlan],
             _quantum: NonZeroU32,
             _processor: ClockBridgeGraphProcessor,
+            _layout: &InputLayout,
         ) -> Result<Box<dyn GraphRuntime>, LinuxAudioError> {
             record(&self.0, "activate graph");
             Err(attempt_error("graph activation", "injected failure"))
@@ -1082,6 +1188,39 @@ pub(in crate::audio_host) mod tests {
         }
         assert_eq!(host.resource_state().published_endpoints, DELIBERATE_ENDPOINTS);
         assert!(calls.lock().expect("calls").contains(&"start playback"));
+        let next = host
+            .profile
+            .with_input(librewave_core::InputName::try_new("Private test").expect("name"))
+            .expect("new input");
+        host.prepare_profile(&next).expect("prepare input with running workers");
+        host.cancel_profile().expect("cancel with running workers");
+        host.prepare_profile(&next).expect("prepare again");
+        host.commit_profile().expect("commit with running workers");
+        for _ in 0..8 {
+            host.poll().expect("live input progress");
+        }
+        assert_eq!(host.resource_state().published_endpoints.len(), 5);
+        let meters = host.take_meters().expect("processed meters after add");
+        assert_eq!(meters.sources().len(), 3);
+        assert!(meters.source(librewave_core::SourceId::new(3)).is_some());
+        let removed = next.without_input(librewave_core::SourceId::new(3)).expect("remove");
+        host.prepare_profile(&removed).expect("prepare remove");
+        host.commit_profile().expect("commit remove");
+        for _ in 0..8 {
+            host.poll().expect("removed input progress");
+        }
+        let meters = host.take_meters().expect("processed meters after remove");
+        assert_eq!(meters.sources().len(), 2);
+        assert!(meters.source(librewave_core::SourceId::new(3)).is_none());
+        assert_eq!(
+            calls.lock().expect("calls").iter().filter(|call| **call == "start capture").count(),
+            1
+        );
+        assert_eq!(
+            calls.lock().expect("calls").iter().filter(|call| **call == "start playback").count(),
+            1
+        );
+
         lifecycle
             .recover_after_host_restart(&mut host, Some(&candidate()), &mut admit(&calls))
             .expect("rebuild composed attempt after host restart");
