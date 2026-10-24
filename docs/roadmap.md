@@ -4,7 +4,7 @@ This roadmap orders work by safety and dependency. A later milestone does not st
 
 ## Current development status
 
-The development branch implements stable channel IDs, saved application rules,
+The current implementation includes stable channel IDs, saved application rules,
 first-run channel presets, and live input transactions. The GUI exposes channel
 names, order, input management, and saved rules. Physical level controls use
 the current device baseline during reconnect. Desktop installation and login
@@ -16,11 +16,13 @@ repeated live input transactions and preserved graph objects. They use fake
 physical audio workers where stated. These results do not complete the
 physical acceptance gates below.
 
-Before source release, verify the installed build identity, repeated desktop
-launches, device access, real playback signal, daemon and mixer restart,
-application relaunch and multiple streams, and live input edits. Login,
-physical reconnect, sleep, and long playback need separate observed results.
-Keep effects and additional output-device selection deferred.
+A Wave:3 API 5.4 run verified the installed build identity, repeated desktop
+launches, device access, generated playback signal, daemon restart, and
+PipeWire/WirePlumber restart. It also verified application relaunch, multiple
+streams, destination fallback, and live input edits. See the measured scope
+and limits in [Setup](setup.md). Login, physical reconnect, sleep, and extended
+playback remain acceptance gates. Effects and additional output-device
+selection remain deferred.
 
 ## Milestone 0: repository foundation
 

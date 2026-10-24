@@ -252,7 +252,7 @@ Actual login and session recovery remain physical acceptance tests.
 
 ## Controlled live validation
 
-The new lifecycle has isolated regression tests. Native GUI behavior and real-device recovery remain unverified for this code.
+The lifecycle has isolated regression tests. The reference physical run below verifies a bounded recovery scope. Native interaction, login, physical reconnect, and sleep remain separate acceptance gates.
 
 Before a live run, review `setup --plan`, the selected fragment, the current installation manifest, and the saved hardware profile. Record the current configured and effective defaults, fragment bytes and mode, unit state, daemon path, product nodes, and hardware gain without recording a serial. Confirm the exact access grant separately. Existing read-only USB access is sufficient for takeover; the plan includes no hardware control write.
 
@@ -409,3 +409,36 @@ one of the recorded states. This explicit development conversion is not an
 automatic compatibility path in the daemon.
 
 Do not add compatibility readers, deprecated commands, dual writers, or fallback installation paths before the first public release.
+
+
+## Reference physical validation
+
+A Fedora 44 KDE session with Wave:3 API 5.4 tested revision `69d8170` on
+2026-10-24. The installed CLI, daemon, and GUI hashes matched the release
+build. Repeated launches reused the same service instance. The schema
+conversions preserved the original two inputs, routes, output levels, and
+hardware settings. The narrow udev rule and its recorded ACL stayed unchanged.
+
+Three live input add/remove cycles preserved the existing graph node IDs.
+Rename and reorder also ran while playback continued. Saved application
+rules handled relaunch, two concurrent streams, and fallback to System after
+the assigned channel was removed. A quiet generated tone reached the monitor
+mix with no silent 100 ms windows during the measured edit run. This verifies
+signal continuity, not a listener’s perception.
+
+Daemon restart recovered in about 1.2 seconds. PipeWire and WirePlumber restart
+recovered in about 3.1 seconds. Saved assignments and physical control values
+survived both cases. The tests exposed and corrected repeated ALSA status
+sampling and stale disconnected adapter-buffer handling. Active buffer,
+clock-discontinuity, and stalled-device checks remain strict. Initial graph
+publication can still fail an attempt and retry before readiness; the run
+observed that retry without losing the restored desktop fallback.
+
+A two-minute playback run captured 118.44 seconds of monitor output. After
+trimming capture startup and shutdown, every measured 100 ms window contained
+the test signal. Closing and relaunching the GUI during playback retained the
+same daemon process and did not interrupt that signal.
+
+These measurements do not verify physical USB reconnect, sleep, an actual
+logout/login cycle, native keyboard or pointer interactions, or long-duration
+reliability. Production support remains gated on those acceptance tests.
