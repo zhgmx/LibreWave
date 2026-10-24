@@ -1349,30 +1349,14 @@ fn controls_to_restore(
             controls.push(control);
         }
     };
-    if let Some(value) = desired.input_gain {
-        add(Wave3Control::InputGain(value), observed.input_gain != value);
-    }
-    if let Some(value) = desired.microphone_mute {
-        add(Wave3Control::MicrophoneMute(value), observed.input_mute != value);
-    }
+
     if let Some(value) = desired.clipguard {
         add(Wave3Control::Clipguard(value), observed.clipguard_enable != value);
     }
     if let Some(value) = desired.low_cut {
         add(Wave3Control::LowCut(value), observed.lowcut_enable != value);
     }
-    if let Some(value) = desired.headphone_level {
-        add(Wave3Control::HeadphoneLevel(value), observed.headphone_volume != value);
-    }
-    if let Some(value) = desired.headphone_mute {
-        add(Wave3Control::HeadphoneMute(value), observed.headphone_mute != value);
-    }
-    if let Some(value) = desired.monitor_mix {
-        add(Wave3Control::MonitorMix(value), observed.direct_monitor != value);
-    }
-    if let Some(value) = desired.knob_target {
-        add(Wave3Control::KnobTarget(value), observed.volume_select != value);
-    }
+
     if let Some(value) = desired.all_leds_off {
         add(Wave3Control::AllLedsOff(value), observed.all_leds_off != value);
     }

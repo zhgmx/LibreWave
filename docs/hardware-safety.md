@@ -99,3 +99,9 @@ Tests must not run in parallel against one physical device.
 ## Sensitive data
 
 Logs and fixtures must remove USB serial numbers, user names, application titles, and unrelated audio metadata. A fixture should use a stable test identifier that cannot be traced back to one physical microphone.
+
+## Control ownership
+
+The physical device owns microphone gain and mute, headphone level and mute, direct-monitor balance, and knob selection. Admission and reconnect read these controls without restoring saved values. This also preserves adjustments made while the daemon was stopped. An explicit client command still uses generation checks and complete-baseline readback verification.
+
+LibreWave restores only settings previously changed through its interface that are not physical level controls: Clipguard, low cut, LED settings, and gain lock. Pending or ambiguous writes still block new hardware writes until recovery resolves them.

@@ -963,6 +963,33 @@ fn persistence_failure_precedes_usb_and_disconnect_clears_pending() {
 }
 
 #[test]
+fn reconnect_keeps_physical_controls_instead_of_replaying_saved_levels() {
+    let physical = wave3_config();
+    let mut desired = DesiredState::default();
+    for control in [
+        Wave3Control::InputGain(librewave_core::FixedPointValue { raw: 1024, fractional_bits: 8 }),
+        Wave3Control::HeadphoneLevel(librewave_core::FixedPointValue {
+            raw: -5632,
+            fractional_bits: 8,
+        }),
+        Wave3Control::MicrophoneMute(!physical.input_mute),
+        Wave3Control::HeadphoneMute(!physical.headphone_mute),
+        Wave3Control::MonitorMix(librewave_core::FixedPointValue {
+            raw: 12800,
+            fractional_bits: 8,
+        }),
+        Wave3Control::KnobTarget(librewave_core::VolumeSelection::Headphone),
+    ] {
+        desired.stage("1-8.3".to_owned(), control).expect("stage history");
+        desired.promote("1-8.3").expect("save history");
+    }
+    let mut harness = harness(desired, physical.clone(), vec![], vec![]);
+    let device = inspect(&mut harness.daemon);
+    assert_eq!(device.admission.config(), Some(&physical));
+    assert!(harness.calls.borrow().is_empty());
+}
+
+#[test]
 fn reconnect_restores_sparse_controls_and_locks_after_partial_failure() {
     let mut desired = DesiredState::default();
     desired.stage("1-8.3".to_owned(), Wave3Control::Clipguard(true)).expect("stage clipguard");
@@ -1574,7 +1601,7 @@ fn raw_gain_readback_and_reconnect_never_become_unmanaged_desired_state() {
 }
 
 #[test]
-fn restoring_only_knob_mode_preserves_raw_unmanaged_gain() {
+fn inspection_preserves_physical_knob_mode_and_raw_gain() {
     let mut before = wave3_config();
     before.input_gain.raw = 4_726;
     let mut after = before.clone();
@@ -1584,9 +1611,9 @@ fn restoring_only_knob_mode_preserves_raw_unmanaged_gain() {
     desired.stage("1-8.3".to_owned(), control).expect("valid fake-device operation");
     desired.promote("1-8.3").expect("valid fake-device operation");
     let mut test =
-        harness(desired, before, vec![ConnectionOutcome::Applied(after.clone())], vec![]);
-    assert_eq!(inspect(&mut test.daemon).admission.config(), Some(&after));
-    assert_eq!(&*test.calls.borrow(), &[control]);
+        harness(desired, before.clone(), vec![ConnectionOutcome::Applied(after.clone())], vec![]);
+    assert_eq!(inspect(&mut test.daemon).admission.config(), Some(&before));
+    assert!(test.calls.borrow().is_empty());
     assert_eq!(
         test.store_state
             .borrow()
@@ -1777,17 +1804,17 @@ fn microphone_mute_after_observation_changes_only_the_requested_control() {
 #[test]
 fn managed_restoration_requires_explicit_inspection_after_automatic_adoption() {
     let mut desired = DesiredState::default();
-    desired.stage("1-8.3".into(), Wave3Control::MicrophoneMute(true)).expect("stage");
+    desired.stage("1-8.3".into(), Wave3Control::Clipguard(true)).expect("stage");
     desired.promote("1-8.3").expect("promote");
     let mut muted = wave3_config();
-    muted.input_mute = true;
+    muted.clipguard_enable = true;
     let mut h =
         harness(desired, wave3_config(), vec![ConnectionOutcome::Applied(muted.clone())], vec![]);
     h.daemon.observe_controls(Instant::now());
     assert!(h.calls.borrow().is_empty());
     let inspected = inspect(&mut h.daemon);
     assert_eq!(inspected.admission.config(), Some(&muted));
-    assert_eq!(*h.calls.borrow(), vec![Wave3Control::MicrophoneMute(true)]);
+    assert_eq!(*h.calls.borrow(), vec![Wave3Control::Clipguard(true)]);
     let due = h.daemon.control_reads[&DeviceId(1)];
     h.daemon.observe_controls(due);
     assert_eq!(h.calls.borrow().len(), 1, "polling never restores managed values");
