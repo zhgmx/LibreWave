@@ -16,6 +16,18 @@ pub(super) struct MetadataBinding {
 }
 
 impl<P: GraphProcessor> ActiveGraph<P> {
+    pub(in crate::audio_host) fn reconcile_assignments(
+        &mut self,
+        rules: &[librewave_core::ApplicationAssignment],
+    ) {
+        let writes = {
+            let mut state = self.inner.registry_state.borrow_mut();
+            let (streams, _, sinks) = state.application_view(&self.inner.endpoints);
+            state.router.reconcile(rules, &streams, &sinks, Instant::now())
+        };
+        self.write_targets(writes);
+    }
+
     pub(super) fn observe_applications(&mut self) {
         self.application_nodes
             .retain(|id, _| self.inner.registry_state.borrow().objects.contains_key(id));

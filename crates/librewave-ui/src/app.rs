@@ -94,6 +94,7 @@ struct Shell {
     meter_request_epoch: Option<u64>,
     meters_received: Option<std::time::Instant>,
     pending: bool,
+    lifecycle_pending: Option<&'static str>,
     in_flight_fader: Option<MixerEdit>,
     queued_fader: Option<MixerEdit>,
     linked_faders: std::collections::BTreeSet<librewave_core::SourceId>,
@@ -143,6 +144,7 @@ impl Shell {
             meter_request_epoch: None,
             meters_received: None,
             pending: false,
+            lifecycle_pending: None,
             in_flight_fader: None,
             queued_fader: None,
             linked_faders: std::collections::BTreeSet::new(),
@@ -414,7 +416,10 @@ impl Shell {
                 | Command::SetMixerFaders { .. }
                 | Command::SetMixerOutput { .. }
                 | Command::AddMixerInput { .. }
-                | Command::RemoveMixerInput { .. },
+                | Command::RemoveMixerInput { .. }
+                | Command::RenameMixerInput { .. }
+                | Command::MoveMixerInput { .. }
+                | Command::SetApplicationAssignment { .. },
                 Response::MixerChanged { mixer },
             ) => {
                 if let Some(snapshot) = &mut self.snapshot {
@@ -482,6 +487,11 @@ impl Shell {
         if self.pending {
             return;
         }
+        self.lifecycle_pending = Some(match &action {
+            librewavectl::SessionAction::Start { .. } => "Starting mixer…",
+            librewavectl::SessionAction::Stop => "Stopping mixer…",
+            librewavectl::SessionAction::SetupPlan => "Reading setup plan…",
+        });
         self.pending = true;
         self.request_epoch = self.request_epoch.wrapping_add(1);
         self.action_error = None;
@@ -497,6 +507,7 @@ impl Shell {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.pending = false;
+                this.lifecycle_pending = None;
                 if this.apply_lifecycle_result(stopped, starting, result) {
                     this.poll_status(cx);
                 }
@@ -580,6 +591,7 @@ mod tests {
             meter_request_epoch: None,
             meters_received: None,
             pending: false,
+            lifecycle_pending: None,
             in_flight_fader: None,
             queued_fader: None,
             linked_faders: std::collections::BTreeSet::new(),

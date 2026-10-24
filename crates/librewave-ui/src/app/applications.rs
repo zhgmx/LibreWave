@@ -66,6 +66,47 @@ impl Shell {
         changed
     }
 
+    fn saved_assignments(
+        &self,
+        mut view: Div,
+        snapshot: &Snapshot,
+        source: librewave_core::SourceId,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        for (index, rule) in
+            snapshot.mixer.profile.assignments.iter().filter(|r| r.source == source).enumerate()
+        {
+            let name = match rule.application {
+                librewave_core::ApplicationId::Desktop(name)
+                | librewave_core::ApplicationId::Executable(name) => name,
+            };
+            let command = Command::SetApplicationAssignment {
+                expected_generation: snapshot.mixer.generation(),
+                application: rule.application,
+                source: None,
+            };
+            view = view.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(SPACE_MD))
+                    .child(div().flex_1().child(name.as_str().to_owned()))
+                    .child(caption("Saved"))
+                    .child(icon_button(
+                        &format!("forget-app-{index}"),
+                        "x",
+                        "Forget assignment",
+                        Tone::Quiet,
+                        INK,
+                        !self.pending,
+                        cx,
+                        move |this, _, cx| this.send(command, cx),
+                    )),
+            );
+        }
+        view
+    }
+
     pub(super) fn application_panel(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> Div {
         let mut view = div().flex().flex_col().gap(px(SPACE_MD));
         let Some(source) = self.application_input else {
@@ -74,9 +115,10 @@ impl Shell {
         let Some(input) = snapshot.mixer.profile.source(source) else {
             return view;
         };
-        view = view.child(caption(format!("Assign active applications to {}", input.name)));
+        view = view.child(caption(format!("Remember applications for {}", input.name)));
+        view = self.saved_assignments(view, snapshot, source, cx);
         let Some(ApplicationSnapshot::Ready {
-            generation,
+            generation: _,
             applications,
             unidentified_streams,
             movement,
@@ -109,10 +151,10 @@ impl Shell {
             view = view.child(caption("No playback applications detected."));
         }
         for (index, application) in applications.iter().enumerate() {
-            let command = Command::RouteApplication {
-                expected_generation: *generation,
+            let command = Command::SetApplicationAssignment {
+                expected_generation: snapshot.mixer.generation(),
                 application: application.id,
-                source,
+                source: Some(source),
             };
             view = view.child(
                 div()
@@ -127,11 +169,18 @@ impl Shell {
                         if application.move_blocked {
                             "Application forbids movement"
                         } else {
-                            "Assign application"
+                            "Remember assignment"
                         },
                         Tone::Quiet,
                         INK,
-                        allowed && !application.move_blocked && application.source != Some(source),
+                        allowed
+                            && !application.move_blocked
+                            && !snapshot
+                                .mixer
+                                .profile
+                                .assignments
+                                .iter()
+                                .any(|r| r.application == application.id && r.source == source),
                         cx,
                         move |this, _, cx| {
                             this.send(command, cx);

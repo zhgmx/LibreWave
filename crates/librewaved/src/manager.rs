@@ -415,6 +415,10 @@ impl Daemon {
     /// # Errors
     ///
     /// Returns an explicit IPC error when the command cannot be represented or completed.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one dispatch table for the versioned daemon commands"
+    )]
     pub fn handle(
         &mut self,
         command: Command,
@@ -474,6 +478,29 @@ impl Daemon {
                 let next =
                     self.snapshot().mixer.profile.without_input(source).map_err(|error| {
                         IpcError { kind: IpcErrorKind::InvalidRequest, message: error.to_string() }
+                    })?;
+                Ok(Response::MixerChanged { mixer: self.commit_mixer_profile(next, origin)? })
+            }
+            Command::RenameMixerInput { expected_generation, source, name } => {
+                self.check_mixer_generation(expected_generation)?;
+                let next = self.snapshot().mixer.profile.renamed(source, name).map_err(|e| {
+                    IpcError { kind: IpcErrorKind::InvalidRequest, message: e.to_string() }
+                })?;
+                Ok(Response::MixerChanged { mixer: self.commit_mixer_profile(next, origin)? })
+            }
+            Command::MoveMixerInput { expected_generation, source, position } => {
+                self.check_mixer_generation(expected_generation)?;
+                let next =
+                    self.snapshot().mixer.profile.moved(source, usize::from(position)).map_err(
+                        |e| IpcError { kind: IpcErrorKind::InvalidRequest, message: e.to_string() },
+                    )?;
+                Ok(Response::MixerChanged { mixer: self.commit_mixer_profile(next, origin)? })
+            }
+            Command::SetApplicationAssignment { expected_generation, application, source } => {
+                self.check_mixer_generation(expected_generation)?;
+                let next =
+                    self.snapshot().mixer.profile.assigned(application, source).map_err(|e| {
+                        IpcError { kind: IpcErrorKind::InvalidRequest, message: e.to_string() }
                     })?;
                 Ok(Response::MixerChanged { mixer: self.commit_mixer_profile(next, origin)? })
             }

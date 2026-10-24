@@ -70,12 +70,54 @@ pub(super) struct Router {
     pub moving: Option<bool>,
     pub default_ready: bool,
     pub settings_ready: bool,
+    remembered: BTreeMap<ApplicationId, (SourceId, Vec<u64>)>,
     pending: Option<Pending>,
     rollback: Option<Rollback>,
     pub result: Option<ApplicationRoute>,
 }
 
 impl Router {
+    pub fn reconcile(
+        &mut self,
+        rules: &[librewave_core::ApplicationAssignment],
+        streams: &[Stream],
+        sinks: &[(SourceId, u32, u64)],
+        now: Instant,
+    ) -> Vec<Write> {
+        self.remembered.retain(|app, _| {
+            rules.iter().any(|r| r.application == *app)
+                && streams.iter().any(|s| s.identity == *app)
+        });
+        if self.pending.is_some()
+            || self.rollback.is_some()
+            || self.movement() != ApplicationMovement::Allowed
+        {
+            return Vec::new();
+        }
+        for rule in rules {
+            let group: Vec<_> = streams.iter().filter(|s| s.identity == rule.application).collect();
+            if group.is_empty() || group.iter().any(|s| s.ports.is_empty() || s.blocked) {
+                continue;
+            }
+            let mut serials: Vec<_> = group.iter().map(|s| s.serial).collect();
+            serials.sort_unstable();
+            let signature = (rule.source, serials);
+            if self.remembered.get(&rule.application) == Some(&signature) {
+                continue;
+            }
+            let Ok(writes) =
+                self.begin(self.revision, rule.application, rule.source, streams, sinks, now)
+            else {
+                continue;
+            };
+            // Apply once per stream incarnation or changed rule. An external
+            // routing change after this attempt remains under the user's control.
+            self.remembered.insert(rule.application, signature);
+            return writes;
+        }
+        Vec::new()
+    }
+
     pub fn update_target(&mut self, subject: u32, value: Option<MetadataValue>) {
         if let Some(pending) = &mut self.pending {
             for member in
@@ -358,6 +400,38 @@ mod tests {
     fn sinks() -> [(SourceId, u32, u64); 1] {
         [(SourceId::new(3), 42, 100)]
     }
+    #[test]
+    fn remembered_rules_apply_to_new_incarnations_without_fighting_external_moves() {
+        let mut router = router();
+        let mut streams = vec![stream(1)];
+        let rule = librewave_core::ApplicationAssignment {
+            application: streams[0].identity,
+            source: SourceId::new(3),
+        };
+        let now = Instant::now();
+        let writes = router.reconcile(&[rule], &streams, &sinks(), now);
+        assert_eq!(writes.len(), 1);
+        for write in writes {
+            router.update_target(write.subject, write.value);
+        }
+        streams[0].links = vec![(2, 42), (3, 42)];
+        router.advance(&streams, &sinks(), now);
+        assert!(matches!(router.result, Some(ApplicationRoute::Verified { .. })));
+        router.update_target(1, None);
+        streams[0].links.clear();
+        assert!(router.reconcile(&[rule], &streams, &sinks(), now).is_empty());
+        streams.push(stream(2));
+        assert_eq!(router.reconcile(&[rule], &streams, &sinks(), now).len(), 2);
+        router.cancel(&streams, "test reconnect");
+        let mut restarted = super::Router {
+            default_ready: true,
+            settings_ready: true,
+            moving: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(restarted.reconcile(&[rule], &streams, &sinks(), now).len(), 2);
+    }
+
     #[test]
     fn grouped_move_requires_metadata_ack_and_every_audio_link() {
         let mut r = router();

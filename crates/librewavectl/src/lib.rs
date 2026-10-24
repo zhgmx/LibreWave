@@ -61,6 +61,7 @@ pub fn session_action(action: SessionAction) -> io::Result<String> {
 /// # Errors
 ///
 /// Returns an output error when the CLI cannot write its result or diagnostic.
+#[allow(clippy::too_many_lines, reason = "one dispatch table for the CLI grammar")]
 pub fn run<I, O, E>(
     arguments: I,
     socket_path: &Path,
@@ -111,6 +112,26 @@ where
         }
         [mixer, remove, source, generation] if mixer == "mixer" && remove == "remove" => {
             request_input_remove(socket_path, source, generation, output, errors)
+        }
+        [mixer, action, source, generation, value]
+            if mixer == "mixer" && matches!(action.as_str(), "rename" | "move") =>
+        {
+            request_software_control(
+                socket_path,
+                parse_input_edit(action, source, generation, value),
+                output,
+                errors,
+            )
+        }
+        [apps, assign, generation, kind, identity, destination]
+            if apps == "apps" && assign == "assign" =>
+        {
+            request_software_control(
+                socket_path,
+                parse_assignment(generation, kind, identity, destination),
+                output,
+                errors,
+            )
         }
         [mixer, faders, source, generation, monitor, stream]
             if mixer == "mixer" && faders == "faders" =>
@@ -371,18 +392,68 @@ fn request_application_route<O: Write, E: Write>(
     }
 }
 
+fn parse_input_edit(
+    action: &str,
+    source: &str,
+    generation: &str,
+    value: &str,
+) -> Result<librewave_core::Command, String> {
+    let expected_generation =
+        MixerGeneration(generation.parse().map_err(|_| "invalid mixer generation")?);
+    let source = SourceId::new(source.parse().map_err(|_| "invalid source identity")?);
+    match action {
+        "rename" => Ok(librewave_core::Command::RenameMixerInput {
+            expected_generation,
+            source,
+            name: librewave_core::InputName::try_new(value).map_err(|e| e.to_string())?,
+        }),
+        "move" => Ok(librewave_core::Command::MoveMixerInput {
+            expected_generation,
+            source,
+            position: value.parse().map_err(|_| "invalid zero-based position")?,
+        }),
+        _ => Err("unknown input edit".into()),
+    }
+}
+
+fn parse_application_id(
+    kind: &str,
+    identity: &str,
+) -> Result<librewave_core::ApplicationId, String> {
+    let name = librewave_core::InputName::try_new(identity).map_err(|e| e.to_string())?;
+    match kind {
+        "desktop" => Ok(librewave_core::ApplicationId::Desktop(name)),
+        "executable" => Ok(librewave_core::ApplicationId::Executable(name)),
+        _ => Err("identity kind must be desktop or executable".into()),
+    }
+}
+
+fn parse_assignment(
+    generation: &str,
+    kind: &str,
+    identity: &str,
+    destination: &str,
+) -> Result<librewave_core::Command, String> {
+    Ok(librewave_core::Command::SetApplicationAssignment {
+        expected_generation: MixerGeneration(
+            generation.parse().map_err(|_| "invalid mixer generation")?,
+        ),
+        application: parse_application_id(kind, identity)?,
+        source: if destination == "forget" {
+            None
+        } else {
+            Some(SourceId::new(destination.parse().map_err(|_| "invalid source identity")?))
+        },
+    })
+}
+
 fn parse_application_route(
     kind: &str,
     identity: &str,
     source: &str,
     generation: librewave_core::ApplicationGeneration,
 ) -> Result<librewave_core::Command, String> {
-    let name = librewave_core::InputName::try_new(identity).map_err(|e| e.to_string())?;
-    let application = match kind {
-        "desktop" => librewave_core::ApplicationId::Desktop(name),
-        "executable" => librewave_core::ApplicationId::Executable(name),
-        _ => return Err("identity kind must be desktop or executable".into()),
-    };
+    let application = parse_application_id(kind, identity)?;
     Ok(librewave_core::Command::RouteApplication {
         expected_generation: generation,
         application,
@@ -790,6 +861,10 @@ fn write_mixer<W: Write>(output: &mut W, mixer: &MixerSnapshot) -> io::Result<()
         write_mix_route(output, "Monitor", source.controls.monitor())?;
         write_mix_route(output, "Stream", source.controls.stream())?;
     }
+    writeln!(output, "Saved assignments:")?;
+    for rule in &mixer.profile.assignments {
+        writeln!(output, "  {:?} -> {}", rule.application, rule.source)?;
+    }
     writeln!(output, "Software outputs:")?;
     write_mix_route(output, "Monitor", mixer.profile.outputs.route(MixTarget::Monitor))?;
     write_mix_route(output, "Stream", mixer.profile.outputs.route(MixTarget::Stream))?;
@@ -948,6 +1023,9 @@ fn write_help<W: Write>(output: &mut W) -> io::Result<()> {
         output,
         "  apps list       Show active playback application groups and route progress"
     )?;
+    writeln!(output, "  mixer rename <source> <generation> <name>")?;
+    writeln!(output, "  mixer move <source> <generation> <zero-based-position>")?;
+    writeln!(output, "  apps assign <generation> <desktop|executable> <identity> <source|forget>")?;
     writeln!(output, "  apps route <desktop|executable> <identity> <source>")?;
     writeln!(output, "  refresh         Refresh inventory and retained device state")?;
     writeln!(output, "  audio start --experimental  Request experimental audio ownership")?;
@@ -1023,7 +1101,7 @@ mod tests {
         write_status(&mut output, &snapshot()).expect("render status");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "Daemon: connected\nProtocol: 11\nState generation: 4\nDevices: 1\nMixer: generation 0, inactive, 2 sources\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
+            "Daemon: connected\nProtocol: 12\nState generation: 4\nDevices: 1\nMixer: generation 0, inactive, 2 sources\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
         );
     }
 
@@ -1303,7 +1381,7 @@ mod tests {
         write_mixer(&mut output, &mixer).expect("render mixer");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "Mixer generation: 3\nRuntime: inactive (audio host and mixer engine are not connected)\nMeters: unavailable (audio host and mixer engine are not connected)\nMicrophone source: 1\nSources:\n  1  Microphone  role=microphone\n    Monitor: on, -0.5 dB\n    Stream: on, 0 dB\n  2  System  role=system\n    Monitor: on, 0 dB\n    Stream: on, 0 dB\nSoftware outputs:\n    Monitor: on, 0 dB\n    Stream: on, 0 dB\n"
+            "Mixer generation: 3\nRuntime: inactive (audio host and mixer engine are not connected)\nMeters: unavailable (audio host and mixer engine are not connected)\nMicrophone source: 1\nSources:\n  1  Microphone  role=microphone\n    Monitor: on, -0.5 dB\n    Stream: on, 0 dB\n  2  System  role=system\n    Monitor: on, 0 dB\n    Stream: on, 0 dB\nSaved assignments:\nSoftware outputs:\n    Monitor: on, 0 dB\n    Stream: on, 0 dB\n"
         );
         assert_eq!(format_fader(FaderGain::MAX), "12");
         assert_eq!(format_fader(FaderGain::MIN), "-60");

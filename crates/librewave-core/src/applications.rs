@@ -77,3 +77,11 @@ pub enum ApplicationSnapshot {
         route: Option<ApplicationRoute>,
     },
 }
+
+/// A saved application destination. System receives unassigned applications.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplicationAssignment {
+    pub application: ApplicationId,
+    pub source: SourceId,
+}

@@ -12,11 +12,11 @@ For lifecycle controls, install matching CLI and daemon binaries with `librewave
 ## Start the application
 
 1. Run `cargo run -p librewave`.
-2. Select **Start audio** in the title bar.
+2. Select **Start mixer** in the title bar.
 
 The start action launches the installed daemon service and waits for ready audio and selected desktop defaults. If an existing WirePlumber fragment conflicts with ownership, open **Settings**, select **Audio**, and use **Choose file…** to select the exact `.conf` file. The lifecycle backs it up and restores it on failure or stop. See [Setup](setup.md) for the full contract.
 
-While audio runs, the title bar shows **Audio running** and a **Stop** button. **Stop** releases audio and restores desktop ownership. Closing the window keeps audio running. Lifecycle operations run on the background executor. The application prevents overlapping actions and preserves a restoration error while status polling continues. A deliberate stop clears the active snapshot and suppresses the expected disconnect error.
+While audio runs, the title bar shows **Mixer ready** and a **Stop** button. **Stop** releases audio and restores desktop ownership. Closing the window keeps audio running. Lifecycle operations run on the background executor. The application prevents overlapping actions and preserves a restoration error while status polling continues. A deliberate stop clears the active snapshot and suppresses the expected disconnect error.
 
 For device and mixer development without an installation, run `cargo run -p librewaved` separately. The application checks status every 500 ms and removes old status after an unexpected disconnect. It shows a new snapshot when the daemon becomes available again. The daemon reads hardware controls automatically while it runs. Opening the window requests its latest snapshot. `LIBREWAVE_SOCKET` selects a development IPC socket; installed service lifecycle controls use the normal session socket.
 
@@ -40,7 +40,7 @@ experimental or read-only state. Icon-only buttons show their name when the
 pointer rests on them. Commands, paths, and command output use Geist Mono.
 
 When the daemon is unavailable, the stage dims the illustration and the mixer
-area shows one notice with **Start audio** and **Open Settings**. The main
+area shows one notice with **Start mixer** and **Open Settings**. The main
 view does not expose socket diagnostics or invent device or channel state.
 Live peak meters appear on input strips and output rows while audio runs.
 The mixer has linked channel levels, application assignment, and software
@@ -145,7 +145,7 @@ identifies applications, not individual browser tabs.
 LibreWave sends the observed input serial as `target.object`. WirePlumber
 resolves it and stores the stable input name when target restoration is enabled.
 A private test confirmed restoration after stream recreation, input recreation,
-and a WirePlumber restart. LibreWave keeps no assignment cache and does not replay assignments
+and a WirePlumber restart. LibreWave saves explicit assignments in the mixer profile and applies them to new stream incarnations. It does not repeatedly override later external routing changes
 after restart. A stream's first audio can reach its previous destination before
 movement completes.
 
@@ -179,7 +179,7 @@ open.
 Settings has three pages:
 
 - **Audio** shows whether audio runs and why it is stopped. Its **Engine**
-  section has **Start audio** and **Stop and restore**. Its **Troubleshooting**
+  section has **Start mixer** and **Stop and restore**. Its **Troubleshooting**
   section has the WirePlumber conflict file.
 - **Setup** has **Show plan**, which lists the paths and the access rule that
   setup installs without changes. Its **Terminal commands** section names the
@@ -255,3 +255,13 @@ default workspace build.
 
 Geist fonts and Phosphor icons are bundled with their required license notices
 under `crates/librewave-ui/assets/`. No vendor application artwork is bundled.
+
+## Saved channels and assignments
+
+New profiles contain Microphone, System, Game, Chat, and Music. Microphone monitoring starts muted to avoid duplicate direct monitoring. Existing profiles keep their channels and levels. Channel IDs do not change when a channel is renamed or reordered. A removed ID is not reused.
+
+Use the application panel to remember an active application or forget a saved assignment, including one whose application is closed. Deleting its channel changes the saved destination to System. Forgetting a rule stops future enforcement; it does not move a current stream. WirePlumber may retain its last stream target.
+
+The CLI supports `mixer rename <source> <generation> <name>`, `mixer move <source> <generation> <zero-based-position>`, and `apps assign <generation> <desktop|executable> <identity> <source|forget>`. `mixer show` lists saved rules. Assignment success confirms that the rule was saved. The application panel reports routing progress separately.
+
+**Mixer ready** means that the daemon has admitted the device and activated its graph. It does not assert that a playback application is streaming or that a signal is audible. The device stage reports device access. The meters report recent signal levels. Lifecycle progress names the start or stop operation; a fader edit does not replace the mixer state label.

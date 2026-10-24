@@ -499,6 +499,16 @@ pub enum Command {
     AddMixerInput { expected_generation: MixerGeneration, name: InputName },
     /// Remove one software input while audio is stopped.
     RemoveMixerInput { expected_generation: MixerGeneration, source: SourceId },
+    /// Rename a software input without changing its endpoint identity.
+    RenameMixerInput { expected_generation: MixerGeneration, source: SourceId, name: InputName },
+    /// Move an input to a zero-based display position.
+    MoveMixerInput { expected_generation: MixerGeneration, source: SourceId, position: u16 },
+    /// Save or clear a remembered application destination.
+    SetApplicationAssignment {
+        expected_generation: MixerGeneration,
+        application: ApplicationId,
+        source: Option<SourceId>,
+    },
     /// Enable the experimental audio owner in this daemon session.
     StartExperimentalAudio,
     /// Cancel audio recovery and release the daemon-owned audio resources.

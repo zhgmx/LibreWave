@@ -145,7 +145,7 @@ impl Shell {
                     .child(labeled_icon_button(
                         "offline-start",
                         "play",
-                        "Start audio",
+                        "Start mixer",
                         Tone::Primary,
                         enabled,
                         cx,
@@ -222,10 +222,13 @@ impl Shell {
                 .child(caption(text))
         };
         let control = div().h(px(32.)).flex().items_center().gap(px(SPACE_XS));
-        match (self.pending, self.snapshot.as_ref().map(|snapshot| snapshot.mixer.runtime)) {
-            (true, _) => control.child(state(WARNING, "Working…")),
-            (false, Some(MixerRuntimeState::Active)) => {
-                control.child(state(MONITOR, "Audio running")).child(labeled_icon_button(
+        match (
+            self.lifecycle_pending,
+            self.snapshot.as_ref().map(|snapshot| snapshot.mixer.runtime),
+        ) {
+            (Some(label), _) => control.child(state(WARNING, label)),
+            (None, Some(MixerRuntimeState::Active)) => {
+                control.child(state(MONITOR, "Mixer ready")).child(labeled_icon_button(
                     "titlebar-stop",
                     "stop",
                     "Stop",
@@ -235,15 +238,20 @@ impl Shell {
                     |this, _, cx| this.run_lifecycle(librewavectl::SessionAction::Stop, cx),
                 ))
             }
-            (false, _) => control.child(labeled_icon_button(
-                "titlebar-start",
-                "play",
-                "Start audio",
-                Tone::Primary,
-                enabled,
-                cx,
-                Shell::start_audio,
-            )),
+            (None, runtime) => control
+                .child(state(
+                    FAINT,
+                    if runtime.is_some() { "Daemon connected" } else { "Daemon disconnected" },
+                ))
+                .child(labeled_icon_button(
+                    "titlebar-start",
+                    "play",
+                    "Start mixer",
+                    Tone::Primary,
+                    enabled,
+                    cx,
+                    Shell::start_audio,
+                )),
         }
     }
 

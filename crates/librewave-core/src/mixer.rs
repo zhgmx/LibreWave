@@ -301,6 +301,8 @@ pub struct MixerSourceSnapshot {
 #[serde(deny_unknown_fields)]
 pub struct MixerProfile {
     pub generation: MixerGeneration,
+    pub next_source_id: u16,
+    pub assignments: Vec<crate::ApplicationAssignment>,
     pub microphone_source: SourceId,
     pub sources: Vec<MixerSourceSnapshot>,
     pub outputs: OutputControls,
@@ -315,6 +317,8 @@ impl<'de> Deserialize<'de> for MixerProfile {
         #[serde(deny_unknown_fields)]
         struct MixerProfileWire {
             generation: MixerGeneration,
+            next_source_id: u16,
+            assignments: Vec<crate::ApplicationAssignment>,
             microphone_source: SourceId,
             sources: Vec<MixerSourceSnapshot>,
             outputs: OutputControls,
@@ -323,6 +327,8 @@ impl<'de> Deserialize<'de> for MixerProfile {
         let wire = MixerProfileWire::deserialize(deserializer)?;
         let profile = Self {
             generation: wire.generation,
+            next_source_id: wire.next_source_id,
+            assignments: wire.assignments,
             microphone_source: wire.microphone_source,
             sources: wire.sources,
             outputs: wire.outputs,
@@ -337,6 +343,8 @@ impl Default for MixerProfile {
         let unity = MixRoute::new(true, FaderGain::UNITY);
         Self {
             generation: MixerGeneration(0),
+            next_source_id: 3,
+            assignments: Vec::new(),
             microphone_source: MICROPHONE_SOURCE_ID,
             outputs: OutputControls::default(),
             sources: PRODUCT_SOURCES
@@ -402,38 +410,56 @@ impl MixerProfile {
         if !(PRODUCT_SOURCES.len()..=crate::MAX_MIXER_SOURCES).contains(&self.sources.len()) {
             return Err(MixerProfileError::SourceCount { actual: self.sources.len() });
         }
-        for (source, expected) in self.sources.iter().zip(PRODUCT_SOURCES) {
+        for expected in PRODUCT_SOURCES {
+            let source =
+                self.source(expected.id).ok_or(MixerProfileError::UnknownSource(expected.id))?;
             validate_source(source, expected)?;
         }
-        for (index, source) in self.sources.iter().enumerate().skip(PRODUCT_SOURCES.len()) {
+        if self.next_source_id < 3 {
+            return Err(MixerProfileError::SourceIdExhausted);
+        }
+        for (index, source) in self.sources.iter().enumerate() {
             let id = source.controls.source();
-            if source.role != SourceRole::Software
-                || !(3..=12).contains(&id.get())
-                || id <= self.sources[index - 1].controls.source()
-                || crate::InputName::try_new(&source.name).is_err()
+            if id.get() == 0
+                || id.get() >= self.next_source_id
+                || self.sources[..index].iter().any(|prior| prior.controls.source() == id)
+                || (id.get() >= 3
+                    && (source.role != SourceRole::Software
+                        || crate::InputName::try_new(&source.name).is_err()))
             {
                 return Err(MixerProfileError::SourceIdentity { id });
             }
         }
+        if self.assignments.len() > 128
+            || self.assignments.iter().enumerate().any(|(index, rule)| {
+                self.source(rule.source).is_none_or(|source| source.role == SourceRole::Microphone)
+                    || self.assignments[..index]
+                        .iter()
+                        .any(|prior| prior.application == rule.application)
+            })
+        {
+            return Err(MixerProfileError::InvalidAssignment);
+        }
         Ok(())
     }
 
-    /// Adds a named software input at the first free bounded identity.
+    /// Adds a named software input with a new identity.
     /// # Errors
     /// Returns an error when capacity or the profile generation is exhausted.
     pub fn with_input(&self, name: crate::InputName) -> Result<Self, MixerProfileError> {
-        let id = (3..=12)
-            .map(SourceId::new)
-            .find(|id| self.source(*id).is_none())
-            .ok_or(MixerProfileError::SourceCount { actual: self.sources.len() + 1 })?;
+        if self.sources.len() == crate::MAX_MIXER_SOURCES {
+            return Err(MixerProfileError::SourceCount { actual: self.sources.len() + 1 });
+        }
+        let id = SourceId::new(self.next_source_id);
         let mut next = self.clone();
+        next.next_source_id =
+            self.next_source_id.checked_add(1).ok_or(MixerProfileError::SourceIdExhausted)?;
         let unity = MixRoute::new(true, FaderGain::UNITY);
         next.sources.push(MixerSourceSnapshot {
             role: SourceRole::Software,
             name: name.as_str().to_owned(),
             controls: SourceControls::new(id, unity, unity),
         });
-        next.sources.sort_by_key(|source| source.controls.source());
         next.advance_generation()?;
         Ok(next)
     }
@@ -447,6 +473,85 @@ impl MixerProfile {
         }
         let mut next = self.clone();
         next.sources.retain(|source| source.controls.source() != id);
+        for rule in &mut next.assignments {
+            if rule.source == id {
+                rule.source = SYSTEM_SOURCE_ID;
+            }
+        }
+        next.advance_generation()?;
+        Ok(next)
+    }
+
+    /// Creates a first-run profile. Existing saved profiles are never replaced.
+    /// # Panics
+    /// Panics if a built-in preset name or input count is invalid.
+    #[must_use]
+    pub fn first_run() -> Self {
+        let mut profile = Self::default();
+        for name in ["Game", "Chat", "Music"] {
+            profile = profile
+                .with_input(crate::InputName::try_new(name).expect("preset name"))
+                .expect("preset capacity");
+        }
+        profile.sources[0].controls = profile.sources[0]
+            .controls
+            .with_route(MixTarget::Monitor, MixRoute::new(false, FaderGain::UNITY));
+        profile.generation = MixerGeneration(0);
+        profile
+    }
+
+    /// Renames one software input without changing its identity.
+    /// # Errors
+    /// Returns an error for a missing software input or exhausted generation.
+    pub fn renamed(&self, id: SourceId, name: crate::InputName) -> Result<Self, MixerProfileError> {
+        let mut next = self.clone();
+        let source = next
+            .sources
+            .iter_mut()
+            .find(|s| s.controls.source() == id && s.role == SourceRole::Software)
+            .ok_or(MixerProfileError::UnknownSource(id))?;
+        name.as_str().clone_into(&mut source.name);
+        next.advance_generation()?;
+        Ok(next)
+    }
+
+    /// Changes display order without changing input identities or routes.
+    /// # Errors
+    /// Returns an error for an invalid position, absent input, or exhausted generation.
+    pub fn moved(&self, id: SourceId, position: usize) -> Result<Self, MixerProfileError> {
+        if position >= self.sources.len() {
+            return Err(MixerProfileError::InvalidOrder);
+        }
+        let mut next = self.clone();
+        let index = next
+            .sources
+            .iter()
+            .position(|s| s.controls.source() == id)
+            .ok_or(MixerProfileError::UnknownSource(id))?;
+        let source = next.sources.remove(index);
+        next.sources.insert(position, source);
+        next.advance_generation()?;
+        Ok(next)
+    }
+
+    /// Saves or removes one application assignment.
+    /// # Errors
+    /// Returns an error for an invalid destination, full rule set, or exhausted generation.
+    pub fn assigned(
+        &self,
+        application: crate::ApplicationId,
+        source: Option<SourceId>,
+    ) -> Result<Self, MixerProfileError> {
+        if source.is_some_and(|id| self.source(id).is_none_or(|s| s.role == SourceRole::Microphone))
+        {
+            return Err(MixerProfileError::InvalidAssignment);
+        }
+        let mut next = self.clone();
+        next.assignments.retain(|rule| rule.application != application);
+        if let Some(source) = source {
+            next.assignments.push(crate::ApplicationAssignment { application, source });
+        }
+        next.validate()?;
         next.advance_generation()?;
         Ok(next)
     }
@@ -506,6 +611,9 @@ fn validate_source(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MixerProfileError {
     MicrophoneSource,
+    SourceIdExhausted,
+    InvalidOrder,
+    InvalidAssignment,
     SourceCount { actual: usize },
     SourceIdentity { id: SourceId },
     UnknownSource(SourceId),
@@ -515,6 +623,11 @@ pub enum MixerProfileError {
 impl fmt::Display for MixerProfileError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::SourceIdExhausted => formatter.write_str("input identity space is exhausted"),
+            Self::InvalidOrder => formatter.write_str("input position is outside the layout"),
+            Self::InvalidAssignment => {
+                formatter.write_str("application assignment is invalid or exceeds the limit")
+            }
             Self::MicrophoneSource => formatter.write_str("the microphone source must be source 1"),
             Self::SourceCount { actual } => {
                 write!(
@@ -685,7 +798,7 @@ mod tests {
         let mut swapped =
             serde_json::to_value(MixerProfile::default()).expect("serialize current profile");
         swapped["sources"].as_array_mut().expect("sources").swap(0, 1);
-        assert!(serde_json::from_value::<MixerProfile>(swapped).is_err());
+        assert!(serde_json::from_value::<MixerProfile>(swapped).is_ok());
 
         let mut wrong_name =
             serde_json::to_value(MixerProfile::default()).expect("serialize current profile");
@@ -714,7 +827,41 @@ mod input_tests {
     use crate::InputName;
 
     #[test]
-    fn software_inputs_are_bounded_sorted_and_round_trip_as_one_profile() {
+    fn assignments_follow_identity_and_deleted_inputs_fall_back_to_system() {
+        let profile = MixerProfile::first_run();
+        let app = crate::ApplicationId::Desktop(
+            InputName::try_new("example.player").expect("valid fixture"),
+        );
+        let source = SourceId::new(3);
+        let assigned = profile.assigned(app, Some(source)).expect("valid fixture");
+        let edited = assigned
+            .renamed(source, InputName::try_new("Games").expect("valid fixture"))
+            .expect("valid fixture")
+            .moved(source, 0)
+            .expect("valid fixture");
+        assert_eq!(edited.assignments, assigned.assignments);
+        assert_eq!(edited.sources[0].controls.source(), source);
+        edited.validate().expect("valid fixture");
+        assert!(edited.assigned(app, Some(MICROPHONE_SOURCE_ID)).is_err());
+        let removed = edited.without_input(source).expect("valid fixture");
+        assert_eq!(removed.assignments[0].source, SYSTEM_SOURCE_ID);
+        assert!(removed.assigned(app, None).expect("valid fixture").assignments.is_empty());
+        assert!(
+            !profile
+                .source(MICROPHONE_SOURCE_ID)
+                .expect("valid fixture")
+                .controls
+                .monitor()
+                .enabled()
+        );
+        assert_eq!(
+            profile.sources.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["Microphone", "System", "Game", "Chat", "Music"]
+        );
+    }
+
+    #[test]
+    fn software_inputs_are_bounded_and_never_reuse_deleted_identities() {
         let mut profile = MixerProfile::default();
         for number in 3..=12 {
             profile = profile
@@ -736,10 +883,11 @@ mod input_tests {
         assert!(profile.without_input(SYSTEM_SOURCE_ID).is_err());
         let removed = profile.without_input(SourceId::new(5)).expect("remove");
         assert!(removed.source(SourceId::new(5)).is_none());
-        let restored =
-            removed.with_input(InputName::try_new("New input").expect("name")).expect("reuse slot");
-        assert_eq!(restored.source(SourceId::new(5)).expect("reused source").name, "New input");
-        restored.validate().expect("sorted reused slot");
+        let restored = removed
+            .with_input(InputName::try_new("New input").expect("name"))
+            .expect("new identity");
+        assert_eq!(restored.source(SourceId::new(13)).expect("new source").name, "New input");
+        restored.validate().expect("valid new identity");
     }
 }
 

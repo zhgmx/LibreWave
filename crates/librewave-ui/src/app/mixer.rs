@@ -285,10 +285,10 @@ impl Shell {
                     icon_button(
                         &format!("applications-{id}"),
                         "system",
-                        "Assign an active application",
+                        "Manage application assignments",
                         Tone::Quiet,
                         FAINT,
-                        !self.pending && self.audio_active(),
+                        !self.pending,
                         cx,
                         move |this, _, cx| {
                             this.application_input =

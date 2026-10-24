@@ -87,7 +87,7 @@ pub fn endpoint_plans(endpoints: &[EndpointId]) -> Result<Vec<EndpointPlan>, Lin
     let mut plans = Vec::with_capacity(endpoints.len());
     for endpoint in endpoints {
         if !DELIBERATE_ENDPOINTS.contains(endpoint)
-            && !matches!(endpoint, EndpointId::Input { source } if (3..=12).contains(&source.get()))
+            && !matches!(endpoint, EndpointId::Input { source } if source.get() >= 3)
         {
             return Err(LinuxAudioError::EndpointNotAllowed(*endpoint));
         }

@@ -51,6 +51,7 @@ fn wave3_capture_rate_estimator(
 }
 
 trait GraphRuntime {
+    fn reconcile_assignments(&mut self, _rules: &[librewave_core::ApplicationAssignment]) {}
     fn applications(&self) -> librewave_core::ApplicationSnapshot {
         librewave_core::ApplicationSnapshot::Unavailable {
             reason: librewave_core::MixerInactiveReason::AudioHostEngineNotConnected,
@@ -109,6 +110,9 @@ impl GraphFactory for RealGraphFactory {
 }
 
 impl GraphRuntime for RealGraphRuntime {
+    fn reconcile_assignments(&mut self, rules: &[librewave_core::ApplicationAssignment]) {
+        self.0.reconcile_assignments(rules);
+    }
     fn applications(&self) -> librewave_core::ApplicationSnapshot {
         self.0.applications()
     }
@@ -441,6 +445,9 @@ impl ComposedAudioHost {
     /// Returns the first stopped worker, callback fault, bridge fault, or
     /// progress timeout.
     pub fn poll(&mut self) -> Result<(), LinuxAudioError> {
+        if let Some(graph) = self.graph.as_mut() {
+            graph.reconcile_assignments(&self.profile.assignments);
+        }
         let state = self.graph_step("progress")?;
         if state != BridgeState::Active {
             return Err(attempt_error("progress", format!("attempt is in {state:?}")));
@@ -503,7 +510,7 @@ fn profile_endpoints(profile: &MixerProfile) -> Vec<EndpointId> {
             profile
                 .sources
                 .iter()
-                .skip(2)
+                .filter(|source| source.role == librewave_core::SourceRole::Software)
                 .map(|source| EndpointId::Input { source: source.controls.source() }),
         )
         .collect()

@@ -854,7 +854,12 @@ fn diagnose_running(manifest: &Manifest, host: &mut impl RuntimeHost) -> io::Res
             return Err(io::Error::other(format!("expected one product node: {name}")));
         }
     }
-    for source in mixer.profile.sources.iter().skip(2) {
+    for source in mixer
+        .profile
+        .sources
+        .iter()
+        .filter(|source| source.role == librewave_core::SourceRole::Software)
+    {
         let name = format!("librewave.input.{}", source.controls.source());
         if names.iter().filter(|observed| **observed == name).count() != 1 {
             return Err(io::Error::other(format!("expected one product node: {name}")));

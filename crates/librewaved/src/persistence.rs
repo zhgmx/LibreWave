@@ -12,7 +12,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 const DESIRED_STATE_SCHEMA: u16 = 1;
-const MIXER_STATE_SCHEMA: u16 = 2;
+const MIXER_STATE_SCHEMA: u16 = 3;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -226,6 +226,8 @@ impl DesiredStateStore for FileDesiredStateStore {
 struct MixerStateFile {
     schema: u16,
     generation: MixerGeneration,
+    next_source_id: u16,
+    assignments: Vec<librewave_core::ApplicationAssignment>,
     microphone_source: SourceId,
     sources: Vec<MixerSourceSnapshot>,
     outputs: librewave_core::OutputControls,
@@ -236,6 +238,8 @@ impl From<MixerProfile> for MixerStateFile {
         Self {
             schema: MIXER_STATE_SCHEMA,
             generation: profile.generation,
+            next_source_id: profile.next_source_id,
+            assignments: profile.assignments,
             microphone_source: profile.microphone_source,
             sources: profile.sources,
             outputs: profile.outputs,
@@ -247,6 +251,8 @@ impl From<MixerStateFile> for MixerProfile {
     fn from(file: MixerStateFile) -> Self {
         Self {
             generation: file.generation,
+            next_source_id: file.next_source_id,
+            assignments: file.assignments,
             microphone_source: file.microphone_source,
             sources: file.sources,
             outputs: file.outputs,
@@ -284,7 +290,7 @@ impl MixerStateStore for FileMixerStateStore {
 
 fn decode_mixer_state(value: Option<serde_json::Value>) -> Result<MixerProfile, PersistenceError> {
     let Some(value): Option<serde_json::Value> = value else {
-        return Ok(MixerProfile::default());
+        return Ok(MixerProfile::first_run());
     };
     let schema = value
         .get("schema")
@@ -608,6 +614,15 @@ mod tests {
     }
 
     #[test]
+    fn first_run_presets_do_not_replace_an_existing_profile() {
+        assert_eq!(decode_mixer_state(None).expect("valid fixture"), MixerProfile::first_run());
+        let existing = MixerProfile::default();
+        let saved =
+            serde_json::to_value(MixerStateFile::from(existing.clone())).expect("valid fixture");
+        assert_eq!(decode_mixer_state(Some(saved)).expect("valid fixture"), existing);
+    }
+
+    #[test]
     fn mixer_store_uses_the_exact_direct_schema_and_rejects_wrong_identity() {
         let nonce =
             SystemTime::now().duration_since(UNIX_EPOCH).expect("clock before epoch").as_nanos();
@@ -622,7 +637,9 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "schema": 2,
+                "schema": 3,
+                "next_source_id": 3,
+                "assignments": [],
                 "outputs": {"monitor":{"enabled":true,"fader":{"half_decibel_steps":0}},"stream":{"enabled":true,"fader":{"half_decibel_steps":0}}},
                 "generation": 0,
                 "microphone_source": 1,
@@ -663,21 +680,21 @@ mod tests {
         assert_eq!(store.load().expect("load mixer state"), profile);
 
         let mut swapped = value;
-        swapped["sources"].as_array_mut().expect("sources array").swap(0, 1);
+        swapped["sources"][0]["controls"]["source"] = json!(2);
         fs::write(&path, serde_json::to_vec(&swapped).expect("encode swapped sources"))
             .expect("write swapped sources");
         assert!(matches!(store.load(), Err(PersistenceError::InvalidState(_))));
 
         fs::write(
             &path,
-            br#"{"schema":2,"generation":0,"microphone_source":1,"sources":[],"outputs":{"monitor":{"enabled":true,"fader":{"half_decibel_steps":0}},"stream":{"enabled":true,"fader":{"half_decibel_steps":0}}},"old":true}"#,
+            br#"{"schema":3,"generation":0,"microphone_source":1,"sources":[],"outputs":{"monitor":{"enabled":true,"fader":{"half_decibel_steps":0}},"stream":{"enabled":true,"fader":{"half_decibel_steps":0}}},"old":true}"#,
         )
         .expect("write unknown field");
         assert!(matches!(store.load(), Err(PersistenceError::Invalid(_))));
 
         fs::write(
             &path,
-            br#"{"schema":2,"profile":{"generation":0,"microphone_source":1,"sources":[]}}"#,
+            br#"{"schema":3,"profile":{"generation":0,"microphone_source":1,"sources":[]}}"#,
         )
         .expect("write obsolete nested profile");
         assert!(matches!(store.load(), Err(PersistenceError::Invalid(_))));
