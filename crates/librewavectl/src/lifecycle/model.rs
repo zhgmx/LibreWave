@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub const MANIFEST_SCHEMA: u32 = 4;
+pub const MANIFEST_SCHEMA: u32 = 5;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -20,6 +20,7 @@ pub struct BuildIdentity {
     pub target: String,
     pub cli_sha256: String,
     pub daemon_sha256: String,
+    pub gui_sha256: Option<String>,
     pub installed_at_unix_seconds: u64,
 }
 
@@ -84,6 +85,7 @@ pub struct Manifest {
     pub profiles_path: PathBuf,
     pub audio_ownership: AudioOwnership,
     pub device_access: DeviceAccess,
+    pub desktop: Option<DesktopConfig>,
     pub owned_paths: Vec<OwnedPath>,
     pub usb_access: Vec<librewave_platform_linux::usb_access::AccessSnapshot>,
 }
@@ -122,4 +124,11 @@ pub struct Journal {
     pub rollback_paths: Vec<Snapshot>,
     pub udev_refresh_pending: bool,
     pub purge_profiles: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesktopConfig {
+    pub autostart: bool,
+    pub suspend_config: Option<PathBuf>,
 }

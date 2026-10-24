@@ -27,6 +27,9 @@ pub struct UnitState {
 
 pub trait UnitInspector {
     fn inspect(&self, unit_name: &str) -> io::Result<UnitState>;
+    fn reload(&self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,58 +42,81 @@ pub struct DaemonProcess {
 
 pub trait ProcessInspector {
     fn daemons(&self) -> io::Result<Vec<DaemonProcess>>;
+    fn desktops(&self) -> io::Result<Vec<DaemonProcess>> {
+        Ok(Vec::new())
+    }
 }
 
 pub struct ProductionProcessInspector;
 
 impl ProcessInspector for ProductionProcessInspector {
     fn daemons(&self) -> io::Result<Vec<DaemonProcess>> {
-        let mut processes = Vec::new();
-        for entry in fs::read_dir("/proc")? {
-            let entry = entry?;
-            if !entry.file_name().as_encoded_bytes().iter().all(u8::is_ascii_digit) {
-                continue;
-            }
-            let observed = match fs::read_link(entry.path().join("exe")) {
-                Ok(path) => path,
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
-                    ) =>
-                {
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            let Some((executable, deleted)) = parse_daemon_executable(&observed) else {
-                continue;
-            };
-            let sha256 =
-                (!deleted).then(|| crate::lifecycle::hash::file(&executable).ok()).flatten();
-            processes.push(DaemonProcess {
-                pid: entry.file_name().to_string_lossy().into_owned(),
-                executable,
-                deleted,
-                sha256,
-            });
-        }
-        Ok(processes)
+        named_processes("librewaved")
+    }
+    fn desktops(&self) -> io::Result<Vec<DaemonProcess>> {
+        named_processes("librewave")
     }
 }
+fn named_processes(name: &str) -> io::Result<Vec<DaemonProcess>> {
+    let mut processes = Vec::new();
+    for entry in fs::read_dir("/proc")? {
+        let entry = entry?;
+        if !entry.file_name().as_encoded_bytes().iter().all(u8::is_ascii_digit) {
+            continue;
+        }
+        let observed = match fs::read_link(entry.path().join("exe")) {
+            Ok(path) => path,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let Some((executable, deleted)) = parse_named_executable(&observed, name) else {
+            continue;
+        };
+        let sha256 = (!deleted).then(|| crate::lifecycle::hash::file(&executable).ok()).flatten();
+        processes.push(DaemonProcess {
+            pid: entry.file_name().to_string_lossy().into_owned(),
+            executable,
+            deleted,
+            sha256,
+        });
+    }
+    Ok(processes)
+}
 
+#[cfg(test)]
 fn parse_daemon_executable(observed: &Path) -> Option<(PathBuf, bool)> {
+    parse_named_executable(observed, "librewaved")
+}
+fn parse_named_executable(observed: &Path, name: &str) -> Option<(PathBuf, bool)> {
     let value = observed.to_string_lossy();
     let (executable, deleted) = value
         .strip_suffix(" (deleted)")
         .map_or_else(|| (observed.to_path_buf(), false), |path| (PathBuf::from(path), true));
-    (executable.file_name().and_then(|name| name.to_str()) == Some("librewaved"))
+    (executable.file_name().and_then(|name| name.to_str()) == Some(name))
         .then_some((executable, deleted))
 }
 
 pub struct ProductionUnitInspector;
 
 impl UnitInspector for ProductionUnitInspector {
+    fn reload(&self) -> io::Result<()> {
+        let result = Command::new("systemctl").args(["--user", "daemon-reload"]).output()?;
+        if result.status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "user service reload failed: {}",
+                String::from_utf8_lossy(&result.stderr).trim()
+            )))
+        }
+    }
     fn inspect(&self, unit_name: &str) -> io::Result<UnitState> {
         let enabled = systemctl_state("is-enabled", unit_name)?;
         let active = systemctl_state("is-active", unit_name)?;

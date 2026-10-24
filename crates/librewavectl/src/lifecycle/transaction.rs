@@ -180,6 +180,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
             Some(previous) => self.write_manifest(previous)?,
             None => remove_if_exists(&self.paths.manifest())?,
         }
+        self.unit_inspector.reload()?;
         remove_uncommitted_originals(journal)?;
         remove_transaction_files(
             &self.paths.state_root.join("transactions/setup"),

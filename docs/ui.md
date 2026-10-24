@@ -72,7 +72,7 @@ for the observations and limits.
 The daemon reads the Wave:3 configuration every 500 ms while connected.
 The mode light, mute ring, level dots, and controls follow its observed state.
 Polling never changes hardware values. Select **Read controls** to retry admission.
-This command can also restore hardware values that LibreWave saved earlier. The application shows that caution under the button.
+This command can restore managed Clipguard, low-cut, LED, and gain-lock settings. Physical gain, mute, headphone level, direct mix, and knob mode follow the device baseline.
 After a read, the same command is the circular arrow beside the device name.
 
 The hardware controls sit under the illustration:
@@ -131,10 +131,11 @@ The CLI accepts a name: `librewavectl mixer add <generation> "Music"`.
 Each input has a stable public sink name, such as `librewave.input.3`.
 Select its LibreWave device in an application's audio settings. While audio is
 ready, the application button on a software input opens the active playback
-application list. Select an application's plus button to move its current
+application list. Select an application's plus button to save its assignment and move its current
 streams to that input. The panel shows pending, verified, or failed movement.
-Protected streams and disabled WirePlumber movement cannot be assigned.
-Layout changes remain unavailable until audio stops and cleanup completes.
+Protected streams and disabled WirePlumber movement prevent an immediate move.
+Saved rules remain editable while the mixer is stopped. Live layout changes
+require a ready mixer; starting or incomplete cleanup blocks them.
 
 The CLI lists groups with `librewavectl apps list`. To move a group, use
 `librewavectl apps route desktop "org.example.Player" 3`, or replace `desktop`

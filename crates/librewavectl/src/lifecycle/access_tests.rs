@@ -94,6 +94,7 @@ fn install(
             identity: fixture.identity(revision),
             cli_source: &fixture.cli,
             daemon_source: &fixture.daemon,
+            desktop: None,
         })
         .unwrap();
 }
@@ -123,7 +124,8 @@ fn failed_setup_restores_its_access_grant_with_the_rule() {
                 device_access: crate::lifecycle::model::DeviceAccess::Persistent,
                 identity: fixture.identity("failure"),
                 cli_source: &fixture.cli,
-                daemon_source: &fixture.daemon
+                daemon_source: &fixture.daemon,
+                desktop: None,
             })
             .is_err()
     );
@@ -221,6 +223,7 @@ fn existing_access_install_upgrade_and_removal_preserve_external_permissions_and
                 identity: fixture.identity(revision),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
+                desktop: None,
             })
             .unwrap();
         assert!(manifest.usb_access.is_empty());
@@ -250,6 +253,7 @@ fn existing_access_failed_setup_rolls_back_user_files_without_permission_operati
                 identity: fixture.identity("failed"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
+                desktop: None,
             })
             .is_err()
     );
@@ -271,6 +275,7 @@ fn access_mode_changes_require_uninstall_and_cannot_drop_owned_grants() {
                 identity: fixture.identity("existing"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
+                desktop: None,
             })
             .unwrap_err()
             .to_string()

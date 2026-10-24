@@ -2,6 +2,26 @@
 
 This roadmap orders work by safety and dependency. A later milestone does not start by weakening an unfinished earlier contract.
 
+## Current development status
+
+The development branch implements stable channel IDs, saved application rules,
+first-run channel presets, and live input transactions. The GUI exposes channel
+names, order, input management, and saved rules. Physical level controls use
+the current device baseline during reconnect. Desktop installation and login
+startup use the canonical installation manifest. An explicit offline command
+converts local schema-2 profiles with exact rollback backups.
+
+Unit and GPUI fixture tests cover these changes. Private PipeWire tests cover
+repeated live input transactions and preserved graph objects. They use fake
+physical audio workers where stated. These results do not complete the
+physical acceptance gates below.
+
+Before source release, verify the installed build identity, repeated desktop
+launches, device access, real playback signal, daemon and mixer restart,
+application relaunch and multiple streams, and live input edits. Login,
+physical reconnect, sleep, and long playback need separate observed results.
+Keep effects and additional output-device selection deferred.
+
 ## Milestone 0: repository foundation
 
 - Public README, license, contribution policy, and security policy.

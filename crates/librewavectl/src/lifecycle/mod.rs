@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod access_tests;
 mod artifacts;
+mod desktop;
 mod diagnostics;
 mod engine;
 mod fs_ops;
@@ -69,7 +70,7 @@ pub fn run<O: Write, E: Write>(
         Some("doctor") => {
             let options = Options::parse(&arguments[2..], CommandKind::Doctor)?;
             let expected = if options.expect_current {
-                let binaries = current_binaries(options.daemon_path.as_deref())?;
+                let binaries = current_binaries(&options)?;
                 Some(current_identity(&options, &binaries)?)
             } else {
                 None
@@ -133,11 +134,32 @@ fn run_setup(
     lifecycle: &mut Lifecycle<ProductionUdev, ProductionUnitInspector, ProductionProcessInspector>,
     output: &mut impl Write,
 ) -> io::Result<i32> {
+    let desktop_config = options
+        .desktop
+        .clone()
+        .map(|config| {
+            Ok::<_, io::Error>(desktop::resolve_config(
+                config,
+                lifecycle.read_manifest()?.and_then(|m| m.desktop),
+                options.login_startup,
+            ))
+        })
+        .transpose()?;
     write_setup_plan(output, &lifecycle.paths, options.device_access)?;
+    if let Some(config) = &desktop_config {
+        for (path, _, _) in desktop::files(&lifecycle.paths, config)? {
+            writeln!(output, "Desktop artifact: {}", path.display())?;
+        }
+        writeln!(
+            output,
+            "Login startup: {}. Launching the desktop starts the experimental mixer.",
+            config.autostart
+        )?;
+    }
     if options.setup_mode == SetupMode::Plan {
         return Ok(0);
     }
-    let binaries = current_binaries(options.daemon_path.as_deref())?;
+    let binaries = current_binaries(options)?;
     let identity = current_identity(options, &binaries)?;
     writeln!(output, "LibreWave will install the current CLI, daemon, and inactive user unit.")?;
     writeln!(
@@ -148,11 +170,16 @@ fn run_setup(
         writeln!(output, "Setup canceled.")?;
         return Ok(0);
     }
+    let desktop = desktop_config.map(|config| engine::DesktopInstall {
+        gui_source: binaries.gui.as_deref().expect("desktop binary resolved"),
+        config,
+    });
     let manifest = lifecycle.setup(&InstallRequest {
         device_access: options.device_access,
         identity,
         cli_source: &binaries.cli,
         daemon_source: &binaries.daemon,
+        desktop,
     })?;
     writeln!(output, "Installed build {}.", manifest.identity.stable_key())?;
     writeln!(output, "Run `librewavectl doctor` to inspect the installation.")?;
@@ -195,6 +222,16 @@ fn write_command_help(output: &mut impl Write, command: CommandKind) -> io::Resu
     match command {
         CommandKind::Setup => {
             writeln!(output, "Usage: librewavectl setup [OPTIONS]")?;
+            writeln!(
+                output,
+                "  --desktop                 Install the GUI, launcher, and desktop service"
+            )?;
+            writeln!(output, "  --gui-path <PATH>         GUI executable (implies --desktop)")?;
+            writeln!(output, "  --autostart / --no-autostart  Enable or disable login startup")?;
+            writeln!(
+                output,
+                "  --suspend-config <PATH>   Reviewed legacy loader to suspend at mixer startup"
+            )?;
             writeln!(output)?;
             writeln!(output, "Install the current CLI and daemon. Leave audio inactive.")?;
             writeln!(output)?;
@@ -228,6 +265,7 @@ fn write_command_help(output: &mut impl Write, command: CommandKind) -> io::Resu
             writeln!(output, "  --profile <debug|release> Rust build profile")?;
             writeln!(output, "  --target <TRIPLE>          Rust target triple")?;
             writeln!(output, "  --daemon-path <PATH>       Exact daemon executable to compare")?;
+            writeln!(output, "  --desktop --gui-path <PATH> Compare the GUI build too")?;
         }
         CommandKind::Uninstall => {
             writeln!(output, "Usage: librewavectl uninstall [OPTIONS]")?;
@@ -274,6 +312,9 @@ struct Options {
     profile: Option<String>,
     target: Option<String>,
     daemon_path: Option<PathBuf>,
+    gui_path: Option<PathBuf>,
+    desktop: Option<model::DesktopConfig>,
+    login_startup: Option<bool>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -284,6 +325,41 @@ enum CommandKind {
 }
 
 impl Options {
+    fn parse_desktop(
+        &mut self,
+        arguments: &[String],
+        index: &mut usize,
+        command: CommandKind,
+    ) -> io::Result<bool> {
+        match arguments[*index].as_str() {
+            "--desktop" if matches!(command, CommandKind::Setup | CommandKind::Doctor) => {
+                self.desktop
+                    .get_or_insert(model::DesktopConfig { autostart: false, suspend_config: None });
+            }
+            "--autostart" | "--no-autostart" if command == CommandKind::Setup => {
+                self.login_startup = Some(arguments[*index] == "--autostart");
+                self.desktop
+                    .get_or_insert(model::DesktopConfig { autostart: false, suspend_config: None })
+                    .autostart = self.login_startup == Some(true);
+            }
+            "--suspend-config" if command == CommandKind::Setup => {
+                *index += 1;
+                let path = PathBuf::from(required_value(arguments, *index, "--suspend-config")?);
+                self.desktop
+                    .get_or_insert(model::DesktopConfig { autostart: false, suspend_config: None })
+                    .suspend_config = Some(path);
+            }
+            "--gui-path" if matches!(command, CommandKind::Setup | CommandKind::Doctor) => {
+                *index += 1;
+                self.gui_path = Some(required_value(arguments, *index, "--gui-path")?.into());
+                self.desktop
+                    .get_or_insert(model::DesktopConfig { autostart: false, suspend_config: None });
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
     fn parse(arguments: &[String], command: CommandKind) -> io::Result<Self> {
         let mut options = Self {
             setup_mode: SetupMode::Apply,
@@ -295,9 +371,16 @@ impl Options {
             profile: None,
             target: None,
             daemon_path: None,
+            gui_path: None,
+            desktop: None,
+            login_startup: None,
         };
         let mut index = 0;
         while index < arguments.len() {
+            if options.parse_desktop(arguments, &mut index, command)? {
+                index += 1;
+                continue;
+            }
             match arguments[index].as_str() {
                 "--plan" if command == CommandKind::Setup => options.setup_mode = SetupMode::Plan,
                 "--device-access" if command == CommandKind::Setup => {
@@ -349,7 +432,8 @@ impl Options {
         let has_context = options.source_root.is_some()
             || options.profile.is_some()
             || options.target.is_some()
-            || options.daemon_path.is_some();
+            || options.daemon_path.is_some()
+            || options.desktop.is_some();
         if command == CommandKind::Doctor && has_context && !options.expect_current {
             return Err(invalid("build context options require `doctor --expect-current`"));
         }
@@ -390,17 +474,19 @@ fn current_identity(options: &Options, binaries: &Binaries) -> io::Result<model:
         target: options.target.as_deref().ok_or_else(|| invalid("target is unavailable"))?,
         cli_path: &binaries.cli,
         daemon_path: &binaries.daemon,
+        gui_path: binaries.gui.as_deref(),
     })
 }
 
 struct Binaries {
     cli: PathBuf,
     daemon: PathBuf,
+    gui: Option<PathBuf>,
 }
 
-fn current_binaries(configured_daemon: Option<&Path>) -> io::Result<Binaries> {
+fn current_binaries(options: &Options) -> io::Result<Binaries> {
     let cli = std::env::current_exe()?;
-    let daemon = match configured_daemon {
+    let daemon = match options.daemon_path.as_deref() {
         Some(path) => path.to_path_buf(),
         None => cli
             .parent()
@@ -416,7 +502,22 @@ fn current_binaries(configured_daemon: Option<&Path>) -> io::Result<Binaries> {
             ),
         ));
     }
-    Ok(Binaries { cli, daemon })
+    let gui = if options.desktop.is_some() {
+        Some(
+            options
+                .gui_path
+                .clone()
+                .unwrap_or_else(|| cli.parent().expect("CLI parent").join("librewave")),
+        )
+    } else {
+        None
+    };
+    if let Some(path) = &gui
+        && !path.is_file()
+    {
+        return Err(invalid(format!("GUI binary missing at {}", path.display())));
+    }
+    Ok(Binaries { cli, daemon, gui })
 }
 
 fn infer_profile() -> io::Result<String> {

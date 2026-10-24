@@ -14,6 +14,7 @@ pub struct IdentityRequest<'a> {
     pub target: &'a str,
     pub cli_path: &'a Path,
     pub daemon_path: &'a Path,
+    pub gui_path: Option<&'a Path>,
 }
 
 pub fn discover(request: &IdentityRequest<'_>) -> io::Result<BuildIdentity> {
@@ -34,6 +35,7 @@ pub fn discover(request: &IdentityRequest<'_>) -> io::Result<BuildIdentity> {
         target: request.target.to_owned(),
         cli_sha256: hash::file(request.cli_path)?,
         daemon_sha256: hash::file(request.daemon_path)?,
+        gui_sha256: request.gui_path.map(hash::file).transpose()?,
         installed_at_unix_seconds,
     })
 }

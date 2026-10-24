@@ -44,6 +44,23 @@ pub(super) fn validate_manifest(manifest: &Manifest, paths: &InstallPaths) -> io
             return Err(invalid_data("externally managed access cannot contain owned USB grants"));
         }
     }
+    let desktop_files = manifest
+        .desktop
+        .as_ref()
+        .map(|config| super::desktop::files(paths, config))
+        .transpose()?
+        .unwrap_or_default();
+    if manifest.desktop.is_some() != manifest.identity.gui_sha256.is_some()
+        || manifest.identity.gui_sha256.as_deref().is_some_and(|hash| !valid_hash(hash))
+    {
+        return Err(invalid_data("desktop build identity is inconsistent"));
+    }
+    if manifest.desktop.is_some() {
+        expected_paths.insert(expected_build.join("bin/librewave"), OwnedKind::File);
+        for (path, _, _) in &desktop_files {
+            expected_paths.insert(path.clone(), OwnedKind::File);
+        }
+    }
     if manifest.identity.source_dirty != manifest.identity.dirty_fingerprint.is_some()
         || manifest.identity.dirty_fingerprint.as_deref().is_some_and(|value| !valid_hash(value))
         || !valid_hash(&manifest.identity.cli_sha256)
@@ -59,7 +76,9 @@ pub(super) fn validate_manifest(manifest: &Manifest, paths: &InstallPaths) -> io
         if !unique.insert(entry.path.clone()) {
             return Err(invalid_data("manifest contains a duplicate owned path"));
         }
-        if entry.path != paths.udev_rule && !allowed.iter().any(|root| entry.path.starts_with(root))
+        if entry.path != paths.udev_rule
+            && entry.path != super::desktop::application_entry(paths)?
+            && !allowed.iter().any(|root| entry.path.starts_with(root))
         {
             return Err(invalid_data(format!(
                 "manifest path is outside LibreWave roots: {}",
@@ -72,6 +91,7 @@ pub(super) fn validate_manifest(manifest: &Manifest, paths: &InstallPaths) -> io
                 entry.path.display()
             )));
         }
+        validate_desktop_metadata(entry, manifest, &expected_build, &desktop_files)?;
         validate_exact_metadata(entry, manifest, paths, &expected_build)?;
         validate_owned(entry, paths)?;
         if let Some(saved) =
@@ -303,6 +323,7 @@ fn validate_snapshot(
         validate_parent_chain(saved, paths)?;
     }
     let destination_allowed = snapshot.destination == paths.udev_rule
+        || snapshot.destination == super::desktop::application_entry(paths)?
         || [&paths.data_root, &paths.state_root, &paths.config_root, &paths.bin_root]
             .iter()
             .any(|root| snapshot.destination.starts_with(root));
@@ -434,4 +455,24 @@ pub(super) fn validate_systemd_path(path: &Path) -> io::Result<()> {
     } else {
         Ok(())
     }
+}
+
+fn validate_desktop_metadata(
+    entry: &OwnedPath,
+    manifest: &Manifest,
+    expected_build: &Path,
+    desktop_files: &[(std::path::PathBuf, String, u32)],
+) -> io::Result<()> {
+    if entry.path == expected_build.join("bin/librewave")
+        && (entry.sha256 != manifest.identity.gui_sha256 || entry.mode != Some(0o755))
+    {
+        return Err(invalid_data("GUI artifact metadata is not exact"));
+    }
+    if let Some((_, content, mode)) = desktop_files.iter().find(|(path, _, _)| *path == entry.path)
+        && (entry.sha256.as_deref() != Some(hash::bytes(content.as_bytes()).as_str())
+            || entry.mode != Some(*mode))
+    {
+        return Err(invalid_data("desktop artifact metadata is not exact"));
+    }
+    Ok(())
 }

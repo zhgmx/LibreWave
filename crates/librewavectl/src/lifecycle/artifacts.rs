@@ -45,6 +45,20 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
         if request.device_access == DeviceAccess::Existing {
             owned_paths.retain(|entry| entry.path != self.paths.udev_rule);
         }
+        if let Some(desktop) = &request.desktop {
+            owned_paths.push(file_entry(
+                build.join("bin/librewave"),
+                request
+                    .identity
+                    .gui_sha256
+                    .clone()
+                    .ok_or_else(|| io::Error::other("GUI hash missing"))?,
+                0o755,
+            ));
+            for (path, content, mode) in super::desktop::files(&self.paths, &desktop.config)? {
+                owned_paths.push(file_entry(path, hash::bytes(content.as_bytes()), mode));
+            }
+        }
         for entry in &mut owned_paths {
             if let Some(old) = previous.and_then(|manifest| find_owned(manifest, &entry.path)) {
                 entry.original.clone_from(&old.original);
@@ -62,6 +76,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
             profiles_path: self.paths.profiles(),
             audio_ownership: AudioOwnership::ExperimentalOptIn,
             device_access: request.device_access,
+            desktop: request.desktop.as_ref().map(|desktop| desktop.config.clone()),
             owned_paths,
             usb_access: Vec::new(),
         })
@@ -78,6 +93,12 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
         let unit_content =
             render_unit(&manifest.active_link.join("bin/librewaved"), &self.paths.config_root);
         let udev_content = Wave3AudioPolicy::new().render_udev();
+        let desktop_files = manifest
+            .desktop
+            .as_ref()
+            .map(|config| super::desktop::files(&self.paths, config))
+            .transpose()?
+            .unwrap_or_default();
         for (owned, snapshot) in manifest.owned_paths.iter().zip(rollback) {
             let unchanged = if owned.path == manifest.udev_policy_path {
                 matches_udev_snapshot(&self.udev, snapshot)?
@@ -122,6 +143,26 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
                         self.udev.install_and_refresh(&owned.path, udev_content.as_bytes())?;
                     }
                 }
+                OwnedKind::File
+                    if owned.path == manifest.active_build_directory.join("bin/librewave") =>
+                {
+                    let source = request
+                        .desktop
+                        .as_ref()
+                        .ok_or_else(|| io::Error::other("GUI source missing"))?
+                        .gui_source;
+                    if owned.sha256.as_deref() != Some(hash::file(source)?.as_str()) {
+                        return Err(io::Error::other("GUI source changed after setup validation"));
+                    }
+                    atomic_copy(source, &owned.path, 0o755)?;
+                }
+                OwnedKind::File if desktop_files.iter().any(|(path, _, _)| *path == owned.path) => {
+                    let (_, content, mode) = desktop_files
+                        .iter()
+                        .find(|(path, _, _)| *path == owned.path)
+                        .expect("matched desktop artifact");
+                    atomic_write(&owned.path, content.as_bytes(), *mode)?;
+                }
                 OwnedKind::File => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -163,7 +204,7 @@ pub(super) fn render_unit(daemon: &Path, config_root: &Path) -> String {
         "[Unit]\nDescription=LibreWave device and audio service\n\n[Service]\nExecStart={executable}\nEnvironment={config}\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n"
     )
 }
-fn quote_unit_value(value: &str, expand_environment: bool) -> String {
+pub(super) fn quote_unit_value(value: &str, expand_environment: bool) -> String {
     let mut encoded = String::from("\"");
     for character in value.chars() {
         match character {

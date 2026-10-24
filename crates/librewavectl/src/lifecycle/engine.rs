@@ -83,6 +83,12 @@ pub struct InstallRequest<'a> {
     pub identity: BuildIdentity,
     pub cli_source: &'a Path,
     pub daemon_source: &'a Path,
+    pub desktop: Option<DesktopInstall<'a>>,
+}
+
+pub struct DesktopInstall<'a> {
+    pub gui_source: &'a Path,
+    pub config: super::model::DesktopConfig,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -143,11 +149,15 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
         let _lock = super::runtime::lock(&self.paths)?;
         self.preflight_runtime()?;
         self.recover_for_setup()?;
-        validate_source(request.cli_source, &request.identity.cli_sha256)?;
-        validate_source(request.daemon_source, &request.identity.daemon_sha256)?;
+        validate_request_sources(request)?;
         let previous = self.read_manifest()?;
         if let Some(previous) = previous.as_ref() {
             self.preflight_upgrade(previous)?;
+            if previous.desktop.is_some() && request.desktop.is_none() {
+                return Err(io::Error::other(
+                    "desktop installation exists; use --desktop for the upgrade or uninstall first",
+                ));
+            }
             if previous.device_access != request.device_access {
                 return Err(io::Error::other(
                     "device access mode differs from the installation; uninstall before changing it",
@@ -192,6 +202,9 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
             fs::write(path, content)?;
         }
         if let Err(error) = self.apply_manifest(&next, request, &journal.rollback_paths) {
+            return Err(self.failed_setup(&journal, error));
+        }
+        if let Err(error) = self.unit_inspector.reload() {
             return Err(self.failed_setup(&journal, error));
         }
         for owned in &next.owned_paths {
@@ -461,6 +474,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
             }
         }
         checks.extend(self.process_checks(&manifest));
+        checks.extend(self.desktop_process_checks(&manifest));
         checks.extend(self.stale_artifact_checks(&manifest));
         checks.extend(self.backup_artifact_checks(&manifest));
         checks.push(self.unit_state_check());
@@ -589,6 +603,13 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
                 "the safety-gated unit is enabled or active; run `systemctl --user disable --now librewaved.service` first",
             ));
         }
+        if self.unit_inspector.inspect(super::desktop::UNIT)?.active
+            || !self.process_inspector.desktops()?.is_empty()
+        {
+            return Err(io::Error::other(
+                "LibreWave desktop is running; stop librewave-desktop.service and close direct GUI processes before changing the installation",
+            ));
+        }
         let daemons = self.process_inspector.daemons()?;
         if daemons.is_empty() {
             if checked_exists(&self.paths.wireplumber())? {
@@ -641,6 +662,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
     }
 
     pub(super) fn verify_uninstalled(&self, manifest: &Manifest) -> io::Result<()> {
+        self.unit_inspector.reload()?;
         self.preflight_runtime()?;
         self.verify_access(manifest, AccessState::Restored)?;
         for owned in &manifest.owned_paths {
@@ -845,4 +867,22 @@ pub fn test_paths(root: &Path) -> InstallPaths {
         bin_root: root.join("bin"),
         udev_rule: root.join("system/70-librewave-wave3.rules"),
     }
+}
+
+fn validate_request_sources(request: &InstallRequest<'_>) -> io::Result<()> {
+    validate_source(request.cli_source, &request.identity.cli_sha256)?;
+    validate_source(request.daemon_source, &request.identity.daemon_sha256)?;
+    if let Some(desktop) = &request.desktop {
+        validate_source(
+            desktop.gui_source,
+            request
+                .identity
+                .gui_sha256
+                .as_deref()
+                .ok_or_else(|| io::Error::other("GUI hash missing"))?,
+        )?;
+    } else if request.identity.gui_sha256.is_some() {
+        return Err(io::Error::other("GUI identity requires desktop artifacts"));
+    }
+    Ok(())
 }

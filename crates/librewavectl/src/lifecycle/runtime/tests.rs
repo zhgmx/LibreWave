@@ -582,7 +582,8 @@ fn setup_and_uninstall_refuse_recorded_audio_and_concurrent_ownership_operations
                 device_access: crate::lifecycle::model::DeviceAccess::Persistent,
                 identity: fixture.identity("replacement"),
                 cli_source: &fixture.cli,
-                daemon_source: &fixture.daemon
+                daemon_source: &fixture.daemon,
+                desktop: None,
             })
             .is_err()
     );
@@ -634,6 +635,7 @@ fn existing_access_start_still_checks_access_and_restores_after_failure() {
             identity: fixture.identity("existing"),
             cli_source: &fixture.cli,
             daemon_source: &fixture.daemon,
+            desktop: None,
         })
         .unwrap();
     let mut host = Host::new();

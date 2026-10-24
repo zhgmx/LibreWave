@@ -14,7 +14,7 @@ Each installation records:
 - Whether the source tree had uncommitted changes.
 - A deterministic content fingerprint for a dirty build.
 - The Rust profile and target triple.
-- The installed CLI and daemon hashes.
+- The installed CLI, daemon, and optional GUI hashes.
 - The installation time.
 - The manifest schema version.
 
@@ -25,7 +25,8 @@ Each installation records:
 The manifest is the source of truth for paths that LibreWave owns. It records:
 
 - Versioned executable files and stable links.
-- The inactive systemd user unit.
+- The inactive daemon unit and optional desktop service.
+- The desktop launcher and login entry when desktop installation is selected.
 - The selected device access mode.
 - The exact Wave:3 udev access rule when setup manages access.
 - Original numeric USB ACLs and exact node identities when setup manages access.
@@ -195,6 +196,54 @@ The daemon stores active audio intent in `librewave/profiles/audio-state.json` b
 These commands do not enable login startup, change Gain Lock, or change an ALSA saved state. Closing the application window keeps the daemon running.
 
 The daemon handles termination on its control thread. It releases its current audio resources, retains accepted restart intent, and removes its own IPC socket. Stop verifies socket removal before it discards the ownership journal. Lifecycle operations lock a stable parent directory so removal cannot replace the lock authority or recreate the removed application state directory.
+
+## Desktop installation and login startup
+
+Build all three binaries from the same checkout:
+
+```sh
+cargo build --release -p librewavectl -p librewaved -p librewave
+```
+
+Stop the desktop service and mixer before setup. Use the resulting CLI to
+install the desktop artifacts through the same transaction as the daemon:
+
+```sh
+target/release/librewavectl setup --desktop --autostart --profile release
+```
+
+If the build uses a separate target directory, use its exact executable path.
+`--gui-path <PATH>` and `--daemon-path <PATH>` select explicit build artifacts.
+Use `--suspend-config <PATH>` only for a reviewed legacy loader that the mixer
+must suspend. Setup stores that path in the desktop service; the start
+operation validates and backs up the loader before suspension.
+
+`--desktop` installs the GUI in the active build, a `librewave` launcher,
+`librewave-desktop.service`, and `io.github.zhgmx.LibreWave.desktop` entries
+in the application and autostart directories. New desktop installs do not
+start at login unless `--autostart` is selected. Upgrades preserve the saved
+login setting and suspended-loader path. `--no-autostart` disables login
+startup. Setup leaves the desktop and mixer stopped.
+
+The launcher and both desktop entries use `systemctl --user start
+librewave-desktop.service`. Repeated launches reuse the service instance.
+The service starts the mixer through `librewavectl start --experimental`
+before it starts the GUI. Closing the GUI keeps the mixer running. Use
+`librewavectl stop` to release audio ownership.
+
+The manifest records the GUI hash and every desktop artifact. Setup backs up
+replaced files, and rollback or uninstall restores unchanged originals.
+Modified owned files stop replacement. Setup and uninstall refuse a running
+desktop process. The lifecycle reloads the user service manager after changes.
+Use `doctor --expect-current --desktop` to compare all three build artifacts.
+
+Manifest schema 5 includes desktop ownership. An older development install
+must be removed with its matching CLI before this setup. Keep its binaries,
+manifest, original-file backups, and profiles for recovery. Do not delete or
+rewrite the old manifest to bypass validation.
+
+Desktop transaction tests use isolated files and fake system services.
+Actual login and session recovery remain physical acceptance tests.
 
 ## Controlled live validation
 

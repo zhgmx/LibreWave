@@ -7,6 +7,29 @@ use std::io;
 use std::path::Path;
 
 impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
+    pub(super) fn desktop_process_checks(&self, manifest: &Manifest) -> Vec<Check> {
+        let processes = match self.process_inspector.desktops() {
+            Ok(processes) => processes,
+            Err(error) => return vec![fail("running desktop", error.to_string())],
+        };
+        if processes.is_empty() {
+            return vec![pass("running desktop", "No LibreWave desktop process is running.")];
+        }
+        let expected = manifest.active_build_directory.join("bin/librewave");
+        if processes.len() == 1
+            && !processes[0].deleted
+            && processes[0].executable == expected
+            && processes[0].sha256 == manifest.identity.gui_sha256
+        {
+            vec![pass("running desktop", "One desktop process uses the installed GUI.")]
+        } else {
+            vec![fail(
+                "running desktop",
+                "Extra, stale, or modified GUI processes are running; close them before changing the installation.",
+            )]
+        }
+    }
+
     pub(super) fn process_checks(&self, manifest: &Manifest) -> Vec<Check> {
         let expected = manifest.active_build_directory.join("bin/librewaved");
         let processes = match self.process_inspector.daemons() {

@@ -56,6 +56,7 @@ impl Fixture {
             target: "test-target".to_owned(),
             cli_sha256: hash::file(&self.cli).unwrap(),
             daemon_sha256: hash::file(&self.daemon).unwrap(),
+            gui_sha256: None,
             installed_at_unix_seconds: 123,
         }
     }
@@ -71,6 +72,7 @@ impl Fixture {
                 identity: self.identity(revision),
                 cli_source: &self.cli,
                 daemon_source: &self.daemon,
+                desktop: None,
             })
             .unwrap()
     }
@@ -130,6 +132,7 @@ fn upgrade_removes_the_old_exact_build_and_reports_identity_mismatch() {
             identity: current.clone(),
             cli_source: &fixture.cli,
             daemon_source: &fixture.daemon,
+            desktop: None,
         })
         .unwrap();
 
@@ -204,6 +207,7 @@ fn upgrade_refuses_modified_owned_paths_without_mutation() {
         identity: fixture.identity("revision-2"),
         cli_source: &fixture.cli,
         daemon_source: &fixture.daemon,
+        desktop: None,
     });
 
     assert!(result.is_err());
@@ -234,6 +238,7 @@ fn upgrade_refuses_a_corrupt_carried_backup_without_mutation() {
         identity: fixture.identity("revision-2"),
         cli_source: &fixture.cli,
         daemon_source: &fixture.daemon,
+        desktop: None,
     });
 
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
@@ -259,6 +264,7 @@ fn setup_failure_rolls_back_files_links_directories_and_udev() {
         identity: fixture.identity("revision-1"),
         cli_source: &fixture.cli,
         daemon_source: &fixture.daemon,
+        desktop: None,
     });
 
     assert!(result.is_err());
@@ -281,6 +287,7 @@ fn foreign_udev_collision_fails_without_mutation() {
         identity: fixture.identity("revision-1"),
         cli_source: &fixture.cli,
         daemon_source: &fixture.daemon,
+        desktop: None,
     });
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
     assert_eq!(fs::read(&paths.udev_rule).unwrap(), b"foreign-rule");
@@ -302,6 +309,7 @@ fn first_install_refuses_an_unmanifested_planned_build_directory() {
                 identity: fixture.identity("revision-1"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
+                desktop: None,
             })
             .is_err()
     );
@@ -364,6 +372,7 @@ fn setup_rejects_a_symlink_at_the_fixed_udev_path_before_mutation() {
                 identity: fixture.identity("revision-1"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
+                desktop: None,
             })
             .unwrap_err()
             .kind(),
@@ -440,6 +449,7 @@ fn setup_recovers_when_the_manifest_switch_precedes_its_journal_phase() {
         identity,
         cli_source: &fixture.cli,
         daemon_source: &fixture.daemon,
+        desktop: None,
     });
     assert!(result.is_err());
     assert_eq!(lifecycle.read_journal().unwrap().unwrap().phase, Phase::Applied);
@@ -515,6 +525,7 @@ fn corrupted_journal_cannot_escape_transaction_roots() {
         identity: fixture.identity("revision-1"),
         cli_source: &fixture.cli,
         daemon_source: &fixture.daemon,
+        desktop: None,
     });
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
     assert_eq!(fs::read(outside).unwrap(), b"keep");
@@ -744,6 +755,7 @@ fn setup_and_uninstall_stop_before_mutation_for_runtime_owners() {
                 identity: fixture.identity("revision-1"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
+                desktop: None,
             })
             .is_err()
     );
@@ -776,6 +788,7 @@ fn stale_wireplumber_policy_blocks_setup_before_mutation() {
                 identity: fixture.identity("revision-1"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
+                desktop: None,
             })
             .is_err()
     );
@@ -799,6 +812,7 @@ fn backup_parent_symlinks_cannot_escape_the_state_root() {
                 identity: fixture.identity("revision-1"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
+                desktop: None,
             })
             .is_err()
     );
@@ -826,6 +840,7 @@ fn transaction_parent_symlink_stops_upgrade_before_mutation() {
                 identity: fixture.identity("revision-2"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
+                desktop: None,
             })
             .is_err()
     );
@@ -875,6 +890,7 @@ fn foreign_transaction_content_is_never_removed_by_recovery() {
                 identity: fixture.identity("revision-1"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
+                desktop: None,
             })
             .is_err()
     );
@@ -900,6 +916,7 @@ fn unmanifested_empty_build_directory_is_reported_and_preserved() {
                 identity: next,
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
+                desktop: None,
             })
             .is_err()
     );
@@ -922,6 +939,7 @@ fn setup_refuses_a_destination_changed_after_preflight() {
                 identity: fixture.identity("revision-1"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
+                desktop: None,
             })
             .is_err()
     );
@@ -943,6 +961,7 @@ fn setup_refuses_a_source_binary_changed_after_initial_validation() {
                 identity: fixture.identity("revision-1"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
+                desktop: None,
             })
             .is_err()
     );
@@ -966,6 +985,7 @@ fn setup_never_overwrites_a_stale_original_backup() {
                 identity: fixture.identity("revision-1"),
                 cli_source: &fixture.cli,
                 daemon_source: &fixture.daemon,
+                desktop: None,
             })
             .is_err()
     );
