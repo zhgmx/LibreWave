@@ -1047,7 +1047,7 @@ fn write_help<W: Write>(output: &mut W) -> io::Result<()> {
     )?;
     writeln!(
         output,
-        "  mixer add <generation> <name>   Add a software input while audio is stopped"
+        "  mixer add <generation> <name>   Add a software input while the mixer is ready or stopped"
     )?;
     writeln!(output, "  mixer remove <source-id> <generation>   Remove a software input")?;
     writeln!(output, "  mixer show      Show desired mixer state and runtime availability")?;

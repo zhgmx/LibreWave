@@ -1852,6 +1852,10 @@ impl PlaybackEgress {
         self.shared.attempt_epoch
     }
 
+    pub(super) fn worker_last_hardware_position(&self) -> Option<u64> {
+        self.last_hardware_observation.map(|observation| observation.frame_position().get())
+    }
+
     pub(super) const fn worker_application_position(&self) -> u64 {
         self.submitted_position
     }

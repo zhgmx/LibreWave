@@ -13,7 +13,7 @@ use super::{
 };
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(in crate::audio_host) struct PlaybackWorkerBoundary {
@@ -118,23 +118,9 @@ impl ParkedPlaybackWorker {
                 }
                 _ => {}
             }
-            let application_frames = self.egress.worker_application_position();
-            let snapshot = match self.submitter.status() {
-                Ok(snapshot) => snapshot,
-                Err(PlaybackWriteError::Stopped { accepted_frames: 0 }) => {
-                    return PlaybackWorkerTerminal::Stopped;
-                }
-                Err(error) => return PlaybackWorkerTerminal::Observe(error),
-            };
-            let status = match validate_playback_status(
-                self.egress.worker_attempt_epoch(),
-                application_frames,
-                self.geometry,
-                self.submitter.pcm_started,
-                snapshot,
-            ) {
+            let status = match self.observe_progress() {
                 Ok(status) => status,
-                Err(error) => return PlaybackWorkerTerminal::Status(error),
+                Err(terminal) => return terminal,
             };
             let report = match self.egress.process(status.observation, &mut self.submitter) {
                 Ok(report) => report,
@@ -161,6 +147,48 @@ impl ParkedPlaybackWorker {
                 delay_frames: status.delay_frames,
                 pcm_started: self.submitter.pcm_started,
             });
+        }
+    }
+
+    fn observe_progress(
+        &mut self,
+    ) -> Result<super::status::ValidatedPlaybackStatus, PlaybackWorkerTerminal> {
+        let deadline = Instant::now()
+            + Duration::from_millis(u64::from(self.submitter.policy.wait_timeout_millis()));
+        loop {
+            if self.submitter.stopped() {
+                return Err(PlaybackWorkerTerminal::Stopped);
+            }
+            let snapshot = self.submitter.status().map_err(|error| match error {
+                PlaybackWriteError::Stopped { accepted_frames: 0 } => {
+                    PlaybackWorkerTerminal::Stopped
+                }
+                other => PlaybackWorkerTerminal::Observe(other),
+            })?;
+            let status = validate_playback_status(
+                self.egress.worker_attempt_epoch(),
+                self.egress.worker_application_position(),
+                self.geometry,
+                self.submitter.pcm_started,
+                snapshot,
+            )
+            .map_err(PlaybackWorkerTerminal::Status)?;
+            if self.egress.worker_state() != BridgeState::Active
+                || self.egress.worker_last_hardware_position()
+                    != Some(status.observation.hardware().frame_position().get())
+            {
+                return Ok(status);
+            }
+            if Instant::now() >= deadline {
+                return Err(PlaybackWorkerTerminal::Bridge(
+                    BridgeError::RepeatedClockObservation {
+                        domain: super::super::clock_bridge::BridgeClockDomain::WavePlayback,
+                    },
+                ));
+            }
+            // A write can complete before the USB hardware position advances.
+            // Wait outside the graph callback rather than submitting a duplicate clock boundary.
+            thread::park_timeout(Duration::from_millis(1));
         }
     }
 
@@ -410,5 +438,90 @@ fn playback_error(error: PcmIoError, accepted_frames: usize) -> PlaybackWriteErr
         PcmIoError::Suspended => PlaybackWriteError::Suspended { accepted_frames },
         PcmIoError::Disconnected => PlaybackWriteError::Disconnected { accepted_frames },
         PcmIoError::Failed { errno } => PlaybackWriteError::Failed { accepted_frames, errno },
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    use crate::audio_host::clock_bridge::tests::primed_worker_fixture;
+    use std::collections::VecDeque;
+
+    struct StatusPcm {
+        snapshots: VecDeque<super::super::PcmStatusSnapshot>,
+    }
+    impl PlaybackPcm for StatusPcm {
+        fn status(&mut self) -> Result<super::super::PcmStatusSnapshot, PcmIoError> {
+            if self.snapshots.len() > 1 {
+                Ok(self.snapshots.pop_front().expect("snapshot"))
+            } else {
+                Ok(*self.snapshots.front().expect("last snapshot"))
+            }
+        }
+        fn wait(&mut self, _: u32) -> Result<PcmWait, PcmIoError> {
+            panic!("observation does not submit")
+        }
+        fn write_frames(&mut self, _: &[u8]) -> Result<usize, PcmIoError> {
+            panic!("observation does not submit")
+        }
+        fn start_pcm(&mut self) -> Result<(), PcmIoError> {
+            panic!("already active")
+        }
+        fn drop_stream(&mut self) -> Result<(), PcmIoError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn repeated_pcm_snapshot_waits_for_progress_without_advancing_application_position() {
+        for advance in [true, false] {
+            let mut fixture = primed_worker_fixture();
+            let application = fixture.parts.playback.worker_application_position();
+            let hardware =
+                fixture.parts.playback.worker_last_hardware_position().expect("primed observation");
+            let queued = application - hardware;
+            let first = super::super::PcmStatusSnapshot {
+                timestamp_seconds: i64::try_from(fixture.playback_time / 1_000_000_000)
+                    .expect("seconds"),
+                timestamp_nanoseconds: i64::try_from(fixture.playback_time % 1_000_000_000)
+                    .expect("nanoseconds"),
+                available_frames: i64::from(fixture.playback_geometry.buffer_frames)
+                    - i64::try_from(queued).expect("queue"),
+                delay_frames: i64::try_from(queued).expect("queue"),
+                state_raw: alsa::pcm::State::Running as i32,
+                geometry: fixture.playback_geometry,
+            };
+            let mut snapshots = VecDeque::from([first]);
+            if advance {
+                snapshots.push_back(super::super::PcmStatusSnapshot {
+                    available_frames: first.available_frames + 1,
+                    ..first
+                });
+            }
+            fixture.parts.control.activate().expect("activate");
+            let mut worker = ParkedPlaybackWorker::new(
+                Box::new(StatusPcm { snapshots }),
+                fixture.parts.playback,
+                fixture.playback_geometry,
+                WorkerIoPolicy::try_new(3, 2).expect("policy"),
+            )
+            .expect("worker");
+            worker.submitter.pcm_started = true;
+            let observed = worker.observe_progress();
+            if advance {
+                assert_eq!(
+                    observed.expect("fresh status").observation.hardware().frame_position().get(),
+                    hardware + 1
+                );
+            } else {
+                assert!(matches!(
+                    observed,
+                    Err(PlaybackWorkerTerminal::Bridge(
+                        BridgeError::RepeatedClockObservation { .. }
+                    ))
+                ));
+            }
+            assert_eq!(worker.egress.worker_application_position(), application);
+        }
     }
 }
