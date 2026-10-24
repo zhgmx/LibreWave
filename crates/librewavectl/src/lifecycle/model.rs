@@ -20,6 +20,7 @@ pub struct BuildIdentity {
     pub target: String,
     pub cli_sha256: String,
     pub daemon_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gui_sha256: Option<String>,
     pub installed_at_unix_seconds: u64,
 }

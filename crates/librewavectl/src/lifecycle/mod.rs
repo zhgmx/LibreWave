@@ -7,6 +7,7 @@ mod engine;
 mod fs_ops;
 mod hash;
 mod identity;
+mod installation_conversion;
 mod model;
 mod profile_conversion;
 mod runtime;
@@ -24,7 +25,15 @@ use system::{ProductionProcessInspector, ProductionUdev, ProductionUnitInspector
 pub fn is_command(arguments: &[String]) -> bool {
     matches!(
         arguments.get(1).map(String::as_str),
-        Some("setup" | "doctor" | "uninstall" | "start" | "stop" | "convert-profile")
+        Some(
+            "setup"
+                | "doctor"
+                | "uninstall"
+                | "start"
+                | "stop"
+                | "convert-profile"
+                | "convert-installation"
+        )
     )
 }
 
@@ -59,6 +68,9 @@ pub fn run<O: Write, E: Write>(
     let udev = ProductionUdev::new(paths.udev_rule.clone());
     let mut lifecycle =
         Lifecycle::new(paths, udev, ProductionUnitInspector, ProductionProcessInspector);
+    if command == Some("convert-installation") {
+        return installation_conversion::run(arguments, &lifecycle, output);
+    }
     if command == Some("convert-profile") {
         return profile_conversion::run(arguments, &lifecycle, output);
     }

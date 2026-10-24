@@ -237,10 +237,15 @@ Modified owned files stop replacement. Setup and uninstall refuse a running
 desktop process. The lifecycle reloads the user service manager after changes.
 Use `doctor --expect-current --desktop` to compare all three build artifacts.
 
-Manifest schema 5 includes desktop ownership. An older development install
-must be removed with its matching CLI before this setup. Keep its binaries,
-manifest, original-file backups, and profiles for recovery. Do not delete or
-rewrite the old manifest to bypass validation.
+Manifest schema 5 includes desktop ownership. A stopped schema-4 installation
+can use the new CLI’s `convert-installation` command before setup. It validates
+the exact artifact paths and hashes, retains the USB access baseline, and
+backs up the original record as `install-manifest-schema-4.json`. It changes
+only the record, so the approved udev rule and device ACL stay in place.
+Modified artifacts or an interrupted setup journal block conversion.
+Other incompatible development installs need removal with their matching CLI.
+Keep old binaries, manifests, original-file backups, and profiles for recovery.
+Do not edit a manifest to bypass validation.
 
 Desktop transaction tests use isolated files and fake system services.
 Actual login and session recovery remain physical acceptance tests.
@@ -374,7 +379,7 @@ Setup never changes Gain Lock. Uninstall and unmanage do not restore a saved Gai
 
 ## Pre-release policy
 
-Development installations support only the current manifest, configuration, and IPC formats. The lifecycle refuses an unknown manifest or journal schema. Remove an incompatible pre-release installation explicitly before the next setup.
+Development installations support only the current manifest, configuration, and IPC formats. The lifecycle refuses an unknown manifest or journal schema. Use the explicit schema-4 installation conversion above, or remove another incompatible pre-release installation before setup.
 
 Run `librewaved --check-config` to validate profiles without starting a service,
 opening hardware, recovering a pending write, or changing files. Experimental

@@ -1016,6 +1016,7 @@ fn write_help<W: Write>(output: &mut W) -> io::Result<()> {
     writeln!(output, "Usage: librewavectl <command>")?;
     writeln!(output)?;
     writeln!(output, "Commands:")?;
+    writeln!(output, "  convert-installation  Convert a stopped schema-4 installation record")?;
     writeln!(
         output,
         "  convert-profile [--rollback]  Convert a stopped schema-2 mixer profile with an exact backup"
