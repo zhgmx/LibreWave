@@ -2,21 +2,22 @@
 use super::controls::{Tone, dot, icon_button, tip};
 use super::device_art::{self, Glow};
 use super::theme::{
-    BODY, BODY_LINE, DISPLAY, DISPLAY_LINE, FAINT, INK, MONITOR, MUTED, SPACE_SM, SPACE_XL,
-    SPACE_XS,
+    BODY, BODY_LINE, DISPLAY, DISPLAY_LINE, FAINT, INK, MONITOR, MUTED, SPACE_2XL, SPACE_SM,
+    SPACE_XL, SPACE_XS,
 };
 use super::{Shell, TITLEBAR};
 use gpui::{Context, Div, FontWeight, IntoElement, div, img, prelude::*, px, rgb};
 use librewave_core::{ApiVersion, Command, DeviceConnection, DeviceSnapshot, Wave3ConfigSnapshot};
 
 pub(super) const STAGE_WIDTH: f32 = 420.;
-const PADDING: f32 = 28.;
+/// The stage and the mixer share this inset, so their edges line up.
+pub(super) const INSET: f32 = SPACE_2XL;
 // The illustration is drawn on a 2:3 canvas.
 const ART_MAX: f32 = 460.;
 const ART_MIN: f32 = 170.;
 const ART_COMPACT: f32 = 240.;
 // Title bar, stage padding, heading, hardware controls, and the gaps between them.
-const STAGE_FIXED: f32 = TITLEBAR + 2. * PADDING + 64. + 220. + 2. * SPACE_XL;
+const STAGE_FIXED: f32 = TITLEBAR + 2. * INSET + 64. + 220. + 2. * SPACE_XL;
 
 impl Shell {
     pub(super) fn stage(
@@ -39,7 +40,7 @@ impl Shell {
             .id("device-stage")
             .debug_selector(|| "device-stage".to_owned())
             .flex_shrink_0()
-            .p(px(PADDING))
+            .p(px(INSET))
             .flex()
             .gap(px(SPACE_XL));
         if compact {

@@ -2,12 +2,11 @@
 use super::controls::{
     Tone, action_button, caption, dot, icon, icon_button, identified, labeled_icon_button,
 };
-use super::mixer::{mixer_min_width, mixer_width};
-use super::stage::STAGE_WIDTH;
+use super::mixer::{MIXER_MIN_HEIGHT, mixer_min_width};
+use super::stage::{INSET, STAGE_WIDTH};
 use super::theme::{
     BACKGROUND, BODY, BODY_LINE, DANGER, FAINT, HEADING, HEADING_LINE, ICON, INK, MONITOR, MUTED,
-    RADIUS, SPACE_2XL, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, TITLE, TITLE_LINE,
-    WARNING, alpha,
+    RADIUS, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, TITLE, TITLE_LINE, WARNING, alpha,
 };
 use super::{Shell, TITLEBAR};
 use gpui::{Context, Div, FontWeight, IntoElement, div, prelude::*, px, rgb, rgba};
@@ -15,10 +14,8 @@ use librewave_core::MixerRuntimeState;
 
 impl Shell {
     pub(super) fn frame(&self, viewport: gpui::Size<gpui::Pixels>, cx: &mut Context<Self>) -> Div {
-        let inputs =
-            self.snapshot.as_ref().map_or(0, |snapshot| snapshot.mixer.profile.sources.len());
         // Below this width the stage moves above the mixer.
-        let compact = f32::from(viewport.width) < STAGE_WIDTH + mixer_min_width() + 2. * SPACE_2XL;
+        let compact = f32::from(viewport.width) < STAGE_WIDTH + mixer_min_width() + 2. * INSET;
         let height = f32::from(viewport.height);
         let stage = self.stage(compact, height, cx);
         let body = if compact {
@@ -27,11 +24,7 @@ impl Shell {
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
-                .child(div().flex().flex_col().child(stage).child(self.work_area(
-                    inputs,
-                    f32::INFINITY,
-                    cx,
-                )))
+                .child(div().flex().flex_col().child(stage).child(self.work_area(true, cx)))
                 .into_any_element()
         } else {
             div()
@@ -46,7 +39,7 @@ impl Shell {
                         .min_w_0()
                         .h_full()
                         .overflow_y_scroll()
-                        .child(self.work_area(inputs, height, cx)),
+                        .child(self.work_area(false, cx)),
                 )
                 .into_any_element()
         };
@@ -107,26 +100,32 @@ impl Shell {
     }
 
     /// The mixer, or one notice when the daemon is unavailable.
-    fn work_area(&self, inputs: usize, viewport_height: f32, cx: &mut Context<Self>) -> Div {
-        let mut column =
-            div().w_full().max_w(px(mixer_width(inputs))).flex().flex_col().gap(px(SPACE_XL));
+    fn work_area(&self, compact: bool, cx: &mut Context<Self>) -> Div {
+        let mut area = div()
+            .w_full()
+            .when(!compact, |view| view.h_full().min_h(px(MIXER_MIN_HEIGHT + 2. * INSET)))
+            .p(px(INSET))
+            .when(compact, gpui::Styled::pt_0)
+            .flex()
+            .flex_col()
+            .gap(px(SPACE_XL));
         if self.settings_modal.is_none()
             && let Some(error) = self.action_error.clone()
         {
-            column = column.child(error_banner(error, true, cx));
+            area = area.child(error_banner(error, true, cx));
         }
-        let column = match &self.snapshot {
-            Some(snapshot) => column.child(self.mixer_section(snapshot, viewport_height, cx)),
-            None => column.child(self.offline_notice(cx)),
-        };
-        div().w_full().p(px(SPACE_2XL)).flex().flex_col().items_center().child(column)
+        match &self.snapshot {
+            Some(snapshot) => area.child(self.mixer_section(snapshot, compact, cx)),
+            None => area.child(self.offline_notice(cx)),
+        }
     }
 
     fn offline_notice(&self, cx: &mut Context<Self>) -> Div {
         let enabled = !self.pending && self.settings_modal.is_none();
         div()
-            .py(px(96.))
+            .flex_1()
             .flex()
+            .justify_center()
             .flex_col()
             .items_center()
             .gap(px(SPACE_LG))
@@ -185,8 +184,8 @@ impl Shell {
         div()
             .h(px(TITLEBAR))
             .flex_shrink_0()
-            .pl(px(SPACE_XL))
-            .pr(px(SPACE_MD))
+            .pl(px(INSET))
+            .pr(px(SPACE_LG))
             .flex()
             .items_center()
             .justify_between()

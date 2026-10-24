@@ -83,33 +83,28 @@ struct FaderDrag {
     target: MixTarget,
 }
 
-const STRIP_MIN: f32 = 200.;
-const ADD_MIN: f32 = 140.;
-const STRIP_MAX: f32 = 320.;
+// Strips keep one width, so a longer name or source never moves its neighbors.
+const STRIP_WIDTH: f32 = 212.;
+const LANE_WIDTH: f32 = 52.;
+const SCALE_WIDTH: f32 = 28.;
 const FADER_WIDTH: f32 = 44.;
 const CAP: f32 = 16.;
-const FADER_MIN: f32 = 180.;
-const FADER_MAX: f32 = 340.;
-// Title bar, padding, section labels, strip chrome, and the output row.
-const MIXER_FIXED: f32 = 536.;
+const FADER_MIN: f32 = 80.;
+// The level readout and mute button under each fader, with their gaps.
+const LANE_FOOT: f32 = SPACE_MD + 24. + SPACE_MD + 32.;
+// The inputs keep this height when the window scrolls instead of filling it.
+const INPUTS_MIN: f32 = 360.;
+const INPUTS_COMPACT: f32 = 440.;
+/// The outputs label and its two rows.
+const OUTPUTS_HEIGHT: f32 = 16. + SPACE_MD + 2. * 60. + SPACE_SM;
+/// The mixer area scrolls below this height instead of shrinking its faders.
+pub(super) const MIXER_MIN_HEIGHT: f32 = INPUTS_MIN + SPACE_XL + OUTPUTS_HEIGHT;
 // Levels named on the scale between the two faders of a strip.
 const SCALE: [i16; 5] = [12, 0, -20, -40, -60];
 
-/// The widest the mixer grows for a number of inputs and the add-input panel.
-#[allow(clippy::cast_precision_loss)]
-pub(super) fn mixer_width(inputs: usize) -> f32 {
-    let inputs = inputs.max(2) as f32;
-    (inputs + 1.) * STRIP_MAX + inputs * SPACE_MD
-}
-
-/// The narrowest the mixer can be before its strips scroll sideways.
-#[allow(clippy::cast_precision_loss)]
+/// The narrowest mixer beside the stage. Narrower strips scroll sideways.
 pub(super) fn mixer_min_width() -> f32 {
-    2. * (STRIP_MIN + SPACE_MD) + ADD_MIN
-}
-
-fn fader_height_for_viewport(viewport_height: f32) -> f32 {
-    (viewport_height - MIXER_FIXED).clamp(FADER_MIN, FADER_MAX)
+    2. * STRIP_WIDTH + SPACE_MD
 }
 
 const fn mix_identity(target: MixTarget) -> (u32, &'static str, &'static str) {
@@ -123,56 +118,71 @@ impl Shell {
     pub(super) fn mixer_section(
         &self,
         snapshot: &Snapshot,
-        viewport_height: f32,
+        compact: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let fader_height = fader_height_for_viewport(viewport_height);
-        let mut strips =
-            div().id("input-strips").w_full().flex().gap(px(SPACE_MD)).overflow_x_scroll();
+        let mut strips = div()
+            .id("input-strips")
+            .w_full()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .gap(px(SPACE_MD))
+            .overflow_x_scroll();
         for source in &snapshot.mixer.profile.sources {
-            strips = strips.child(self.channel_strip(
-                source,
-                snapshot.mixer.generation(),
-                fader_height,
-                cx,
-            ));
+            strips = strips.child(self.channel_strip(source, snapshot.mixer.generation(), cx));
         }
         let strips = strips.child(self.add_input(snapshot, cx));
         div()
             .id("mixer")
             .debug_selector(|| "mixer".to_owned())
             .w_full()
-            .max_w(px(mixer_width(snapshot.mixer.profile.sources.len())))
+            .flex_1()
             .flex()
             .flex_col()
             .gap(px(SPACE_XL))
-            .child(div().flex().flex_col().gap(px(SPACE_MD)).child(label("Inputs")).child(strips))
+            .child(
+                div()
+                    .when(compact, |view| view.h(px(INPUTS_COMPACT)))
+                    .when(!compact, |view| view.flex_1().min_h(px(INPUTS_MIN)))
+                    .flex()
+                    .flex_col()
+                    .gap(px(SPACE_MD))
+                    .child(label("Inputs"))
+                    .child(strips),
+            )
             .child(self.application_panel(snapshot, cx))
             .child(
-                div().flex().flex_col().gap(px(SPACE_MD)).child(label("Outputs")).child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(SPACE_SM))
-                        .child(self.output_row(
-                            MixTarget::Monitor,
-                            "headphones",
-                            "Wave:3 headphones",
-                            self.meters.as_ref().map(|f| f.outputs[1]),
-                            self.meter_error.as_deref(),
-                            snapshot,
-                            cx,
-                        ))
-                        .child(self.output_row(
-                            MixTarget::Stream,
-                            "system",
-                            "Source for applications",
-                            self.meters.as_ref().map(|f| f.outputs[2]),
-                            self.meter_error.as_deref(),
-                            snapshot,
-                            cx,
-                        )),
-                ),
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(SPACE_MD))
+                    .child(label("Outputs"))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(SPACE_SM))
+                            .child(self.output_row(
+                                MixTarget::Monitor,
+                                "headphones",
+                                "Wave:3 headphones",
+                                self.meters.as_ref().map(|f| f.outputs[1]),
+                                self.meter_error.as_deref(),
+                                snapshot,
+                                cx,
+                            ))
+                            .child(self.output_row(
+                                MixTarget::Stream,
+                                "system",
+                                "Source for applications",
+                                self.meters.as_ref().map(|f| f.outputs[2]),
+                                self.meter_error.as_deref(),
+                                snapshot,
+                                cx,
+                            )),
+                    ),
             )
     }
 
@@ -180,13 +190,11 @@ impl Shell {
         &self,
         source: &MixerSourceSnapshot,
         generation: MixerGeneration,
-        fader_height: f32,
         cx: &mut Context<Self>,
     ) -> Div {
         card()
-            .flex_1()
-            .min_w(px(STRIP_MIN))
-            .max_w(px(STRIP_MAX))
+            .w(px(STRIP_WIDTH))
+            .flex_shrink_0()
             .p(px(SPACE_LG))
             .flex()
             .flex_col()
@@ -206,12 +214,23 @@ impl Shell {
             ))
             .child(
                 div()
+                    .flex_1()
+                    .min_h_0()
                     .flex()
-                    .justify_center()
-                    .gap(px(SPACE_XS))
-                    .child(self.lane(source, MixTarget::Monitor, generation, fader_height, cx))
-                    .child(scale(fader_height))
-                    .child(self.lane(source, MixTarget::Stream, generation, fader_height, cx)),
+                    .flex_col()
+                    .gap(px(SPACE_MD))
+                    .child(self.mix_header(source, cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .justify_center()
+                            .gap(px(SPACE_XS))
+                            .child(self.lane(source, MixTarget::Monitor, generation, cx))
+                            .child(scale())
+                            .child(self.lane(source, MixTarget::Stream, generation, cx)),
+                    ),
             )
     }
 
@@ -234,8 +253,8 @@ impl Shell {
         div()
             .flex()
             .items_center()
-            .gap(px(SPACE_MD))
-            .child(icon_tile(if microphone { "mic" } else { "system" }, INK, 40.))
+            .gap(px(SPACE_SM))
+            .child(icon_tile(if microphone { "mic" } else { "system" }, INK, 36.))
             .child(
                 div()
                     .flex_1()
@@ -250,75 +269,120 @@ impl Shell {
                             .font_weight(FontWeight::MEDIUM)
                             .child(source.name.clone()),
                     )
-                    .child(caption(if microphone {
-                        "Wave:3"
-                    } else if source.role == SourceRole::System {
-                        "Desktop audio"
-                    } else {
-                        "Application audio"
-                    })),
+                    .child(
+                        caption(if microphone {
+                            "Wave:3"
+                        } else if source.role == SourceRole::System {
+                            "Desktop audio"
+                        } else {
+                            "Application audio"
+                        })
+                        .truncate(),
+                    ),
             )
-            .child(icon_button(
-                &format!("linked-faders-{id}"),
-                if self.linked_faders.contains(&id) { "plugs-connected" } else { "plugs" },
-                "Link or unlink channel fader levels in this window",
-                Tone::Quiet,
-                if self.linked_faders.contains(&id) { INK } else { FAINT },
-                !self.pending && self.settings_modal.is_none(),
-                cx,
-                move |this, _, cx| {
-                    if !this.linked_faders.remove(&id) {
-                        this.linked_faders.insert(id);
-                    }
-                    cx.notify();
-                },
-            ))
             .when(!microphone, |view| {
-                view.child(icon_button(
-                    &format!("applications-{id}"),
-                    "system",
-                    "Assign an active application",
-                    Tone::Quiet,
-                    FAINT,
-                    !self.pending && self.audio_active(),
-                    cx,
-                    move |this, _, cx| {
-                        this.application_input =
-                            if this.application_input == Some(id) { None } else { Some(id) };
-                        this.poll_applications(cx);
-                        cx.notify();
-                    },
-                ))
+                view.child(
+                    icon_button(
+                        &format!("applications-{id}"),
+                        "system",
+                        "Assign an active application",
+                        Tone::Quiet,
+                        FAINT,
+                        !self.pending && self.audio_active(),
+                        cx,
+                        move |this, _, cx| {
+                            this.application_input =
+                                if this.application_input == Some(id) { None } else { Some(id) };
+                            this.poll_applications(cx);
+                            cx.notify();
+                        },
+                    )
+                    .size(px(28.)),
+                )
             })
             .when(source.role == SourceRole::Software, |view| {
-                view.child(icon_button(
-                    &format!("remove-input-{id}"),
-                    "x",
-                    if removable { "Remove input" } else { "Stop audio before removing an input" },
-                    Tone::Quiet,
-                    FAINT,
-                    removable,
-                    cx,
-                    move |this, _, cx| {
-                        this.send(
-                            Command::RemoveMixerInput {
-                                expected_generation: generation,
-                                source: id,
-                            },
-                            cx,
-                        );
-                    },
-                ))
+                view.child(
+                    icon_button(
+                        &format!("remove-input-{id}"),
+                        "x",
+                        if removable {
+                            "Remove input"
+                        } else {
+                            "Stop audio before removing an input"
+                        },
+                        Tone::Quiet,
+                        FAINT,
+                        removable,
+                        cx,
+                        move |this, _, cx| {
+                            this.send(
+                                Command::RemoveMixerInput {
+                                    expected_generation: generation,
+                                    source: id,
+                                },
+                                cx,
+                            );
+                        },
+                    )
+                    .size(px(28.)),
+                )
             })
     }
 
-    /// One source in one mix: the mix marker, fader, level, and mute.
+    /// The two mix icons over their faders, with the link control between them.
+    fn mix_header(&self, source: &MixerSourceSnapshot, cx: &mut Context<Self>) -> Div {
+        let id = source.controls.source();
+        let name = |target| {
+            let (color, glyph, _) = mix_identity(target);
+            let route = match target {
+                MixTarget::Monitor => source.controls.monitor(),
+                MixTarget::Stream => source.controls.stream(),
+            };
+            let color = if route.enabled() { color } else { FAINT };
+            identified(&format!("mix-{}-{target}", id.get()))
+                .w(px(LANE_WIDTH))
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon(glyph, color, ICON_SMALL))
+                .tooltip(tip(match target {
+                    MixTarget::Monitor => "Monitor mix",
+                    MixTarget::Stream => "Stream mix",
+                }))
+        };
+        let link = icon_button(
+            &format!("linked-faders-{id}"),
+            if self.linked_faders.contains(&id) { "plugs-connected" } else { "plugs" },
+            "Link or unlink channel fader levels in this window",
+            Tone::Quiet,
+            if self.linked_faders.contains(&id) { INK } else { FAINT },
+            !self.pending && self.settings_modal.is_none(),
+            cx,
+            move |this, _, cx| {
+                if !this.linked_faders.remove(&id) {
+                    this.linked_faders.insert(id);
+                }
+                cx.notify();
+            },
+        );
+        div()
+            .h(px(28.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(SPACE_XS))
+            .child(name(MixTarget::Monitor))
+            .child(div().w(px(SCALE_WIDTH)).flex().justify_center().child(link.size(px(28.))))
+            .child(name(MixTarget::Stream))
+    }
+
+    /// One source in one mix: the fader, level, and mute.
     fn lane(
         &self,
         source: &MixerSourceSnapshot,
         target: MixTarget,
         generation: MixerGeneration,
-        fader_height: f32,
         cx: &mut Context<Self>,
     ) -> Div {
         let id = source.controls.source();
@@ -326,7 +390,7 @@ impl Shell {
             MixTarget::Monitor => source.controls.monitor(),
             MixTarget::Stream => source.controls.stream(),
         };
-        let (color, glyph, name) = mix_identity(target);
+        let (color, _, _) = mix_identity(target);
         let key = format!("fader-{}-{target}", id.get());
         let shown = self
             .queued_fader
@@ -340,19 +404,12 @@ impl Shell {
         let muted = !route.enabled();
         let toggle = route_toggle_command(id, target, route, generation);
         div()
-            .w(px(64.))
+            .w(px(LANE_WIDTH))
+            .h_full()
             .flex()
             .flex_col()
             .items_center()
             .gap(px(SPACE_MD))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(icon(glyph, if muted { FAINT } else { color }, ICON_SMALL))
-                    .child(caption(name).text_color(rgb(if muted { FAINT } else { color }))),
-            )
             .child(fader_track(
                 &key,
                 id,
@@ -360,7 +417,6 @@ impl Shell {
                 route,
                 generation,
                 shown,
-                fader_height,
                 if muted { FAINT } else { color },
                 open && (!self.pending || self.in_flight_fader.is_some()),
                 cx,
@@ -371,7 +427,8 @@ impl Shell {
                 activate(
                     button_face(&format!("{key}-reset"), Tone::Quiet)
                         .h(px(24.))
-                        .px(px(SPACE_SM))
+                        .w_full()
+                        .px_0()
                         .text_size(px(CAPTION))
                         .font_features(tabular())
                         .text_color(rgb(if muted { FAINT } else { INK }))
@@ -425,9 +482,8 @@ impl Shell {
             free.and_then(|id| librewave_core::InputName::try_new(&format!("Input {id}")).ok());
         activate(
             identified("add-input")
-                .flex_1()
-                .min_w(px(ADD_MIN))
-                .max_w(px(STRIP_MAX))
+                .w(px(STRIP_WIDTH))
+                .flex_shrink_0()
                 .rounded(px(RADIUS_CARD))
                 .bg(rgba(alpha(PANEL, 0x8C)))
                 .flex()
@@ -455,10 +511,7 @@ impl Shell {
     }
 }
 
-/// One mix: its name, where it goes, and its level.
-///
-/// The daemon has no output selection or output level command. Both parts of
-/// the row are shown inactive.
+/// Software output controls with a read-only destination.
 impl Shell {
     #[allow(
         clippy::too_many_arguments,
@@ -474,7 +527,7 @@ impl Shell {
         snapshot: &Snapshot,
         cx: &mut Context<Self>,
     ) -> Div {
-        let (color, mix_glyph, name) = mix_identity(target);
+        let (color, _, name) = mix_identity(target);
         let key = name.to_lowercase();
         let route = snapshot.mixer.profile.outputs.route(target);
         let shown = self
@@ -488,43 +541,13 @@ impl Shell {
         let generation = snapshot.mixer.generation();
         let controls_open = self.settings_modal.is_none();
         let mutable = controls_open && !self.pending;
-        card()
-            .w_full()
-            .p(px(SPACE_MD))
+        let identity = output_identity(target, glyph, destination, levels, error);
+        let controls = div()
+            .flex_1()
+            .min_w(px(224.))
             .flex()
             .items_center()
             .gap(px(SPACE_MD))
-            .child(div().w(px(40.)).flex_shrink_0().child(super::meters::bar(
-                &format!("output-{key}"),
-                levels,
-                color,
-                error,
-            )))
-            .child(
-                div()
-                    .w(px(152.))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(SPACE_MD))
-                    .child(icon_tile(mix_glyph, color, 36.))
-                    .child(div().font_weight(FontWeight::MEDIUM).child(format!("{name} mix"))),
-            )
-            .child(
-                identified(&format!("output-{key}-destination"))
-                    .flex_1()
-                    .min_w_0()
-                    .h(px(36.))
-                    .px(px(SPACE_MD))
-                    .rounded(px(RADIUS))
-                    .bg(rgb(RAISED))
-                    .flex()
-                    .items_center()
-                    .gap(px(SPACE_SM))
-                    .child(icon(glyph, MUTED, ICON_SMALL))
-                    .child(div().flex_1().min_w_0().truncate().child(destination))
-                    .tooltip(tip("Output selection is not available yet")),
-            )
             .child(output_track(
                 &format!("output-{key}-level"),
                 target,
@@ -554,6 +577,9 @@ impl Shell {
             ))
             .child(activate(
                 button_face(&format!("output-{key}-reset"), Tone::Quiet)
+                    .w(px(80.))
+                    .justify_end()
+                    .font_features(tabular())
                     .child(format!("{:.1} dB", shown.decibels()))
                     .tooltip(tip("Reset software output to 0 dB")),
                 mutable,
@@ -561,8 +587,65 @@ impl Shell {
                 move |this, _, cx| {
                     this.send_fader(MixerEdit::Output { target, fader: FaderGain::UNITY }, cx);
                 },
-            ))
+            ));
+        card()
+            .w_full()
+            .p(px(SPACE_MD))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(SPACE_MD))
+            .child(identity)
+            .child(controls)
     }
+}
+
+fn output_identity(
+    target: MixTarget,
+    glyph: &'static str,
+    destination: &'static str,
+    levels: Option<librewave_core::StereoLevels>,
+    error: Option<&str>,
+) -> Div {
+    let (color, mix_glyph, name) = mix_identity(target);
+    let key = name.to_lowercase();
+    div()
+        .flex_1()
+        .min_w(px(320.))
+        .flex()
+        .items_center()
+        .gap(px(SPACE_MD))
+        .child(div().w(px(40.)).flex_shrink_0().child(super::meters::bar(
+            &format!("output-{key}"),
+            levels,
+            color,
+            error,
+        )))
+        .child(
+            div()
+                .w(px(152.))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .gap(px(SPACE_MD))
+                .child(icon_tile(mix_glyph, color, 36.))
+                .child(div().font_weight(FontWeight::MEDIUM).child(format!("{name} mix"))),
+        )
+        .child(
+            identified(&format!("output-{key}-destination"))
+                .flex_1()
+                .min_w_0()
+                .h(px(36.))
+                .px(px(SPACE_MD))
+                .rounded(px(RADIUS))
+                .bg(rgb(RAISED))
+                .flex()
+                .items_center()
+                .gap(px(SPACE_SM))
+                .child(icon(glyph, MUTED, ICON_SMALL))
+                .child(div().flex_1().min_w_0().truncate().child(destination))
+                .tooltip(tip("Output selection is not available yet")),
+        )
 }
 
 #[derive(Clone)]
@@ -676,15 +759,16 @@ fn output_at_pixel(x: f32, left: f32, width: f32) -> Option<FaderGain> {
     fader_from_fraction((x - left - CAP / 2.) / (width - CAP))
 }
 
-/// The level names between the two faders of a strip.
-fn scale(fader_height: f32) -> Div {
-    let mut scale = div().w(px(24.)).h(px(fader_height)).mt(px(28.)).relative();
+/// The level names between the two faders of a strip, aligned with their tracks.
+fn scale() -> Div {
+    let mut marks = div().size_full().relative();
     for level in SCALE {
         let fraction = FaderGain::from_decibels(f32::from(level)).map_or(0., fader_fraction);
-        scale = scale.child(
+        marks = marks.child(
             div()
                 .absolute()
-                .top(px((1. - fraction) * (fader_height - CAP) + CAP / 2. - 7.))
+                .top(relative(1. - fraction))
+                .mt(px(-7.))
                 .w_full()
                 .text_center()
                 .text_size(px(10.))
@@ -693,7 +777,13 @@ fn scale(fader_height: f32) -> Div {
                 .child(level.to_string().replace('-', "−")),
         );
     }
-    scale
+    div()
+        .w(px(SCALE_WIDTH))
+        .h_full()
+        .flex()
+        .flex_col()
+        .child(div().flex_1().min_h(px(FADER_MIN)).py(px(CAP / 2.)).child(marks))
+        .child(div().h(px(LANE_FOOT)).flex_shrink_0())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -704,7 +794,6 @@ fn fader_track(
     route: MixRoute,
     generation: MixerGeneration,
     shown: FaderGain,
-    height: f32,
     color: u32,
     enabled: bool,
     cx: &mut Context<Shell>,
@@ -713,7 +802,8 @@ fn fader_track(
     let painted_bounds = std::rc::Rc::clone(&bounds);
     let mut track = identified(key)
         .w(px(FADER_WIDTH))
-        .h(px(height))
+        .flex_1()
+        .min_h(px(FADER_MIN))
         .py(px(CAP / 2.))
         .rounded(px(RADIUS))
         .relative()
@@ -968,12 +1058,14 @@ mod tests {
     }
 
     #[test]
-    fn faders_fit_the_shortest_window_and_the_scale_names_real_levels() {
-        assert!((fader_height_for_viewport(650.) - FADER_MIN).abs() < f32::EPSILON);
-        assert!((fader_height_for_viewport(4000.) - FADER_MAX).abs() < f32::EPSILON);
+    fn inputs_keep_room_for_a_usable_fader_and_the_scale_names_real_levels() {
+        // Section label, strip padding, heading, meter, mix names, and their gaps.
+        let chrome =
+            16. + SPACE_MD + 2. * SPACE_LG + 40. + SPACE_XL + 9. + SPACE_XL + 28. + SPACE_MD;
+        assert!(chrome + FADER_MIN + LANE_FOOT <= INPUTS_MIN);
         for level in SCALE {
             assert!(FaderGain::from_decibels(f32::from(level)).is_ok());
         }
-        assert!(mixer_min_width() < mixer_width(2));
+        assert!(mixer_min_width() > 2. * STRIP_WIDTH);
     }
 }

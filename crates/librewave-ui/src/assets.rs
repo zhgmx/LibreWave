@@ -5,6 +5,7 @@ pub(super) struct Assets;
 
 const ICONS: &[(&str, &[u8])] = &[
     ("arrow-clockwise", include_bytes!("../assets/icons/arrow-clockwise.svg")),
+    ("copy", include_bytes!("../assets/icons/copy.svg")),
     ("folder-open", include_bytes!("../assets/icons/folder-open.svg")),
     ("headphones", include_bytes!("../assets/icons/headphones.svg")),
     ("lock-simple", include_bytes!("../assets/icons/lock-simple.svg")),

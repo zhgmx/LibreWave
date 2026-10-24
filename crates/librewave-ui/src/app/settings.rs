@@ -1,7 +1,7 @@
 //! The Settings dialog: audio, setup, and the daemon connection.
 use super::chrome::error_banner;
 use super::controls::{
-    Tone, action_button, activate, button_face, caption, chip, dot, icon, icon_button, icon_tile,
+    Tone, action_button, activate, button_face, caption, chip, dot, icon, icon_button, label,
     labeled_icon_button,
 };
 use super::theme::{
@@ -34,6 +34,14 @@ impl SettingsPane {
             Self::Connection => ("pane-connection", "plugs-connected", "Connection"),
         }
     }
+
+    const fn summary(self) -> &'static str {
+        match self {
+            Self::Audio => "Start and stop the LibreWave audio engine.",
+            Self::Setup => "Install, check, and remove LibreWave.",
+            Self::Connection => "The daemon and the desktop audio services.",
+        }
+    }
 }
 
 impl Shell {
@@ -53,7 +61,6 @@ impl Shell {
             Shell::close_settings,
         )
         .track_focus(&modal.close_focus);
-        let (_, _, title) = self.settings_pane.identity();
         let pane = match self.settings_pane {
             SettingsPane::Audio => self.audio_pane(cx),
             SettingsPane::Setup => self.setup_pane(cx),
@@ -73,7 +80,7 @@ impl Shell {
                 div()
                     .id("settings-panel")
                     .debug_selector(|| "settings-panel".to_owned())
-                    .w(px(760.))
+                    .w(px(720.))
                     .h(px(520.))
                     .max_h_full()
                     .track_focus(&modal.focus)
@@ -103,17 +110,18 @@ impl Shell {
                             .h_full()
                             .flex()
                             .flex_col()
-                            .child(pane_header(title, self.settings_pane, close))
+                            .child(pane_header(self.settings_pane, close))
                             .child(
                                 div()
                                     .id("settings-pane")
                                     .flex_1()
                                     .min_h_0()
                                     .overflow_y_scroll()
-                                    .p(px(SPACE_XL))
+                                    .px(px(SPACE_XL))
+                                    .pb(px(SPACE_XL))
                                     .flex()
                                     .flex_col()
-                                    .gap(px(SPACE_LG))
+                                    .gap(px(SPACE_XL))
                                     .when_some(self.action_error.clone(), |view, error| {
                                         view.child(error_banner(error, true, cx))
                                     })
@@ -125,23 +133,22 @@ impl Shell {
 
     fn settings_navigation(&self, cx: &mut Context<Self>) -> Div {
         let mut navigation = div()
-            .w(px(200.))
+            .w(px(188.))
             .h_full()
             .flex_shrink_0()
-            .p(px(SPACE_MD))
+            .px(px(SPACE_MD))
+            .py(px(SPACE_LG))
             .bg(rgb(BACKGROUND))
             .flex()
             .flex_col()
-            .gap(px(SPACE_XS))
+            .gap(px(2.))
             .child(
                 div()
                     .px(px(SPACE_MD))
-                    .pt(px(SPACE_SM))
-                    .pb(px(SPACE_MD))
-                    .text_size(px(CAPTION))
-                    .line_height(px(CAPTION_LINE))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(FAINT))
+                    .pb(px(SPACE_LG))
+                    .text_size(px(HEADING))
+                    .line_height(px(HEADING_LINE))
+                    .font_weight(FontWeight::SEMIBOLD)
                     .child("Settings"),
             );
         for pane in SettingsPane::ALL {
@@ -150,11 +157,12 @@ impl Shell {
             navigation = navigation.child(activate(
                 button_face(id, Tone::Quiet)
                     .w_full()
-                    .h(px(36.))
+                    .h(px(34.))
+                    .px(px(SPACE_MD))
                     .justify_start()
                     .gap(px(SPACE_MD))
                     .when(selected, |view| view.bg(rgb(RAISED)).text_color(rgb(INK)))
-                    .child(icon(glyph, if selected { INK } else { MUTED }, ICON_SMALL))
+                    .child(icon(glyph, if selected { INK } else { FAINT }, ICON_SMALL))
                     .child(name),
                 true,
                 cx,
@@ -171,19 +179,15 @@ impl Shell {
         let enabled = !self.pending;
         let runtime = self.snapshot.as_ref().map(|snapshot| snapshot.mixer.runtime);
         let running = matches!(runtime, Some(MixerRuntimeState::Active));
-        let (glyph, color, state, detail) = match runtime {
-            Some(MixerRuntimeState::Active) => (
-                "speaker-high",
-                MONITOR,
-                "Audio is running",
-                "Closing the window keeps audio running.".to_owned(),
-            ),
+        let (color, state, detail) = match runtime {
+            Some(MixerRuntimeState::Active) => {
+                (MONITOR, "Audio is running", "Closing the window keeps audio running.".to_owned())
+            }
             Some(MixerRuntimeState::Inactive { reason }) => {
-                ("power", MUTED, "Audio is stopped", sentence(&reason.to_string()))
+                (FAINT, "Audio is stopped", sentence(&reason.to_string()))
             }
             None => (
-                "power",
-                MUTED,
+                FAINT,
                 "Audio state is unavailable",
                 "Connect to the daemon to check audio state.".to_owned(),
             ),
@@ -201,7 +205,7 @@ impl Shell {
             "session-stop",
             "stop",
             "Stop and restore",
-            Tone::Secondary,
+            if running { Tone::Secondary } else { Tone::Quiet },
             enabled,
             cx,
             |this, _, cx| this.run_lifecycle(librewavectl::SessionAction::Stop, cx),
@@ -209,32 +213,16 @@ impl Shell {
         div()
             .flex()
             .flex_col()
-            .gap(px(SPACE_LG))
-            .child(
+            .gap(px(SPACE_XL))
+            .child(section(
+                "Engine",
                 group().child(
-                    div()
-                        .p(px(SPACE_LG))
-                        .flex()
-                        .flex_col()
-                        .gap(px(SPACE_LG))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(SPACE_MD))
-                                .child(icon_tile(glyph, color, 44.))
-                                .child(description(state, detail)),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .gap(px(SPACE_SM))
-                                .when(!running, |view| view.child(start))
-                                .child(stop),
-                        ),
+                    status_row(color, state, detail)
+                        .child(stop)
+                        .when(!running, |view| view.child(start)),
                 ),
-            )
-            .child(self.conflict_row(cx))
+            ))
+            .child(section("Troubleshooting", group().child(self.conflict_row(cx))))
             .children(self.outcome())
             .into_any_element()
     }
@@ -243,40 +231,38 @@ impl Shell {
     fn conflict_row(&self, cx: &mut Context<Self>) -> Div {
         let enabled = !self.pending;
         let chosen = self.suspend_config.as_ref().map(|path| path.display().to_string());
-        group().child(
-            row(
-                "WirePlumber conflict",
-                chosen.clone().unwrap_or_else(|| {
-                    "If start reports a conflicting file, choose it here. LibreWave \
-                     backs it up and restores it when audio stops."
-                        .to_owned()
-                }),
-            )
-            .child(labeled_icon_button(
-                "choose-fragment",
-                "folder-open",
-                "Choose file…",
-                Tone::Secondary,
-                enabled,
-                cx,
-                |this, _, cx| this.choose_fragment(cx),
-            ))
-            .when(chosen.is_some(), |view| {
-                view.child(icon_button(
-                    "clear-fragment",
-                    "x",
-                    "Clear the chosen file",
-                    Tone::Quiet,
-                    MUTED,
-                    enabled,
-                    cx,
-                    |this, _, cx| {
-                        this.suspend_config = None;
-                        cx.notify();
-                    },
-                ))
+        row(
+            "WirePlumber conflict",
+            chosen.clone().unwrap_or_else(|| {
+                "If start reports a conflicting file, choose it here. LibreWave backs it up \
+                 and restores it when audio stops."
+                    .to_owned()
             }),
         )
+        .when(chosen.is_some(), |view| {
+            view.child(icon_button(
+                "clear-fragment",
+                "x",
+                "Clear the chosen file",
+                Tone::Quiet,
+                MUTED,
+                enabled,
+                cx,
+                |this, _, cx| {
+                    this.suspend_config = None;
+                    cx.notify();
+                },
+            ))
+        })
+        .child(labeled_icon_button(
+            "choose-fragment",
+            "folder-open",
+            "Choose file…",
+            Tone::Secondary,
+            enabled,
+            cx,
+            |this, _, cx| this.choose_fragment(cx),
+        ))
     }
 
     fn setup_pane(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -289,20 +275,33 @@ impl Shell {
         .into_iter()
         .enumerate()
         {
+            let text = format!("librewavectl {command}");
             commands = commands.when(index > 0, |view| view.child(separator())).child(
-                row(name, detail.to_owned()).child(code(&format!("librewavectl {command}"))),
+                row(name, detail.to_owned()).child(code(&text)).child(icon_button(
+                    &format!("copy-{command}"),
+                    "copy",
+                    "Copy the command",
+                    Tone::Quiet,
+                    MUTED,
+                    true,
+                    cx,
+                    move |_, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+                    },
+                )),
             );
         }
         div()
             .flex()
             .flex_col()
-            .gap(px(SPACE_LG))
-            .child(
+            .gap(px(SPACE_XL))
+            .child(section(
+                "Plan",
                 group().child(
                     row(
                         "Setup plan",
                         "Lists the files and the access rule that setup installs. \
-                         This makes no changes."
+                         It makes no changes."
                             .to_owned(),
                     )
                     .child(action_button(
@@ -316,10 +315,9 @@ impl Shell {
                         },
                     )),
                 ),
-            )
+            ))
             .children(self.outcome())
-            .child(caption("Run these commands in a terminal.").text_color(rgb(FAINT)))
-            .child(commands)
+            .child(section("Terminal commands", commands))
             .into_any_element()
     }
 
@@ -332,22 +330,14 @@ impl Shell {
                 }
                 None => (FAINT, "Unknown".to_owned()),
             };
-            div()
-                .min_h(px(52.))
-                .px(px(SPACE_LG))
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(SPACE_LG))
-                .child(name)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(SPACE_SM))
-                        .child(dot(color))
-                        .child(div().text_color(rgb(MUTED)).child(text)),
-                )
+            row(name, String::new()).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(SPACE_SM))
+                    .child(dot(color))
+                    .child(div().text_color(rgb(MUTED)).child(text)),
+            )
         };
         let audio = self.snapshot.as_ref().map(|snapshot| &snapshot.audio);
         let (color, state) =
@@ -355,44 +345,35 @@ impl Shell {
         div()
             .flex()
             .flex_col()
-            .gap(px(SPACE_LG))
-            .child(
-                group().child(
-                    div()
-                        .p(px(SPACE_LG))
-                        .flex()
-                        .items_center()
-                        .gap(px(SPACE_MD))
-                        .child(icon_tile(
-                            if self.snapshot.is_some() { "plugs-connected" } else { "plugs" },
-                            color,
-                            44.,
-                        ))
-                        .child(description("LibreWave daemon", state.to_owned()))
-                        .child(icon_button(
+            .gap(px(SPACE_XL))
+            .child(section(
+                "Daemon",
+                group()
+                    .child(status_row(color, state, "The LibreWave daemon.".to_owned()).child(
+                        icon_button(
                             "refresh",
                             "arrow-clockwise",
                             "Check the connection again",
-                            Tone::Secondary,
-                            INK,
+                            Tone::Quiet,
+                            MUTED,
                             !self.pending,
                             cx,
                             |this, _, cx| this.send(Command::GetStatus, cx),
-                        )),
-                ),
-            )
-            .child(
-                group().child(
-                    row("Socket", "The daemon answers on this path.".to_owned())
-                        .child(code(&configured_socket_path().display().to_string())),
-                ),
-            )
-            .child(
+                        ),
+                    ))
+                    .child(separator())
+                    .child(
+                        row("Socket", String::new())
+                            .child(code(&configured_socket_path().display().to_string())),
+                    ),
+            ))
+            .child(section(
+                "Audio services",
                 group()
                     .child(service("PipeWire", audio.map(|audio| &audio.pipewire)))
                     .child(separator())
                     .child(service("WirePlumber", audio.map(|audio| &audio.wireplumber))),
-            )
+            ))
             .when_some(self.connection_error.clone(), |view, error| {
                 view.child(error_banner(error, false, cx))
             })
@@ -400,10 +381,10 @@ impl Shell {
     }
 
     /// The result of the last audio or setup action.
-    fn outcome(&self) -> Vec<Div> {
-        let mut outcome = Vec::new();
-        if let Some(message) = self.lifecycle_message.clone() {
-            outcome.push(
+    fn outcome(&self) -> Option<Div> {
+        self.lifecycle_message.clone().map(|message| {
+            section(
+                "Result",
                 group()
                     .p(px(SPACE_LG))
                     .text_size(px(CAPTION))
@@ -411,38 +392,52 @@ impl Shell {
                     .text_color(rgb(MUTED))
                     .font_family(MONO)
                     .child(message),
-            );
-        }
-        outcome
+            )
+        })
     }
 }
 
-/// The page title and the close button.
-fn pane_header(title: &'static str, pane: SettingsPane, close: gpui::Stateful<Div>) -> Div {
+/// The page title, its purpose, and the close button.
+fn pane_header(pane: SettingsPane, close: gpui::Stateful<Div>) -> Div {
+    let (_, _, title) = pane.identity();
     div()
         .pl(px(SPACE_XL))
-        .pr(px(SPACE_MD))
-        .pt(px(SPACE_MD))
+        .pr(px(SPACE_LG))
+        .pt(px(SPACE_LG))
+        .pb(px(SPACE_XL))
         .flex()
-        .items_center()
+        .items_start()
         .justify_between()
         .child(
             div()
+                .pt(px(SPACE_SM))
                 .flex()
-                .items_center()
-                .gap(px(SPACE_MD))
+                .flex_col()
+                .gap(px(2.))
                 .child(
                     div()
-                        .text_size(px(TITLE))
-                        .line_height(px(TITLE_LINE))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(title),
+                        .flex()
+                        .items_center()
+                        .gap(px(SPACE_MD))
+                        .child(
+                            div()
+                                .text_size(px(TITLE))
+                                .line_height(px(TITLE_LINE))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(title),
+                        )
+                        .when(pane == SettingsPane::Audio, |view| {
+                            view.child(chip("Experimental", WARNING))
+                        }),
                 )
-                .when(pane == SettingsPane::Audio, |view| {
-                    view.child(chip("Experimental", WARNING))
-                }),
+                .child(caption(pane.summary())),
         )
         .child(close)
+}
+
+/// A labeled group of related rows.
+fn section(name: &str, content: Div) -> Div {
+    div().flex().flex_col().gap(px(SPACE_SM)).child(label(name).px(px(SPACE_XS))).child(content)
 }
 
 /// A filled surface that holds related rows.
@@ -454,35 +449,47 @@ fn separator() -> Div {
     div().mx(px(SPACE_LG)).h(px(1.)).bg(rgb(LINE))
 }
 
-fn description(title: &str, detail: String) -> Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .gap(px(2.))
-        .child(
-            div()
-                .text_size(px(HEADING))
-                .line_height(px(HEADING_LINE))
-                .font_weight(FontWeight::MEDIUM)
-                .child(title.to_owned()),
-        )
-        .child(caption(detail))
-}
-
 /// A setting: its name and purpose on the left, its controls after it.
 fn row(title: &str, detail: String) -> Div {
-    div().p(px(SPACE_LG)).flex().items_center().gap(px(SPACE_MD)).child(
-        div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap(px(2.))
-            .child(div().font_weight(FontWeight::MEDIUM).child(title.to_owned()))
-            .child(caption(detail)),
-    )
+    div()
+        .min_h(px(56.))
+        .px(px(SPACE_LG))
+        .py(px(SPACE_MD))
+        .flex()
+        .items_center()
+        .gap(px(SPACE_SM))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(div().font_weight(FontWeight::MEDIUM).child(title.to_owned()))
+                .when(!detail.is_empty(), |view| view.child(caption(detail))),
+        )
+}
+
+/// A row that leads with a state light.
+fn status_row(color: u32, title: &str, detail: String) -> Div {
+    div()
+        .min_h(px(64.))
+        .px(px(SPACE_LG))
+        .py(px(SPACE_MD))
+        .flex()
+        .items_center()
+        .gap(px(SPACE_SM))
+        .child(div().w(px(20.)).flex().justify_center().child(dot(color)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(div().font_weight(FontWeight::MEDIUM).child(title.to_owned()))
+                .child(caption(detail)),
+        )
 }
 
 fn code(text: &str) -> Div {

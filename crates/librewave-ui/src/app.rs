@@ -39,7 +39,7 @@ const TITLEBAR: f32 = 52.;
 pub fn run(view: LaunchView) {
     gpui_platform::application().with_assets(crate::assets::Assets).run(move |cx: &mut App| {
         cx.text_system().add_fonts(crate::assets::fonts()).expect("embedded Geist fonts must load");
-        let bounds = Bounds::centered(None, size(px(1200.), px(820.)), cx);
+        let bounds = Bounds::centered(None, size(px(1280.), px(840.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(850.), px(650.))),
@@ -1254,6 +1254,81 @@ mod tests {
         assert!(cx.debug_bounds("add-input").is_some());
         for fader in ["fader-1-monitor", "fader-1-stream", "fader-2-monitor", "fader-2-stream"] {
             assert!(cx.debug_bounds(fader).is_some(), "{fader} is missing");
+        }
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
+    fn settings_copy_commands_survive_repeated_open_and_close(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| shell_with(Snapshot::empty()));
+        for _ in 0..2 {
+            cx.simulate_keystrokes("ctrl-,");
+            let setup = cx.debug_bounds("pane-setup").expect("Setup page");
+            cx.simulate_click(setup.center(), gpui::Modifiers::none());
+            for (command, selector) in [
+                ("setup", "copy-setup"),
+                ("doctor", "copy-doctor"),
+                ("uninstall", "copy-uninstall"),
+            ] {
+                let copy = cx.debug_bounds(selector).expect("copy button");
+                let panel = cx.debug_bounds("settings-panel").expect("Settings panel");
+                assert!(copy.left() >= panel.left() && copy.right() <= panel.right());
+                cx.simulate_click(copy.center(), gpui::Modifiers::none());
+                cx.update(|_, cx| {
+                    assert_eq!(
+                        cx.read_from_clipboard().and_then(|item| item.text()),
+                        Some(format!("librewavectl {command}"))
+                    );
+                });
+            }
+            cx.simulate_keystrokes("escape");
+            assert!(view.read_with(cx, |view, _| view.settings_modal.is_none()));
+        }
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
+    fn opening_settings_cancels_queued_fader_intent(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| {
+            let mut shell = shell_with(Snapshot::empty());
+            let edit = MixerEdit::Output { target: MixTarget::Monitor, fader: FaderGain::MIN };
+            shell.pending = true;
+            shell.in_flight_fader = Some(edit);
+            shell.queued_fader = Some(edit);
+            shell
+        });
+        cx.simulate_keystrokes("ctrl-,");
+        cx.update(|_, cx| {
+            view.update(cx, |view, _| {
+                assert!(view.queued_fader.is_none());
+                assert!(view.finish_fader(true).is_none());
+            });
+        });
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(cx, |view, _| view.queued_fader.is_none()));
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
+    fn mixer_output_controls_stay_inside_the_resized_work_area(cx: &mut gpui::TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| shell_with(Snapshot::empty()));
+        for width in [850., 928., 1000., 1280., 1920.] {
+            cx.simulate_resize(gpui::size(px(width), px(840.)));
+            let mixer = cx.debug_bounds("mixer").expect("mixer");
+            for key in [
+                "output-monitor-level",
+                "output-monitor-mute",
+                "output-monitor-reset",
+                "output-stream-level",
+                "output-stream-mute",
+                "output-stream-reset",
+            ] {
+                let control = cx.debug_bounds(key).expect(key);
+                assert!(
+                    control.left() >= mixer.left() && control.right() <= mixer.right(),
+                    "{key} exceeds the mixer at {width}px: {control:?} versus {mixer:?}"
+                );
+            }
         }
     }
 

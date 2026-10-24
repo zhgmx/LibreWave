@@ -25,8 +25,13 @@ For device and mixer development without an installation, run `cargo run -p libr
 The main view has a title bar, a device stage, and a mixer. The title bar is
 the only place on the main view that shows and changes the audio state. In a
 window too narrow for the stage and two input strips side by side, the stage
-sits above the mixer. The default window is 1200 by 820 px. The minimum is
+sits above the mixer. The default window is 1280 by 840 px. The minimum is
 850 by 650 px.
+
+In the side-by-side layout, the stage and the mixer use the same 32 px inset.
+The device name and the **Inputs** label share a top edge. The faders use
+the available window height. When the controls need more height, the mixer
+scrolls. Output rows wrap in a narrow mixer.
 
 The application uses Geist type on dark surfaces. Surfaces differ by fill.
 Outlines show keyboard focus only. Monitor is mint and Stream is blue in every
@@ -94,8 +99,11 @@ volume and software mixer levels.
 ### Mixer
 
 **Inputs** has one strip for each input. Microphone and System are permanent
-inputs. Up to ten additional software inputs can receive application audio. Each strip has a stereo input peak meter, a Monitor fader, and a Stream fader
-with a dB scale between them. Input meters observe samples before the faders.
+inputs. Up to ten additional software inputs can receive application audio.
+Every strip is 212 px wide. A long input name or source ends with an ellipsis
+instead of moving other controls. Each strip has a stereo input peak meter, a
+Monitor fader, and a Stream fader with a dB scale between them. Input meters
+observe samples before the faders.
 Output meters observe each final mix after clipping. The meter scale is
 -60 to 0 dBFS. A source peak above full scale appears red. A dim track means
 that no recent reading is available, not measured silence. A line on each track marks 0 dB.
@@ -106,8 +114,9 @@ input in that mix. A muted fader is grey and its button is red. Setting or
 resetting a level preserves its mute state. Levels changed while audio is
 stopped are saved.
 
-The plugs button links the two fader levels in the current window. With the
-levels linked, changing either fader sets both to the selected level in one
+A headphones icon marks the Monitor fader and a broadcast icon marks the
+Stream fader. The plugs button between the two icons links the two fader
+levels in the current window. When linked, either fader sets both levels in one
 daemon transaction. Each mix keeps its own mute state. Unlinking permits
 independent levels again. The link preference lasts until the window closes.
 
@@ -169,13 +178,18 @@ open.
 
 Settings has three pages:
 
-- **Audio** shows whether audio runs and why it is stopped. It has
-  **Start audio**, **Stop and restore**, and the WirePlumber conflict file.
+- **Audio** shows whether audio runs and why it is stopped. Its **Engine**
+  section has **Start audio** and **Stop and restore**. Its **Troubleshooting**
+  section has the WirePlumber conflict file.
 - **Setup** has **Show plan**, which lists the paths and the access rule that
-  setup installs without changes. It also names the `librewavectl setup`,
-  `doctor`, and `uninstall` commands.
-- **Connection** shows the daemon connection, the IPC socket, and the state of
-  PipeWire and WirePlumber.
+  setup installs without changes. Its **Terminal commands** section names the
+  `librewavectl setup`, `doctor`, and `uninstall` commands. The button after
+  each command copies it.
+- **Connection** shows the daemon connection and the IPC socket under
+  **Daemon**, and the state of PipeWire and WirePlumber under
+  **Audio services**.
+
+The Audio and Setup pages show the last lifecycle result under **Result**.
 
 ## Mixer requests
 
@@ -215,7 +229,9 @@ and routing stability remain unverified.
 
 GPUI fixture tests cover command mapping, pointer geometry, state handling,
 Ready and Locked layouts, initial keyboard focus, modal focus containment,
-Settings restoration errors, and backdrop dismissal. Native Wave:3 API 5.4
+Settings restoration errors, and backdrop dismissal. They also check output
+controls from 850 to 1920 px wide, repeated command copying in Settings,
+and cancellation of queued fader edits when Settings opens. Native Wave:3 API 5.4
 captures cover the connected view, loaded controls, minimum-window device
 stage, and Settings dialog with audio inactive and hardware controls unchanged.
 Captures alone do not verify native input, active audio, or other desktops.
