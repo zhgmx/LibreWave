@@ -332,11 +332,26 @@ opening hardware, recovering a pending write, or changing files. Experimental
 start invokes this check through the verified installed daemon before its first
 service or desktop change. An error names the incompatible profile path.
 
-The current mixer file uses schema 2. It includes software output controls.
-The daemon rejects schema 1 without changing the file. Setup preserves profiles
-and does not convert them. Before replacing old development state, stop the
-sole daemon, save the exact profile bytes and mode, and review a current-format
-replacement. Retain the backup with the matching old binary for rollback.
-Do not delete a profile to make startup succeed without reviewing its settings.
+The current mixer file uses schema 3. The daemon rejects older schemas without
+changing the file. Setup preserves profiles and does not inject first-run
+channels into existing profiles.
+
+For a local schema-2 development profile, stop the desktop service and use
+`librewavectl stop` first. With the daemon stopped, run the newly built
+`librewavectl convert-profile`. The command uses the lifecycle operation lock.
+It preserves generation, channel IDs, order, routes, output levels, and file
+mode. It adds the next channel ID and an empty saved-rule list. Schema 2 had
+no saved-rule field. It stores the exact original bytes and mode in
+`mixer-schema-2-backup.json` under the LibreWave state directory before it
+replaces the profile. Run `librewaved --check-config` before starting the mixer.
+
+If installation fails, keep the daemon stopped and run
+`librewavectl convert-profile --rollback` with the new CLI. Rollback restores
+the exact original file and retains the backup. It refuses to overwrite a
+profile edited since conversion. Conversion also refuses pending profile
+writes, symbolic links, unknown schemas, and invalid profiles. Repeating an
+interrupted conversion or rollback is safe when the profile still matches
+one of the recorded states. This explicit development conversion is not an
+automatic compatibility path in the daemon.
 
 Do not add compatibility readers, deprecated commands, dual writers, or fallback installation paths before the first public release.

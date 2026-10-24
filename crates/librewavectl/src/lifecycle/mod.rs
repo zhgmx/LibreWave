@@ -7,6 +7,7 @@ mod fs_ops;
 mod hash;
 mod identity;
 mod model;
+mod profile_conversion;
 mod runtime;
 mod system;
 mod transaction;
@@ -22,7 +23,7 @@ use system::{ProductionProcessInspector, ProductionUdev, ProductionUnitInspector
 pub fn is_command(arguments: &[String]) -> bool {
     matches!(
         arguments.get(1).map(String::as_str),
-        Some("setup" | "doctor" | "uninstall" | "start" | "stop")
+        Some("setup" | "doctor" | "uninstall" | "start" | "stop" | "convert-profile")
     )
 }
 
@@ -38,6 +39,13 @@ pub fn run<O: Write, E: Write>(
     if matches!(arguments.get(2).map(String::as_str), Some("--help" | "-h")) && arguments.len() == 3
     {
         let kind = match command {
+            Some("convert-profile") => {
+                writeln!(
+                    output,
+                    "Usage: librewavectl convert-profile [--rollback]\nStop the daemon and mixer first. Convert schema 2 to 3 or restore the exact retained backup."
+                )?;
+                return Ok(0);
+            }
             Some("setup") => CommandKind::Setup,
             Some("doctor") => CommandKind::Doctor,
             Some("uninstall") => CommandKind::Uninstall,
@@ -50,6 +58,9 @@ pub fn run<O: Write, E: Write>(
     let udev = ProductionUdev::new(paths.udev_rule.clone());
     let mut lifecycle =
         Lifecycle::new(paths, udev, ProductionUnitInspector, ProductionProcessInspector);
+    if command == Some("convert-profile") {
+        return profile_conversion::run(arguments, &lifecycle, output);
+    }
     match command {
         Some("setup") => {
             let options = Options::parse(&arguments[2..], CommandKind::Setup)?;

@@ -1016,6 +1016,10 @@ fn write_help<W: Write>(output: &mut W) -> io::Result<()> {
     writeln!(output, "Usage: librewavectl <command>")?;
     writeln!(output)?;
     writeln!(output, "Commands:")?;
+    writeln!(
+        output,
+        "  convert-profile [--rollback]  Convert a stopped schema-2 mixer profile with an exact backup"
+    )?;
     writeln!(output, "  status          Show daemon, device, and audio status")?;
     writeln!(output, "  mixer faders <source> <generation> <monitor-dB> <stream-dB>")?;
     writeln!(output, "  mixer output <generation> <monitor|stream> <on|off> <level-dB>")?;

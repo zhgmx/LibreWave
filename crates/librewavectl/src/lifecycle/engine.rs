@@ -577,7 +577,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
         Ok(())
     }
 
-    fn preflight_runtime(&self) -> io::Result<()> {
+    pub(super) fn preflight_runtime(&self) -> io::Result<()> {
         if super::runtime::has_ownership(&self.paths)? {
             return Err(io::Error::other(
                 "audio ownership or restoration is recorded; run `librewavectl stop` before setup or uninstall",
