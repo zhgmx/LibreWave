@@ -105,7 +105,6 @@ pub(super) enum ProcessFault {
     Processor = 8,
     Panic = 9,
     Pause = 10,
-    StaleSystemTail = 11,
     SystemPriming = 12,
     SystemDrain = 13,
     SystemLatency = 14,
@@ -166,7 +165,6 @@ impl FaultSlot {
             8 => ProcessFault::Processor,
             9 => ProcessFault::Panic,
             10 => ProcessFault::Pause,
-            11 => ProcessFault::StaleSystemTail,
             12 => ProcessFault::SystemPriming,
             13 => ProcessFault::SystemDrain,
             14 => ProcessFault::SystemLatency,
@@ -302,7 +300,7 @@ struct SystemTracker {
 }
 
 impl SystemTracker {
-    fn advance(&mut self, link_word: u64, system: StereoInput<'_>) -> Result<SystemCycleState, ()> {
+    fn advance(&mut self, link_word: u64) -> SystemCycleState {
         if link_word != self.observed_word {
             let was_present = self.observed_word & 1 == 1;
             let is_present = link_word & 1 == 1;
@@ -320,12 +318,9 @@ impl SystemTracker {
             SystemCycleState::Draining => SystemCycleState::Idle,
             other => other,
         };
-        if current == SystemCycleState::Idle
-            && system.left.iter().chain(system.right.iter()).any(|sample| *sample != 0.0)
-        {
-            return Err(());
-        }
-        Ok(current)
+        // Disconnected adapter buffers can retain data after the link disappears.
+        // The processor excludes Idle and Draining inputs from the mix.
+        current
     }
 }
 
@@ -853,9 +848,8 @@ fn process_cycle<P: GraphProcessor>(
     let system_right = unsafe { slice::from_raw_parts(pointers[1], frames) };
     let system = StereoInput { left: system_left, right: system_right };
     let link_word = callbacks.link_words[0].load(Ordering::Acquire);
-    let Ok(system_state) = realtime.input_trackers[0].advance(link_word, system) else {
-        return fail(ProcessFault::StaleSystemTail, 0);
-    };
+    let system_state = realtime.input_trackers[0].advance(link_word);
+
     // SAFETY: all six output ranges are non-null, aligned, fully mapped, and
     // non-overlapping with every input and output range.
     let microphone_left = unsafe { slice::from_raw_parts_mut(pointers[output_start], frames) };
@@ -889,9 +883,7 @@ fn process_cycle<P: GraphProcessor>(
         } else {
             callbacks.link_words[index].load(Ordering::Acquire)
         };
-        let Ok(state) = realtime.input_trackers[index].advance(word, signal) else {
-            return fail(ProcessFault::StaleSystemTail, 0);
-        };
+        let state = realtime.input_trackers[index].advance(word);
         additional[index - 1] =
             SoftwareBlock { source: callbacks.source_ids[index], state, signal };
     }
@@ -1662,17 +1654,14 @@ mod tests {
 
     #[test]
     fn system_link_generation_has_one_priming_and_drain_cycle() {
-        let silence = [0.0; 2];
-        let active = [0.25; 2];
         let mut tracker = SystemTracker { observed_word: 0, state: SystemCycleState::Idle };
-        let input = |samples| StereoInput { left: samples, right: samples };
-
-        assert_eq!(tracker.advance(0, input(&silence)), Ok(SystemCycleState::Idle));
-        assert_eq!(tracker.advance(3, input(&silence)), Ok(SystemCycleState::Priming));
-        assert_eq!(tracker.advance(3, input(&active)), Ok(SystemCycleState::Active));
-        assert_eq!(tracker.advance(4, input(&active)), Ok(SystemCycleState::Draining));
-        assert_eq!(tracker.advance(4, input(&silence)), Ok(SystemCycleState::Idle));
-        assert_eq!(tracker.advance(4, input(&active)), Err(()));
+        assert_eq!(tracker.advance(0), SystemCycleState::Idle);
+        assert_eq!(tracker.advance(3), SystemCycleState::Priming);
+        assert_eq!(tracker.advance(3), SystemCycleState::Active);
+        assert_eq!(tracker.advance(4), SystemCycleState::Draining);
+        assert_eq!(tracker.advance(4), SystemCycleState::Idle);
+        assert_eq!(tracker.advance(4), SystemCycleState::Idle);
+        assert_eq!(tracker.advance(7), SystemCycleState::Priming);
     }
 
     #[test]
