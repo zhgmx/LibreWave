@@ -3270,6 +3270,7 @@ dependencies = [
  "librewavectl",
  "resvg",
  "serde_json",
+ "unicode-segmentation",
 ]
 
 [[package]]

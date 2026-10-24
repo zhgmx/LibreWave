@@ -261,7 +261,7 @@ under `crates/librewave-ui/assets/`. No vendor application artwork is bundled.
 
 New profiles contain Microphone, System, Game, Chat, and Music. Microphone monitoring starts muted to avoid duplicate direct monitoring. Existing profiles keep their channels and levels. Channel IDs do not change when a channel is renamed or reordered. A removed ID is not reused.
 
-Use the application panel to remember an active application or forget a saved assignment, including one whose application is closed. Deleting its channel changes the saved destination to System. Forgetting a rule stops future enforcement; it does not move a current stream. WirePlumber may retain its last stream target.
+Open a channel’s application panel to rename a software channel or move a channel left or right. Save a rule from the active application list, or enter its exact desktop ID or executable name. The panel lists all saved rules, including applications that are closed. Use **Move here** to change a rule’s channel, or **Forget assignment** to remove it. **Close** or Escape discards unsaved text. Deleting its channel changes the saved destination to System. Forgetting a rule stops future enforcement; it does not move a current stream. WirePlumber may retain its last stream target.
 
 The CLI supports `mixer rename <source> <generation> <name>`, `mixer move <source> <generation> <zero-based-position>`, and `apps assign <generation> <desktop|executable> <identity> <source|forget>`. `mixer show` lists saved rules. Assignment success confirms that the rule was saved. The application panel reports routing progress separately.
 

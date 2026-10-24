@@ -286,8 +286,7 @@ impl Shell {
                         !self.pending,
                         cx,
                         move |this, _, cx| {
-                            this.application_input =
-                                if this.application_input == Some(id) { None } else { Some(id) };
+                            this.open_channel(id, cx);
                             this.poll_applications(cx);
                             cx.notify();
                         },

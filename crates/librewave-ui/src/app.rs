@@ -7,6 +7,7 @@ mod meters;
 mod mixer;
 mod settings;
 mod stage;
+mod text_field;
 mod theme;
 
 #[cfg(test)]
@@ -89,6 +90,9 @@ struct Shell {
     application_error: Option<String>,
     application_request_epoch: Option<u64>,
     application_input: Option<librewave_core::SourceId>,
+    channel_name: Option<gpui::Entity<text_field::TextField>>,
+    assignment_name: Option<gpui::Entity<text_field::TextField>>,
+    assignment_kind: applications::RuleKind,
     meters: Option<librewave_core::MeterFrame>,
     meter_error: Option<String>,
     meter_request_epoch: Option<u64>,
@@ -139,6 +143,9 @@ impl Shell {
             application_error: None,
             application_request_epoch: None,
             application_input: None,
+            channel_name: None,
+            assignment_name: None,
+            assignment_kind: applications::RuleKind::Desktop,
             meters: None,
             meter_error: None,
             meter_request_epoch: None,
@@ -586,6 +593,9 @@ mod tests {
             application_error: None,
             application_request_epoch: None,
             application_input: None,
+            channel_name: None,
+            assignment_name: None,
+            assignment_kind: applications::RuleKind::Desktop,
             meters: None,
             meter_error: None,
             meter_request_epoch: None,

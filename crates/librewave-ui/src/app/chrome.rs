@@ -83,6 +83,9 @@ impl Shell {
                 } else if event.keystroke.key == "," && event.keystroke.modifiers.control {
                     this.open_settings(window, cx);
                     cx.stop_propagation();
+                } else if event.keystroke.key == "escape" && this.application_input.is_some() {
+                    this.close_channel(cx);
+                    cx.stop_propagation();
                 } else if event.keystroke.key == "tab" {
                     if event.keystroke.modifiers.shift {
                         window.focus_prev(cx);
