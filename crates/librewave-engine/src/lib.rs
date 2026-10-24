@@ -31,7 +31,7 @@ pub use rate_matching::{
     RateMatchFault, RateMatchRatioBounds, RateMatchRatioBoundsError, RateMatchReport, RateMatcher,
     RateMatcherConfig, RateMatcherConfigError,
 };
-pub use transfer::{ControlMappingError, ControlStager, StageError};
+pub use transfer::{ControlMappingError, ControlStager, PreparedControls, StageError};
 
 #[cfg(test)]
 mod tests;

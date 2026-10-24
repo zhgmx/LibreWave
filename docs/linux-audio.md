@@ -314,3 +314,11 @@ LIBREWAVE_PIPEWIRE_INTEGRATION=1 cargo test -p librewave-platform-linux --lib pr
 ```
 
 Real desktop routing and restart acceptance remain required.
+
+## Preparing live input transactions
+
+The control handoff supports prepare, commit, and cancellation. Preparation reserves one complete control snapshot. The audio thread continues with the previous controls until commit. Dropping a prepared transaction releases its slot without publishing the change. A second producer operation cannot overwrite a prepared or published snapshot.
+
+The filter boundary can distinguish a reserved DSP slot from an active input. Each reserved input port uses a separate zero buffer allocated before graph activation. Active inputs still require valid PipeWire buffers. System, output, timing, and buffer-range checks remain mandatory. Each successful callback acknowledges the input-mask transaction number; a failed callback does not acknowledge it.
+
+Software tests cover 1,024 repeated input-mask changes without allocation, reallocation, or deallocation inside the callback. A known signal on an unaffected input remains in the simulated output. These are callback simulations, not live endpoint edits. The daemon still requires audio to stop before adding or removing inputs. Graph preparation, persistence, and endpoint cleanup must use these transactions before that restriction can be removed.

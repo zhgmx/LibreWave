@@ -65,7 +65,7 @@ fn record_allocation() {
     }
 }
 
-fn count_allocations<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+pub(in crate::audio_host) fn count_allocations<T>(operation: impl FnOnce() -> T) -> (T, usize) {
     ALLOCATION_COUNT.with(|count| count.set(0));
     COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
     let result = operation();

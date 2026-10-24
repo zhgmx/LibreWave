@@ -333,6 +333,7 @@ struct RealtimeState<P> {
     processor: P,
     validator: CycleValidator,
     input_trackers: [SystemTracker; MAX_SOFTWARE_INPUTS],
+    silent_inputs: Box<[f32]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -388,6 +389,7 @@ struct CallbackState<P> {
     faults: FaultRecords,
     link_words: Arc<[AtomicU64; MAX_SOFTWARE_INPUTS]>,
     source_ids: Vec<librewave_core::SourceId>,
+    active_inputs: Arc<InputActivation>,
     failed: AtomicBool,
     callbacks_in_flight: AtomicU32,
     process_cycles: AtomicU64,
@@ -407,9 +409,25 @@ impl<P> CallbackState<P> {
     }
 }
 
+pub(super) struct InputActivation {
+    /// The low 32 bits select active slots. The high bits identify a control
+    /// transaction, so a repeated mask cannot acknowledge an earlier edit.
+    pub(super) requested: AtomicU64,
+    pub(super) applied: AtomicU64,
+}
+
+impl InputActivation {
+    pub(super) fn new(mask: u32) -> Self {
+        Self { requested: AtomicU64::new(u64::from(mask) | 1), applied: AtomicU64::new(0) }
+    }
+}
+
 pub(super) struct SoftwareLayout {
     pub(super) sources: Vec<librewave_core::SourceId>,
     pub(super) links: Arc<[AtomicU64; MAX_SOFTWARE_INPUTS]>,
+    /// Bit zero is System and must remain set. Clear bits denote reserved
+    /// slots, not temporarily silent application streams.
+    pub(super) active: Arc<InputActivation>,
 }
 
 pub(super) struct FilterDiagnostics {
@@ -442,7 +460,8 @@ impl<P: GraphProcessor> FilterHandle<P> {
         processor: P,
         software: SoftwareLayout,
     ) -> Result<Self, String> {
-        let SoftwareLayout { sources: source_ids, links: link_words } = software;
+        let SoftwareLayout { sources: source_ids, links: link_words, active: active_inputs } =
+            software;
         if source_ids.is_empty()
             || source_ids.len() > MAX_SOFTWARE_INPUTS
             || source_ids[0] != librewave_core::SYSTEM_SOURCE_ID
@@ -451,9 +470,15 @@ impl<P: GraphProcessor> FilterHandle<P> {
         }
         let port_count = u32::try_from(source_ids.len() * 2 + 6)
             .map_err(|_| "filter port count overflow".to_owned())?;
+        let silence_samples = source_ids
+            .len()
+            .checked_mul(2)
+            .and_then(|ports| ports.checked_mul(expected_quantum.get() as usize))
+            .ok_or_else(|| "reserved input capacity overflow".to_owned())?;
         let callbacks = Box::pin(CallbackState {
             realtime: UnsafeCell::new(RealtimeState {
                 processor,
+                silent_inputs: vec![0.0; silence_samples].into_boxed_slice(),
                 validator: CycleValidator {
                     expected_driver,
                     expected_quantum,
@@ -464,6 +489,7 @@ impl<P: GraphProcessor> FilterHandle<P> {
             }),
             faults: FaultRecords::new(),
             link_words,
+            active_inputs,
             source_ids,
             failed: AtomicBool::new(false),
             callbacks_in_flight: AtomicU32::new(0),
@@ -743,6 +769,33 @@ fn process_cycle<P: GraphProcessor>(
     let input_count = callbacks.source_ids.len();
     let output_start = input_count * 2;
     let port_count = output_start + 6;
+    if buffers.is_null() {
+        return fail(ProcessFault::MissingBuffer, 0);
+    }
+    let activation = callbacks.active_inputs.requested.load(Ordering::Acquire);
+    let active = activation | 1;
+    let mut mapped = [std::ptr::null_mut(); PORT_COUNT];
+    // SAFETY: construction gives the C shim and callback the same bounded
+    // port count. The caller retains this pointer array for the callback.
+    mapped[..port_count].copy_from_slice(unsafe { slice::from_raw_parts(buffers, port_count) });
+    let mut effective_missing = missing_mask;
+    let capacity = realtime.validator.expected_quantum.get() as usize;
+    if quantum as usize > capacity {
+        return fail(ProcessFault::InvalidQuantum, 0);
+    }
+    for input in 1..input_count {
+        if active & (1 << input) == 0 {
+            for channel in 0..2 {
+                let port = input * 2 + channel;
+                // Each unused port has its own immutable zero region allocated
+                // before activation. Only input slices will reference it.
+                mapped[port] = realtime.silent_inputs[port * capacity..].as_ptr().cast_mut();
+                effective_missing &= !(1 << port);
+            }
+        }
+    }
+    let buffers = mapped.as_mut_ptr();
+    let missing_mask = effective_missing;
     // PipeWire can schedule a new filter while only some ports are mapped.
     // The bounded control-side startup waits for one complete cycle. Silence
     // mapped outputs after validating their ranges so an incomplete startup
@@ -829,7 +882,13 @@ fn process_cycle<P: GraphProcessor>(
         // SAFETY: the same checked buffer invariant applies to the right channel.
         let right = unsafe { slice::from_raw_parts(pointers[index * 2 + 1], frames) };
         let signal = StereoInput { left, right };
-        let word = callbacks.link_words[index].load(Ordering::Acquire);
+        let word = if active & (1 << index) == 0 {
+            realtime.input_trackers[index] =
+                SystemTracker { observed_word: 0, state: SystemCycleState::Idle };
+            0
+        } else {
+            callbacks.link_words[index].load(Ordering::Acquire)
+        };
         let Ok(state) = realtime.input_trackers[index].advance(word, signal) else {
             return fail(ProcessFault::StaleSystemTail, 0);
         };
@@ -848,6 +907,7 @@ fn process_cycle<P: GraphProcessor>(
     if let Err(fault) = realtime.processor.process(block) {
         return fail(fault, 0);
     }
+    callbacks.active_inputs.applied.store(activation, Ordering::Release);
     callbacks.process_cycles.fetch_add(1, Ordering::Relaxed);
     false
 }
@@ -1257,8 +1317,16 @@ mod tests {
             self.0.fetch_add(1, Ordering::Relaxed);
             block.microphone.left.fill(0.0);
             block.microphone.right.fill(0.0);
-            block.monitor.left.fill(0.0);
-            block.monitor.right.fill(0.0);
+            block.monitor.left.copy_from_slice(block.system.left);
+            block.monitor.right.copy_from_slice(block.system.right);
+            for input in block.additional {
+                for (out, sample) in block.monitor.left.iter_mut().zip(input.signal.left) {
+                    *out += sample;
+                }
+                for (out, sample) in block.monitor.right.iter_mut().zip(input.signal.right) {
+                    *out += sample;
+                }
+            }
             block.stream.left.fill(0.0);
             block.stream.right.fill(0.0);
             Ok(())
@@ -1272,6 +1340,7 @@ mod tests {
         CallbackState {
             realtime: UnsafeCell::new(RealtimeState {
                 processor: StartupProcessor(Arc::clone(processed), source_ids.len()),
+                silent_inputs: vec![0.0; source_ids.len() * 2 * 4].into_boxed_slice(),
                 validator: CycleValidator {
                     expected_driver: 25,
                     expected_quantum: NonZeroU32::new(4).expect("nonzero"),
@@ -1282,6 +1351,7 @@ mod tests {
             }),
             faults: FaultRecords::new(),
             link_words: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
+            active_inputs: Arc::new(InputActivation::new((1 << source_ids.len()) - 1)),
             source_ids,
             failed: AtomicBool::new(false),
             callbacks_in_flight: AtomicU32::new(0),
@@ -1294,6 +1364,83 @@ mod tests {
             has_streamed: AtomicBool::new(true),
             stopping: AtomicBool::new(false),
         }
+    }
+
+    #[test]
+    fn reserved_slots_are_silent_but_missing_active_buffers_remain_faults() {
+        let processed = Arc::new(AtomicU32::new(0));
+        let callbacks =
+            startup_callbacks(&processed, (2..=4).map(librewave_core::SourceId::new).collect());
+        callbacks.active_inputs.requested.store(0b011, Ordering::Release);
+        callbacks.link_words[0].store(1, Ordering::Release);
+        callbacks.link_words[1].store(1, Ordering::Release);
+        let mut samples = [[0.0_f32; 4]; 12];
+        samples[0].fill(0.125);
+        samples[1].fill(0.125);
+        samples[2].fill(0.25);
+        samples[3].fill(0.25);
+        let mut pointers: [*mut f32; 12] = std::array::from_fn(|i| samples[i].as_mut_ptr());
+        pointers[4] = std::ptr::null_mut();
+        pointers[5] = std::ptr::null_mut();
+        // SAFETY: the test owns this callback and its declared buffer layout.
+        let realtime = unsafe { &mut *callbacks.realtime.get() };
+        let (faulted, allocations) = crate::audio_host::worker::tests::count_allocations(|| {
+            for cycle in 0..1024 {
+                // Repeatedly remove and restore one input while System and
+                // the output buffers stay in place. The inactive input still
+                // has nonzero mapped samples, which must never enter the DSP.
+                callbacks.active_inputs.requested.store(
+                    ((cycle + 1) << 32) | if cycle % 2 == 0 { 0b011 } else { 0b001 },
+                    Ordering::Release,
+                );
+                if process_cycle(
+                    &callbacks,
+                    realtime,
+                    25,
+                    1,
+                    48_000,
+                    cycle * 4,
+                    cycle + 1,
+                    4,
+                    pointers.as_mut_ptr(),
+                    0b11_0000,
+                ) {
+                    return true;
+                }
+                let expected: f32 = if cycle % 2 == 0 { 0.375 } else { 0.125 };
+                if samples[8..10]
+                    .iter()
+                    .flatten()
+                    .any(|sample| sample.to_bits() != expected.to_bits())
+                {
+                    return true;
+                }
+            }
+            false
+        });
+        assert!(!faulted);
+        assert_eq!(allocations, 0, "the callback must not allocate, reallocate, or free");
+        assert_eq!(processed.load(Ordering::Relaxed), 1024);
+        let applied = callbacks.active_inputs.applied.load(Ordering::Acquire);
+        assert_eq!(applied, (1024 << 32) | 0b001);
+        callbacks.active_inputs.requested.store((1025 << 32) | 0b111, Ordering::Release);
+        assert!(process_cycle(
+            &callbacks,
+            realtime,
+            25,
+            1,
+            48_000,
+            4096,
+            1025,
+            4,
+            pointers.as_mut_ptr(),
+            0b11_0000
+        ));
+        assert_eq!(callbacks.active_inputs.applied.load(Ordering::Acquire), applied);
+        assert_eq!(
+            callbacks.faults.snapshot().0[0].expect("active buffer fault").fault,
+            ProcessFault::MissingBuffer
+        );
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! Inactive construction and deterministic ownership for the `PipeWire` mixer graph.
 
 use super::pipewire_filter_ffi::{
-    FILTER_STATE_STREAMING, FilterDiagnostics, FilterHandle, GraphProcessor, MAX_SOFTWARE_INPUTS,
-    ProcessFault, SoftwareLayout,
+    FILTER_STATE_STREAMING, FilterDiagnostics, FilterHandle, GraphProcessor, InputActivation,
+    MAX_SOFTWARE_INPUTS, ProcessFault, SoftwareLayout,
 };
 use super::{EndpointPlan, PipeWireEndpointDirection};
 use librewave_core::DELIBERATE_ENDPOINTS;
@@ -368,6 +368,9 @@ impl<P: GraphProcessor> InactiveGraph<P> {
             SoftwareLayout {
                 links: Arc::clone(&input_link_words),
                 sources: software_sources(endpoints),
+                active: Arc::new(InputActivation::new(
+                    (1 << software_sources(endpoints).len()) - 1,
+                )),
             },
         )
         .map_err(GraphError::PipeWire)?;

@@ -35,19 +35,60 @@ impl ControlStager {
         controls: &[SourceControls],
         outputs: OutputControls,
     ) -> Result<(), StageError> {
+        self.try_prepare(controls, outputs)?.commit();
+        Ok(())
+    }
+
+    /// Reserves a complete update without making it visible to the audio thread.
+    ///
+    /// Dropping the returned transaction cancels it. Commit only after graph
+    /// preparation and profile persistence succeed. The consumer keeps using
+    /// its previous controls while the transaction is prepared.
+    ///
+    /// # Errors
+    /// Returns a mapping error for invalid controls or [`StageError::Full`]
+    /// when another prepared or published update occupies the slot.
+    pub fn try_prepare(
+        &mut self,
+        controls: &[SourceControls],
+        outputs: OutputControls,
+    ) -> Result<PreparedControls, StageError> {
         let snapshot =
             compile_snapshot(&self.config, controls, outputs).map_err(StageError::Controls)?;
         self.slot
             .state
             .compare_exchange(EMPTY, WRITING, Ordering::Acquire, Ordering::Relaxed)
             .map_err(|_| StageError::Full)?;
-
-        // SAFETY: the successful EMPTY-to-WRITING transition gives the single
-        // producer exclusive write access. The consumer reads only after the
-        // FULL store publishes this complete Copy value with Release ordering.
+        // SAFETY: WRITING gives this transaction exclusive access. The
+        // consumer cannot read the value until commit publishes FULL.
         unsafe { *self.slot.value.get() = snapshot };
+        Ok(PreparedControls { slot: Arc::clone(&self.slot), committed: false })
+    }
+}
+
+/// A control-side transaction that owns the reserved handoff slot.
+///
+/// This value must stay off the audio thread: dropping it releases an Arc.
+#[derive(Debug)]
+#[must_use = "commit the prepared controls or drop them to cancel"]
+pub struct PreparedControls {
+    slot: Arc<ControlSlot>,
+    committed: bool,
+}
+
+impl PreparedControls {
+    /// Publishes the complete update for the next accepted audio block.
+    pub fn commit(mut self) {
         self.slot.state.store(FULL, Ordering::Release);
-        Ok(())
+        self.committed = true;
+    }
+}
+
+impl Drop for PreparedControls {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.slot.state.store(EMPTY, Ordering::Release);
+        }
     }
 }
 
@@ -194,3 +235,38 @@ struct ControlSlot {
 // owns WRITING exclusively. The sole consumer reads only FULL and publishes
 // EMPTY only after its copy completes.
 unsafe impl Sync for ControlSlot {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use librewave_core::{FaderGain, MixerProfile};
+
+    #[test]
+    fn prepared_controls_are_invisible_until_commit_and_drop_releases_the_slot() {
+        let profile = MixerProfile::default();
+        let controls: Vec<_> = profile.sources.iter().map(|s| s.controls).collect();
+        let sources: Vec<_> = controls.iter().map(|s| s.source()).collect();
+        let config = MixerConfig::try_new(4, profile.microphone_source, &sources).expect("layout");
+        let (mut stager, consumer) = ControlConsumer::channel(config);
+        let prepared = stager.try_prepare(&controls, profile.outputs).expect("reserve");
+        assert!(consumer.take().is_none());
+        assert!(matches!(stager.try_prepare(&controls, profile.outputs), Err(StageError::Full)));
+        drop(prepared);
+        assert!(consumer.take().is_none());
+        let muted: Vec<_> = controls
+            .iter()
+            .map(|s| {
+                SourceControls::new(s.source(), MixRoute::new(false, FaderGain::UNITY), s.stream())
+            })
+            .collect();
+        stager.try_prepare(&muted, profile.outputs).expect("reserve after cancellation").commit();
+        let received = consumer.take().expect("committed update");
+        assert!(received.monitor.iter().all(|r| r.coefficient == 0.0));
+        assert!(consumer.take().is_none());
+        stager.try_stage(&controls, profile.outputs).expect("next update");
+        assert_eq!(
+            consumer.take().expect("next snapshot").monitor[0].coefficient.to_bits(),
+            1.0_f32.to_bits()
+        );
+    }
+}

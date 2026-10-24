@@ -657,8 +657,23 @@ impl ClockBridgeControl {
     ///
     /// Returns an error for an invalid profile or a full control handoff.
     pub fn try_stage_profile(&mut self, profile: &MixerProfile) -> Result<(), BridgeControlError> {
+        self.try_prepare_profile(profile)?.commit();
+        Ok(())
+    }
+
+    /// Reserves a profile update without changing the current audio controls.
+    ///
+    /// The control owner commits after persistence and graph preparation.
+    /// Dropping the transaction cancels the update.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid profile or an occupied handoff slot.
+    pub fn try_prepare_profile(
+        &mut self,
+        profile: &MixerProfile,
+    ) -> Result<librewave_engine::PreparedControls, BridgeControlError> {
         let controls = profile_controls(profile).map_err(BridgeControlError::Profile)?;
-        self.stager.try_stage(&controls, profile.outputs).map_err(BridgeControlError::Stage)
+        self.stager.try_prepare(&controls, profile.outputs).map_err(BridgeControlError::Stage)
     }
 
     pub fn begin_teardown(&mut self) {

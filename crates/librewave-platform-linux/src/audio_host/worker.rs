@@ -11,7 +11,7 @@ mod playback;
 mod status;
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 pub(super) use capture::CaptureWorker;
 #[cfg(test)]
