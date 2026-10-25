@@ -37,7 +37,7 @@ The hardware controls sit under the illustration:
 - The icon button before each level mutes it. A muted level is dim and its button is red.
 - **Clipguard**, **Low-cut**, and **Gain Lock** are lit when on. Select one to change it. Hover over one to see what it does.
 
-Each change is one `SetWave3Control` request with the observed device generation. The daemon checks the schema and the complete baseline, writes, and reads the value back. While a slider is dragged, one request is in flight and only the latest position waits. That position is sent with the device generation from the previous reply. An error ends the drag and drops the waiting position.
+Each change is one `SetWave3Control` request with the observed device generation. The daemon checks the schema and the complete baseline, writes, and reads the value back. While you drag a slider, the window shows the value and writes nothing. Releasing the pointer sends one request for the last value.
 
 When the daemon reports locked write access, the stage shows the reason and disables every control. The microphone preamp and headphone level are hardware values, separate from desktop volume and the software mixer.
 
@@ -85,7 +85,7 @@ The **Add input** panel after the last strip creates a software input with a new
 
 ### Requests
 
-A fader drag keeps one request in flight and only the latest waiting position. Each request uses the mixer generation from the previous reply. A stale generation, a disconnect, or an error ends the drag and shows the error. Changes made while audio is stopped are saved and apply when audio starts.
+While you drag a fader or an output level, the window sends `PreviewMixer` requests. The daemon applies each one to the running mixer, so you hear the change, but it does not save it or change the mixer generation. One preview is in flight at a time and only the latest position waits. Releasing the pointer sends one normal request, which the daemon saves. If no request follows a preview within 3 seconds, the daemon restores the saved level. A held drag repeats its preview every second. A stale generation, a disconnect, or an error ends the drag without a change and shows the error. Changes made while audio is stopped are saved and apply when audio starts.
 
 ## Application routing
 

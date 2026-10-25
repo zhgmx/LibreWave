@@ -515,8 +515,7 @@ impl Shell {
         let (color, _, _) = mix_identity(target);
         let key = format!("fader-{}-{target}", id.get());
         let shown = self
-            .queued_fader
-            .or(self.in_flight_fader)
+            .shown_edit()
             .and_then(MixerEdit::input)
             .filter(|edit| {
                 edit.source == id && (edit.target == target || self.linked_faders.contains(&id))
@@ -651,8 +650,7 @@ impl Shell {
         let key = name.to_lowercase();
         let route = snapshot.mixer.profile.outputs.route(target);
         let shown = self
-            .queued_fader
-            .or(self.in_flight_fader)
+            .shown_edit()
             .and_then(|edit| match edit {
                 MixerEdit::Output { target: current, fader } if current == target => Some(fader),
                 _ => None,
@@ -832,8 +830,7 @@ fn output_track(
                         f32::from(event.bounds.left()),
                         f32::from(event.bounds.size.width),
                     ) {
-                        this.fader_window = Some(window.window_handle());
-                        this.send_fader(MixerEdit::Output { target, fader }, cx);
+                        this.preview_fader(MixerEdit::Output { target, fader }, window, cx);
                     }
                 },
             ))
@@ -847,8 +844,7 @@ fn output_track(
                             f32::from(area.size.width),
                         )
                     {
-                        this.fader_window = Some(window.window_handle());
-                        this.send_fader(MixerEdit::Output { target, fader }, cx);
+                        this.preview_fader(MixerEdit::Output { target, fader }, window, cx);
                     }
                 }),
             )
@@ -958,8 +954,7 @@ fn fader_track(
                     f32::from(event.bounds.top()),
                     f32::from(event.bounds.size.height),
                 ) {
-                    this.fader_window = Some(window.window_handle());
-                    this.send_fader(FaderEdit { source, target, fader }, cx);
+                    this.preview_fader(FaderEdit { source, target, fader }, window, cx);
                 }
             }))
             .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
@@ -980,8 +975,7 @@ fn fader_track(
                             f32::from(area.size.height),
                         )
                     {
-                        this.fader_window = Some(window.window_handle());
-                        this.send_fader(FaderEdit { source, target, fader }, cx);
+                        this.preview_fader(FaderEdit { source, target, fader }, window, cx);
                     }
                 }),
             );

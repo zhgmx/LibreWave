@@ -1112,7 +1112,7 @@ mod tests {
         write_status(&mut output, &snapshot()).expect("render status");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "Daemon: connected\nProtocol: 12\nState generation: 4\nDevices: 1\nMixer: generation 0, inactive, 2 sources\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
+            "Daemon: connected\nProtocol: 13\nState generation: 4\nDevices: 1\nMixer: generation 0, inactive, 2 sources\nPipeWire: available\nWirePlumber: unavailable (not running)\n"
         );
     }
 

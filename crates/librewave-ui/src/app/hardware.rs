@@ -117,8 +117,7 @@ impl Shell {
                     && self.settings_modal.is_none()
                     && (!self.pending || sliding);
                 let shown = |kind: fn(Wave3Control) -> Option<FixedPointValue>, value| {
-                    self.queued_fader
-                        .or(self.in_flight_fader)
+                    self.shown_edit()
                         .and_then(|edit| match edit {
                             MixerEdit::Hardware { device: id, control } if id == device.id => {
                                 kind(control)
@@ -340,8 +339,7 @@ fn level_slider(
                     current,
                 );
                 if let Some(edit) = edit(value) {
-                    this.fader_window = Some(window.window_handle());
-                    this.send_fader(edit, cx);
+                    this.preview_fader(edit, window, cx);
                 }
             },
         ))
@@ -360,8 +358,7 @@ fn level_slider(
                     current,
                 );
                 if let Some(edit) = edit(value) {
-                    this.fader_window = Some(window.window_handle());
-                    this.send_fader(edit, cx);
+                    this.preview_fader(edit, window, cx);
                 }
             }),
         )

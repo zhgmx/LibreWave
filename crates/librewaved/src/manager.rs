@@ -54,6 +54,9 @@ pub struct Daemon {
     audio_session: AudioSession,
     audio_session_store: Box<dyn AudioSessionStore>,
     defaults_recovery_pending: bool,
+    /// When the running mixer last received a level preview that no commit
+    /// has replaced yet.
+    preview_since: Option<Instant>,
     next_defaults_recovery: Instant,
     next_control_inventory: Instant,
     control_reads: BTreeMap<DeviceId, Instant>,
@@ -80,6 +83,10 @@ enum AdmissionPurpose {
     Observe,
     RestoreManaged,
 }
+
+/// How long a level preview lasts without another preview or a commit. A
+/// dragging client repeats its preview more often than this.
+const PREVIEW_TIMEOUT: Duration = Duration::from_secs(3);
 
 impl Daemon {
     /// Creates a daemon using the default Linux inventory and paths.
@@ -157,6 +164,7 @@ impl Daemon {
             audio_session: AudioSession::default(),
             audio_session_store: Box::new(MemoryAudioSessionStore(AudioSession::default())),
             defaults_recovery_pending: false,
+            preview_since: None,
             next_defaults_recovery: Instant::now(),
             next_control_inventory: Instant::now(),
             control_reads: BTreeMap::new(),
@@ -195,6 +203,7 @@ impl Daemon {
             audio_session: AudioSession::default(),
             audio_session_store: Box::new(MemoryAudioSessionStore(AudioSession::default())),
             defaults_recovery_pending: false,
+            preview_since: None,
             next_defaults_recovery: Instant::now(),
             next_control_inventory: Instant::now(),
             control_reads: BTreeMap::new(),
@@ -340,6 +349,7 @@ impl Daemon {
     }
 
     fn tick_audio(&mut self, allow_start: bool) {
+        self.expire_preview(Instant::now());
         if self.audio.as_ref().is_none_or(|audio| !audio.needs_tick()) {
             return;
         }
@@ -550,6 +560,55 @@ impl Daemon {
             Command::SetMixerOutput { expected_generation, target, route } => {
                 self.set_mixer_output(expected_generation, target, route, origin)
             }
+            Command::PreviewMixer { expected_generation, level } => {
+                self.preview_mixer(expected_generation, level)
+            }
+        }
+    }
+
+    /// Applies a dragged level to the running mixer only. Nothing is saved,
+    /// and the snapshot and its generation stay the same.
+    fn preview_mixer(
+        &mut self,
+        expected_generation: MixerGeneration,
+        level: librewave_core::MixerLevel,
+    ) -> Result<Response, IpcError> {
+        self.check_mixer_generation(expected_generation)?;
+        let preview = level.apply(&self.snapshot().mixer.profile).map_err(|error| IpcError {
+            kind: IpcErrorKind::InvalidRequest,
+            message: error.to_string(),
+        })?;
+        self.apply_to_engine(&preview)?;
+        self.preview_since = Some(Instant::now());
+        Ok(Response::Mixer { mixer: self.snapshot().mixer.clone() })
+    }
+
+    /// Sends a profile to the running mixer without saving it.
+    fn apply_to_engine(&mut self, profile: &MixerProfile) -> Result<(), IpcError> {
+        let Some(audio) = self.audio.as_mut() else {
+            return Ok(());
+        };
+        let prepared = audio.prepare_profile(profile).map_err(|error| IpcError {
+            kind: IpcErrorKind::AudioNotReady,
+            message: format!("the mixer could not apply the level: {error}"),
+        })?;
+        if prepared {
+            audio.finish_profile(true).map_err(|error| IpcError {
+                kind: IpcErrorKind::AudioNotReady,
+                message: format!("the mixer could not apply the level: {error}"),
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Restores the saved levels after a preview that no commit followed.
+    fn expire_preview(&mut self, now: Instant) {
+        if self.preview_since.is_some_and(|since| now.duration_since(since) >= PREVIEW_TIMEOUT) {
+            self.preview_since = None;
+            let saved = self.snapshot().mixer.profile.clone();
+            if let Err(error) = self.apply_to_engine(&saved) {
+                eprintln!("librewaved: saved levels await audio recovery: {}", error.message);
+            }
         }
     }
 
@@ -668,6 +727,8 @@ impl Daemon {
         next: MixerProfile,
         origin: librewave_core::Origin,
     ) -> Result<MixerSnapshot, IpcError> {
+        // A commit replaces any preview in the running mixer.
+        self.preview_since = None;
         persist_mixer_profile(self.audio.as_mut(), &mut *self.mixer_store, &next)?;
         let mut snapshot = self.snapshot().clone();
         snapshot.mixer = match self.audio.as_ref().map(AudioSupervisor::runtime) {

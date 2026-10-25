@@ -54,6 +54,8 @@ impl Shell {
             .flex()
             .flex_col()
             .capture_key_down(cx.listener(Self::frame_key))
+            // A drag ends wherever the pointer is released.
+            .capture_any_mouse_up(cx.listener(|this, _, _, cx| this.release_preview(cx)))
             .child(self.titlebar(cx))
             .child(body)
             .when(self.application_input.is_some(), |view| view.child(channel_backdrop(cx)))

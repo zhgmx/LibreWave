@@ -1885,6 +1885,50 @@ fn input_changes_are_durable_atomic_and_refuse_stale_or_running_layout_changes()
 }
 
 #[test]
+fn previews_change_no_saved_state_and_a_commit_ends_them() {
+    let (mut daemon, retained, saves) = mixer_daemon(vec![]);
+    let before = daemon.snapshot().clone();
+    let level = librewave_core::MixerLevel::Route {
+        source: SourceId::new(2),
+        target: librewave_core::MixTarget::Monitor,
+        fader: librewave_core::FaderGain::MIN,
+    };
+    for _ in 0..3 {
+        let response = daemon
+            .handle(
+                Command::PreviewMixer { expected_generation: MixerGeneration(0), level },
+                librewave_core::Origin::Client,
+            )
+            .expect("preview");
+        assert!(matches!(response, Response::Mixer { .. }));
+    }
+    assert_eq!(daemon.snapshot(), &before);
+    assert_eq!(*saves.borrow(), 0);
+    assert!(daemon.preview_since.is_some());
+    let stale = daemon
+        .handle(
+            Command::PreviewMixer { expected_generation: MixerGeneration(7), level },
+            librewave_core::Origin::Client,
+        )
+        .expect_err("stale preview");
+    assert!(matches!(stale.kind, IpcErrorKind::StaleMixerGeneration { .. }));
+    daemon
+        .handle(
+            Command::SetMixerRoute {
+                expected_generation: MixerGeneration(0),
+                source: SourceId::new(2),
+                target: librewave_core::MixTarget::Monitor,
+                route: librewave_core::MixRoute::new(true, librewave_core::FaderGain::MIN),
+            },
+            librewave_core::Origin::Client,
+        )
+        .expect("commit");
+    assert!(daemon.preview_since.is_none());
+    assert_eq!(*saves.borrow(), 1);
+    assert_eq!(retained.borrow().generation, MixerGeneration(1));
+}
+
+#[test]
 fn reset_replaces_the_layout_with_new_default_inputs_and_keeps_hardware_state() {
     let (mut daemon, retained, saves) = mixer_daemon(vec![]);
     let name = librewave_core::InputName::try_new("Extra").expect("name");

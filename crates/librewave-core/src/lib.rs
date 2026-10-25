@@ -546,6 +546,47 @@ pub enum Command {
     },
     /// Set a software mix output level and mute state.
     SetMixerOutput { expected_generation: MixerGeneration, target: MixTarget, route: MixRoute },
+    /// Apply a level to the running mixer while a control is dragged. The
+    /// profile, its generation, and the saved state do not change. The
+    /// daemon restores the saved levels when no commit follows.
+    PreviewMixer { expected_generation: MixerGeneration, level: MixerLevel },
+}
+
+/// One software level that a dragged control changes. Mute states stay.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub enum MixerLevel {
+    /// One input fader in one mix.
+    Route { source: SourceId, target: MixTarget, fader: FaderGain },
+    /// Both faders of a linked input.
+    Faders { source: SourceId, monitor: FaderGain, stream: FaderGain },
+    /// One software output.
+    Output { target: MixTarget, fader: FaderGain },
+}
+
+impl MixerLevel {
+    /// The profile with this level applied, keeping every mute state.
+    /// # Errors
+    /// Returns an error for an absent input or an exhausted generation.
+    pub fn apply(self, profile: &MixerProfile) -> Result<MixerProfile, MixerProfileError> {
+        match self {
+            Self::Route { source, target, fader } => {
+                let route = profile
+                    .source(source)
+                    .ok_or(MixerProfileError::UnknownSource(source))?
+                    .controls
+                    .route(target);
+                profile.with_route(source, target, MixRoute::new(route.enabled(), fader))
+            }
+            Self::Faders { source, monitor, stream } => {
+                profile.with_faders(source, monitor, stream)
+            }
+            Self::Output { target, fader } => {
+                let route = profile.outputs.route(target);
+                profile.with_output(target, MixRoute::new(route.enabled(), fader))
+            }
+        }
+    }
 }
 
 /// Desktop default selections. An absent configured value means automatic selection.

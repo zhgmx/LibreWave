@@ -79,6 +79,22 @@ enum SessionExpectation {
     Stopped,
 }
 
+/// A level that a pointer is dragging. The daemon applies software levels to
+/// the running mixer without saving them. A hardware level stays in the
+/// window. Releasing the pointer commits the last value once.
+struct Preview {
+    edit: MixerEdit,
+    /// The value changed since the last preview request.
+    dirty: bool,
+    in_flight: bool,
+    sent: Option<std::time::Instant>,
+    released: bool,
+}
+
+/// A held drag repeats its preview so the daemon does not restore the
+/// saved level while the pointer is still down.
+const PREVIEW_REPEAT: Duration = Duration::from_secs(1);
+
 struct SettingsModal {
     focus: gpui::FocusHandle,
     close_focus: gpui::FocusHandle,
@@ -119,6 +135,7 @@ struct Shell {
     settings_pane: SettingsPane,
     settings_trigger_focus: Option<gpui::FocusHandle>,
     confirmation: Option<confirm::Confirmation>,
+    preview: Option<Preview>,
 }
 
 impl Shell {
@@ -174,6 +191,7 @@ impl Shell {
             settings_pane: SettingsPane::Audio,
             settings_trigger_focus: None,
             confirmation: None,
+            preview: None,
         };
         shell.send(Command::GetStatus, cx);
         cx.spawn(async move |this, cx| {
@@ -192,6 +210,7 @@ impl Shell {
                     .update(cx, |this, cx| {
                         this.poll_status(cx);
                         this.poll_applications(cx);
+                        this.pump_preview(cx);
                     })
                     .is_err()
                 {
@@ -283,6 +302,8 @@ impl Shell {
                 if let Some(edit) = this.finish_fader(succeeded) {
                     this.send_fader(edit, cx);
                 }
+                // A released drag waits for the previous request.
+                this.pump_preview(cx);
                 cx.notify();
             });
         })
@@ -317,6 +338,142 @@ impl Shell {
             self.send(command, cx);
             self.in_flight_fader = Some(edit);
         }
+    }
+
+    /// The value a control shows: a dragged value, then a waiting or sent
+    /// edit. `None` means the control shows the daemon state.
+    fn shown_edit(&self) -> Option<MixerEdit> {
+        self.preview
+            .as_ref()
+            .map(|preview| preview.edit)
+            .or(self.queued_fader)
+            .or(self.in_flight_fader)
+    }
+
+    /// Follows a pointer drag on a level control.
+    fn preview_fader(
+        &mut self,
+        edit: impl Into<MixerEdit>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let edit = edit.into();
+        if self.settings_modal.is_some() {
+            return;
+        }
+        self.fader_window = Some(window.window_handle());
+        match &mut self.preview {
+            Some(preview) if !preview.released => {
+                if preview.edit == edit {
+                    return;
+                }
+                preview.edit = edit;
+                preview.dirty = true;
+            }
+            _ => {
+                self.preview = Some(Preview {
+                    edit,
+                    dirty: true,
+                    in_flight: false,
+                    sent: None,
+                    released: false,
+                });
+            }
+        }
+        cx.notify();
+        self.pump_preview(cx);
+    }
+
+    /// Ends a drag. The last value is committed once.
+    fn release_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(preview) = &mut self.preview {
+            preview.released = true;
+            self.pump_preview(cx);
+        }
+    }
+
+    fn preview_command(&self, edit: MixerEdit) -> Option<Command> {
+        let snapshot = self.snapshot.as_ref()?;
+        let level = match edit {
+            MixerEdit::Input(input) if self.linked_faders.contains(&input.source) => {
+                librewave_core::MixerLevel::Faders {
+                    source: input.source,
+                    monitor: input.fader,
+                    stream: input.fader,
+                }
+            }
+            MixerEdit::Input(input) => librewave_core::MixerLevel::Route {
+                source: input.source,
+                target: input.target,
+                fader: input.fader,
+            },
+            MixerEdit::Output { target, fader } => {
+                librewave_core::MixerLevel::Output { target, fader }
+            }
+            MixerEdit::Hardware { .. } => return None,
+        };
+        Some(Command::PreviewMixer { expected_generation: snapshot.mixer.generation(), level })
+    }
+
+    /// Sends the next preview, or the commit after release. One preview
+    /// request is in flight at a time and only the latest value waits.
+    fn pump_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(preview) = self.preview.as_ref() else {
+            return;
+        };
+        if preview.in_flight {
+            return;
+        }
+        if preview.released {
+            if self.pending {
+                return;
+            }
+            let edit = preview.edit;
+            self.preview = None;
+            cx.notify();
+            if let Some(command) = self.edit_command(edit) {
+                self.send(command, cx);
+                self.in_flight_fader = Some(edit);
+            }
+            return;
+        }
+        let repeat = preview.sent.is_some_and(|sent| sent.elapsed() >= PREVIEW_REPEAT);
+        if !preview.dirty && !repeat {
+            return;
+        }
+        let command = self.preview_command(preview.edit);
+        let Some(preview) = self.preview.as_mut() else {
+            return;
+        };
+        preview.dirty = false;
+        let Some(command) = command else {
+            return;
+        };
+        preview.in_flight = true;
+        preview.sent = Some(std::time::Instant::now());
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { Client::new(configured_socket_path()).request(command) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(preview) = &mut this.preview {
+                    preview.in_flight = false;
+                }
+                if let Err(error) = result {
+                    // A failed preview ends the drag without a commit.
+                    this.preview = None;
+                    let _ = this.apply_error(&error);
+                    if let Some(window) = this.fader_window {
+                        let _ =
+                            cx.update_window(window, |_, window, cx| cx.stop_active_drag(window));
+                    }
+                }
+                this.pump_preview(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn defer_fader(&mut self, edit: impl Into<MixerEdit>) -> bool {
@@ -639,6 +796,7 @@ mod tests {
             settings_pane: SettingsPane::Audio,
             settings_trigger_focus: None,
             confirmation: None,
+            preview: None,
         }
     }
 
@@ -849,6 +1007,51 @@ mod tests {
             cx.simulate_keystrokes("escape");
             assert!(view.read_with(cx, |view, _| view.settings_modal.is_none()));
         }
+    }
+
+    #[test]
+    fn drags_preview_software_levels_and_keep_hardware_levels_in_the_window() {
+        let shell = shell_with(Snapshot::empty());
+        let edit = FaderEdit {
+            source: SYSTEM_SOURCE_ID,
+            target: MixTarget::Monitor,
+            fader: FaderGain::MIN,
+        };
+        assert_eq!(
+            shell.preview_command(edit.into()),
+            Some(Command::PreviewMixer {
+                expected_generation: MixerGeneration(0),
+                level: librewave_core::MixerLevel::Route {
+                    source: SYSTEM_SOURCE_ID,
+                    target: MixTarget::Monitor,
+                    fader: FaderGain::MIN,
+                },
+            })
+        );
+        let mut linked = shell_with(Snapshot::empty());
+        linked.linked_faders.insert(SYSTEM_SOURCE_ID);
+        assert!(matches!(
+            linked.preview_command(edit.into()),
+            Some(Command::PreviewMixer {
+                level: librewave_core::MixerLevel::Faders { monitor, stream, .. },
+                ..
+            }) if monitor == FaderGain::MIN && stream == FaderGain::MIN
+        ));
+        let hardware = MixerEdit::Hardware {
+            device: DeviceId(1),
+            control: librewave_core::Wave3Control::LowCut(true),
+        };
+        assert!(shell.preview_command(hardware).is_none());
+        let mut dragging = shell_with(Snapshot::empty());
+        dragging.preview = Some(Preview {
+            edit: hardware,
+            dirty: false,
+            in_flight: false,
+            sent: None,
+            released: false,
+        });
+        dragging.queued_fader = Some(edit.into());
+        assert_eq!(dragging.shown_edit(), Some(hardware), "the dragged value wins");
     }
 
     #[test]

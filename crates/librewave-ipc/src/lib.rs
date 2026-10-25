@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// The current local request/response protocol version.
-pub const PROTOCOL_VERSION: u16 = 12;
+pub const PROTOCOL_VERSION: u16 = 13;
 /// The maximum encoded JSON payload accepted by the local protocol.
 pub const MAX_FRAME_SIZE: usize = 1024 * 1024;
 
@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn semantic_control_command_and_stale_error_round_trip_at_version_seven() {
-        assert_eq!(PROTOCOL_VERSION, 12);
+        assert_eq!(PROTOCOL_VERSION, 13);
         let request = RequestEnvelope {
             version: PROTOCOL_VERSION,
             request_id: 4,
@@ -387,7 +387,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(request).expect("serialize semantic request"),
             json!({
-                "version": 12,
+                "version": 13,
                 "request_id": 4,
                 "command": {
                     "SetWave3Control": {
@@ -412,7 +412,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response.clone()).expect("serialize stale response"),
             json!({
-                "version": 12,
+                "version": 13,
                 "request_id": 4,
                 "result": {
                     "Err": {
@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response).expect("serialize control response"),
             json!({
-                "version": 12,
+                "version": 13,
                 "request_id": 4,
                 "result": {
                     "Ok": {
@@ -494,7 +494,7 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "version": 12,
+                "version": 13,
                 "request_id": 18,
                 "command": {
                     "SetMixerRoute": {
@@ -683,6 +683,14 @@ mod software_control_tests {
                 expected_generation: MixerGeneration(4),
                 target: MixTarget::Monitor,
                 route: MixRoute::new(false, FaderGain::MAX),
+            },
+            Command::PreviewMixer {
+                expected_generation: MixerGeneration(4),
+                level: librewave_core::MixerLevel::Route {
+                    source: SourceId::new(3),
+                    target: MixTarget::Stream,
+                    fader: FaderGain::MIN,
+                },
             },
         ] {
             let request = RequestEnvelope { version: PROTOCOL_VERSION, request_id: 1, command };
