@@ -1015,7 +1015,12 @@ mod tests {
                 shell.action_error = Some("Restoration pending: retry Stop.".to_owned());
                 shell
             });
-            for width in [1200., 850.] {
+            // Fractional desktop scales snap edges to device pixels.
+            for (scale, width) in [1., 1.25, 1.5]
+                .into_iter()
+                .flat_map(|scale| [1200., 850.].into_iter().map(move |width| (scale, width)))
+            {
+                cx.simulate_scale_factor_change(scale);
                 cx.simulate_resize(gpui::size(px(width), px(650.)));
                 let stage = cx.debug_bounds("device-stage").expect("stage");
                 for key in [

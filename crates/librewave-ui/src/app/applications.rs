@@ -62,7 +62,7 @@ impl Installed {
 const LIST_HEIGHT: f32 = 300.;
 const NOTE_HEIGHT: f32 = CAPTION_LINE + SPACE_MD;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum RuleKind {
     Desktop,
     Executable,
@@ -893,6 +893,43 @@ mod tests {
 
     #[cfg(feature = "gpui-tests")]
     #[gpui::test]
+    fn the_file_picker_fills_the_rule_with_its_kind(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| shell_with(Snapshot::empty()));
+        let system = cx.debug_bounds("edit-input-2").expect("system edit button");
+        cx.simulate_click(system.center(), gpui::Modifiers::none());
+        for (path, kind, text) in [
+            (
+                "/usr/share/applications/org.example.Player.desktop",
+                RuleKind::Desktop,
+                "org.example.Player",
+            ),
+            ("/opt/player/bin/player", RuleKind::Executable, "player"),
+        ] {
+            let choose = cx.debug_bounds("choose-application").expect("file picker button");
+            cx.simulate_click(choose.center(), gpui::Modifiers::none());
+            assert!(cx.did_prompt_for_paths());
+            cx.simulate_path_prompt_response(|options| {
+                assert!(options.files && !options.directories && !options.multiple);
+                Some(vec![std::path::PathBuf::from(path)])
+            });
+            cx.run_until_parked();
+            view.read_with(cx, |view, _| {
+                assert_eq!(view.picked_rule, Some((text.to_owned(), kind)), "{path}");
+            });
+        }
+        // Cancelling the dialog keeps the last choice.
+        let choose = cx.debug_bounds("choose-application").expect("file picker button");
+        cx.simulate_click(choose.center(), gpui::Modifiers::none());
+        cx.simulate_path_prompt_response(|_| None);
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.picked_rule, Some(("player".to_owned(), RuleKind::Executable)));
+            assert!(view.action_error.is_none());
+        });
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
     fn removing_an_input_closes_the_menu_and_asks_first(cx: &mut gpui::TestAppContext) {
         let mut snapshot = Snapshot::empty();
         snapshot.mixer.profile = snapshot
@@ -942,14 +979,14 @@ mod tests {
     fn typed_identities_choose_their_rule_kind_without_a_toggle() {
         let mut shell = shell_with(Snapshot::empty());
         // The fixture installs `org.test.Player`, which starts `player`.
-        assert!(shell.rule_kind("org.test.Player") == RuleKind::Desktop);
-        assert!(shell.rule_kind(" player ") == RuleKind::Executable);
-        assert!(shell.rule_kind("com.example.Unknown") == RuleKind::Desktop);
-        assert!(shell.rule_kind("unknown-tool") == RuleKind::Executable);
+        assert_eq!(shell.rule_kind("org.test.Player"), RuleKind::Desktop);
+        assert_eq!(shell.rule_kind(" player "), RuleKind::Executable);
+        assert_eq!(shell.rule_kind("com.example.Unknown"), RuleKind::Desktop);
+        assert_eq!(shell.rule_kind("unknown-tool"), RuleKind::Executable);
         // A file chosen as an executable stays one even with a dot in its name.
         shell.picked_rule = Some(("tool.bin".to_owned(), RuleKind::Executable));
-        assert!(shell.rule_kind("tool.bin") == RuleKind::Executable);
-        assert!(shell.rule_kind("tool.bin2") == RuleKind::Desktop);
+        assert_eq!(shell.rule_kind("tool.bin"), RuleKind::Executable);
+        assert_eq!(shell.rule_kind("tool.bin2"), RuleKind::Desktop);
     }
 
     #[test]
