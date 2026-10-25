@@ -75,10 +75,6 @@ const MICROPHONE_TRANSITIONS: [(i32, i32); 7] = [
     (10112, 10240),
 ];
 
-// Physical tap and application mute tests preserved the three left LEDs at
-// exactly 16 dB. Other muted gain values still need physical observations.
-const MUTED_MICROPHONE_GAIN_RAW: i32 = 4096;
-
 /// Physical Headphone-mode transition brackets on the 0.5 dB write grid.
 const HEADPHONE_TRANSITIONS: [(i32, i32); 7] = [
     (-13952, -13824),
@@ -106,7 +102,6 @@ fn level_pattern(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) -> Optio
 fn mix_level_pattern(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) -> Option<[bool; 7]> {
     if api != Some(ApiVersion::new(5, 4))
         || config.volume_select != VolumeSelection::Mix
-        || config.input_mute
         || config.headphone_mute
         || config.all_leds_off
         || config.leds_flip
@@ -124,7 +119,6 @@ fn mix_level_pattern(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) -> O
 fn headphone_level_count(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) -> Option<usize> {
     if api != Some(ApiVersion::new(5, 4))
         || config.volume_select != VolumeSelection::Headphone
-        || config.input_mute
         || config.headphone_mute
         || config.all_leds_off
         || config.leds_flip
@@ -152,8 +146,6 @@ fn bracketed_count(
 fn microphone_level_count(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) -> Option<usize> {
     if api != Some(ApiVersion::new(5, 4))
         || config.volume_select != VolumeSelection::Microphone
-        || (config.input_mute
-            && (config.input_gain.raw != MUTED_MICROPHONE_GAIN_RAW || config.headphone_mute))
         || config.all_leds_off
         || config.leds_flip
         || config.input_gain.fractional_bits != 8
@@ -446,7 +438,6 @@ mod tests {
         }
         config.headphone_volume.raw = -1152;
         for mutation in [
-            |config: &mut Wave3ConfigSnapshot| config.input_mute = true,
             |config: &mut Wave3ConfigSnapshot| config.headphone_mute = true,
             |config: &mut Wave3ConfigSnapshot| config.all_leds_off = true,
             |config: &mut Wave3ConfigSnapshot| config.leds_flip = true,
@@ -509,7 +500,6 @@ mod tests {
         }
         config.direct_monitor.raw = 12800;
         for mutation in [
-            |config: &mut Wave3ConfigSnapshot| config.input_mute = true,
             |config: &mut Wave3ConfigSnapshot| config.headphone_mute = true,
             |config: &mut Wave3ConfigSnapshot| config.all_leds_off = true,
             |config: &mut Wave3ConfigSnapshot| config.leds_flip = true,
@@ -539,7 +529,6 @@ mod tests {
         }
         config.volume_select = VolumeSelection::Microphone;
         for mutation in [
-            |config: &mut Wave3ConfigSnapshot| config.input_mute = true,
             |config: &mut Wave3ConfigSnapshot| config.all_leds_off = true,
             |config: &mut Wave3ConfigSnapshot| config.leds_flip = true,
             |config: &mut Wave3ConfigSnapshot| config.input_gain.fractional_bits = 7,
@@ -559,7 +548,7 @@ mod tests {
         ))
         .expect("checked-in physical mute observations");
         let mut config = config();
-        config.input_gain.raw = MUTED_MICROPHONE_GAIN_RAW;
+        config.input_gain.raw = 4096;
         let observations = fixture["observations"].as_array().expect("observations");
         assert_eq!(observations.len(), 3);
         for observation in observations {
@@ -573,14 +562,26 @@ mod tests {
             assert_eq!(lights(Some(&config), Some(ApiVersion::new(5, 4)), 360.).len(), 5);
             assert!(level_hint(Some(&config), Some(ApiVersion::new(5, 4))).is_none());
         }
-        config.input_mute = true;
-        for raw in [0, 3968, 4095, 4097, 4224, 10240] {
-            config.input_gain.raw = raw;
-            assert_eq!(microphone_level_count(&config, Some(ApiVersion::new(5, 4))), None);
+    }
+
+    #[test]
+    fn microphone_mute_changes_only_the_ring_in_every_mode() {
+        let mut config = config();
+        config.headphone_volume.raw = -1152;
+        config.direct_monitor.raw = 12800;
+        for target in
+            [VolumeSelection::Microphone, VolumeSelection::Headphone, VolumeSelection::Mix]
+        {
+            config.volume_select = target;
+            config.input_mute = false;
+            let live = Lights::observed(Some(&config), Some(ApiVersion::new(5, 4)));
+            config.input_mute = true;
+            let muted = Lights::observed(Some(&config), Some(ApiVersion::new(5, 4)));
+            assert!(live.levels.is_some());
+            assert_eq!(muted.levels, live.levels);
+            assert_eq!(muted.ring(), Some(DANGER));
+            assert!(level_hint(Some(&config), Some(ApiVersion::new(5, 4))).is_none());
         }
-        config.input_gain.raw = MUTED_MICROPHONE_GAIN_RAW;
-        config.headphone_mute = true;
-        assert_eq!(microphone_level_count(&config, Some(ApiVersion::new(5, 4))), None);
     }
 
     #[test]
