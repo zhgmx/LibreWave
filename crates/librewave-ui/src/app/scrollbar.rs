@@ -144,14 +144,17 @@ pub(super) fn input_scrollbar(
                 });
             });
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
-                if phase != DispatchPhase::Bubble || !hitbox.is_hovered(window) {
+                if phase != DispatchPhase::Bubble || !hitbox.should_handle_scroll(window) {
                     return;
                 }
                 let delta = event.delta.pixel_delta(window.line_height());
                 let step = if delta.x.abs() > delta.y.abs() { delta.x } else { delta.y };
                 scroll_to(&handle, handle.offset().x + step);
                 cx.stop_propagation();
-                let _ = shell.update(cx, |_, cx| cx.notify());
+                let _ = shell.update(cx, |this, cx| {
+                    this.note_scroll();
+                    cx.notify();
+                });
             });
         },
     )

@@ -209,11 +209,12 @@ impl Shell {
             .track_scroll(&self.input_scroll)
             // The row scrolls sideways first. While strips are hidden, the
             // wheel stays with the row and does not also scroll the page.
-            .on_scroll_wheel(move |_, _, cx| {
+            .on_scroll_wheel(cx.listener(move |this, _, _, cx| {
                 if scroll.max_offset().x > px(0.) {
+                    this.note_scroll();
                     cx.stop_propagation();
                 }
-            });
+            }));
         for (position, source) in snapshot.mixer.profile.sources.iter().enumerate() {
             strips =
                 strips.child(self.channel_strip(source, position, snapshot.mixer.generation(), cx));

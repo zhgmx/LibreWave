@@ -59,7 +59,13 @@ impl Shell {
             .capture_key_down(cx.listener(Self::frame_key))
             // A drag ends wherever the pointer is released.
             // A fallback for a release that the dragged control did not see.
-            .capture_any_mouse_up(cx.listener(|this, _, _, cx| this.end_level_gesture(cx)))
+            .capture_any_mouse_up(cx.listener(|this, event: &gpui::MouseUpEvent, _, cx| {
+                if event.button == gpui::MouseButton::Left {
+                    this.end_level_gesture(cx);
+                }
+            }))
+            // A wheel event that reaches the root scrolled the page.
+            .on_scroll_wheel(cx.listener(|this, _, _, _| this.note_scroll()))
             .child(self.titlebar(cx))
             .child(body)
             .when(self.application_input.is_some(), |view| view.child(channel_backdrop(cx)))

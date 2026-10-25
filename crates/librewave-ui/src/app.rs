@@ -140,6 +140,11 @@ struct Shell {
     /// the next notch.
     wheel_control: Option<gesture::LevelControl>,
     wheel_travel: f32,
+    wheel_at: Option<std::time::Instant>,
+    /// When a wheel event last scrolled the page or the strip row. A scroll
+    /// that passes over a level control keeps scrolling instead of
+    /// changing the level.
+    scrolled_at: Option<std::time::Instant>,
     /// The sideways scroll position of the input strips.
     input_scroll: gpui::ScrollHandle,
     /// Where the pointer holds the strip scrollbar thumb, during a drag.
@@ -213,6 +218,8 @@ impl Shell {
             level_gesture: None,
             wheel_control: None,
             wheel_travel: 0.,
+            wheel_at: None,
+            scrolled_at: None,
             input_scroll: gpui::ScrollHandle::new(),
             scrollbar_grab: None,
             glow_area: std::rc::Rc::default(),
@@ -832,6 +839,8 @@ mod tests {
             level_gesture: None,
             wheel_control: None,
             wheel_travel: 0.,
+            wheel_at: None,
+            scrolled_at: None,
             input_scroll: gpui::ScrollHandle::new(),
             scrollbar_grab: None,
             glow_area: std::rc::Rc::default(),
@@ -1587,6 +1596,22 @@ mod tests {
         let output = cx.debug_bounds("output-monitor-level").expect("output level");
         wheel(cx, gpui::point(output.left() - px(40.), output.center().y), -80., 0.);
         assert_eq!(cx.debug_bounds("mixer").expect("mixer").top(), page.top());
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
+    fn a_scroll_that_reaches_a_fader_keeps_scrolling(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = crowded_mixer(cx);
+        let heading = cx.debug_bounds("edit-input-3").expect("strip heading");
+        let requests = view.read_with(cx, |view, _| view.request_epoch);
+        wheel(cx, heading.center(), 0., -48.);
+        // The same scroll moves on over a fader: the row keeps scrolling.
+        let fader = cx.debug_bounds("fader-3-monitor").expect("fader");
+        wheel(cx, fader.center(), 0., -48.);
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.input_scroll.offset().x, px(-96.));
+            assert_eq!(view.request_epoch, requests, "no level request");
+        });
     }
 
     #[cfg(feature = "gpui-tests")]
