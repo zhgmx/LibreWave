@@ -148,4 +148,4 @@ Effects and output destination selection are not implemented.
 
 ## Dependencies
 
-The application uses upstream Zed GPUI and `gpui_platform` from Zed tag `v0.233.9`, commit `236e6ddf54e0763d0343f4d3e369d2ae00fe9670`, with Wayland and X11 backends. The GPUI tests are behind the `gpui-tests` feature. Geist fonts and Phosphor icons are bundled with their license notices under `crates/librewave-ui/assets/`. No vendor artwork is bundled.
+The application uses upstream Zed GPUI and `gpui_platform` from Zed tag `v1.25.3`, commit `8dd255c3eafb5231056fe4e6f601cedd011f1c93`, with Wayland and X11 backends. The GPUI tests are behind the `gpui-tests` feature. Geist fonts and Phosphor icons are bundled with their license notices under `crates/librewave-ui/assets/`. No vendor artwork is bundled.

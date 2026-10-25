@@ -216,6 +216,7 @@ pub(super) fn lights(
             .size(px(2. * radius * scale))
             .rounded_full()
             .shadow(vec![BoxShadow {
+                inset: false,
                 color: gpui::Hsla::from(rgb(color)).opacity(0.55),
                 offset: point(px(0.), px(0.)),
                 blur_radius: px(10. * scale),

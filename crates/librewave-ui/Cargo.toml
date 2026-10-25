@@ -15,8 +15,8 @@ gpui-tests = ["gpui", "gpui/test-support"]
 
 [dependencies]
 unicode-segmentation = { version = "1.13.3", optional = true }
-gpui = { git = "https://github.com/zed-industries/zed.git", rev = "236e6ddf54e0763d0343f4d3e369d2ae00fe9670", package = "gpui", optional = true }
-gpui-platform = { git = "https://github.com/zed-industries/zed.git", rev = "236e6ddf54e0763d0343f4d3e369d2ae00fe9670", package = "gpui_platform", optional = true, features = ["wayland", "x11"] }
+gpui = { git = "https://github.com/zed-industries/zed.git", rev = "8dd255c3eafb5231056fe4e6f601cedd011f1c93", package = "gpui", version = "0.2", optional = true }
+gpui-platform = { git = "https://github.com/zed-industries/zed.git", rev = "8dd255c3eafb5231056fe4e6f601cedd011f1c93", package = "gpui_platform", optional = true, features = ["wayland", "x11"] }
 librewave-core = { path = "../librewave-core", optional = true }
 librewave-ipc = { path = "../librewave-ipc", optional = true }
 librewave-platform-linux = { path = "../librewave-platform-linux", optional = true }

@@ -100,6 +100,7 @@ impl Shell {
                     .overflow_hidden()
                     .bg(rgb(PANEL))
                     .shadow(vec![BoxShadow {
+                        inset: false,
                         color: gpui::black().opacity(0.6),
                         offset: point(px(0.), px(24.)),
                         blur_radius: px(64.),

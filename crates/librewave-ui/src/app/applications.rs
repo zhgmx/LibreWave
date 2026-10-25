@@ -13,7 +13,7 @@ use super::{
     },
 };
 use gpui::{
-    AnyElement, BoxShadow, Context, Corner, Div, FontWeight, Stateful, anchored, deferred, div,
+    Anchor, AnyElement, BoxShadow, Context, Div, FontWeight, Stateful, anchored, deferred, div,
     point, prelude::*, px, rgb,
 };
 use librewave_core::{
@@ -331,6 +331,7 @@ impl Shell {
             // Lighter than the fields, so they read as inset entries.
             .bg(rgb(GROUP))
             .shadow(vec![BoxShadow {
+                inset: false,
                 color: gpui::black().opacity(0.55),
                 offset: point(px(0.), px(16.)),
                 blur_radius: px(48.),
@@ -347,7 +348,7 @@ impl Shell {
             .child(div().h(px(NOTE_HEIGHT)).flex().flex_col().children(self.routing_note()))
             .children(self.removal_footer(snapshot, source, cx));
         deferred(
-            anchored().anchor(Corner::TopLeft).snap_to_window_with_margin(px(SPACE_MD)).child(menu),
+            anchored().anchor(Anchor::TopLeft).snap_to_window_with_margin(px(SPACE_MD)).child(menu),
         )
         .with_priority(1)
         .into_any_element()
