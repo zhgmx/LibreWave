@@ -19,17 +19,16 @@ Host inspection can run by default.
 
 These operations send a read request through a reviewed transport:
 
-- Read the product and API version.
-- Read a known configuration or status message.
-- Subscribe to a known event message.
+- Read the `/version` message to get the API version.
+- Read the complete `/config` message.
 
-A device read must have an exact expected request and a maximum response length. Short, long, or malformed responses are errors.
+A device read has an exact expected request and a maximum response length. A short, long, or malformed response is an error.
 
 ### Reversible control writes
 
-The initial write allowlist can include normal controls such as gain, mute, headphone volume, direct monitoring, Clipguard, low cut, lighting, and gain lock. A field enters the allowlist only after its exact device and API schema is verified.
+The write allowlist is the `Wave3ControlChange` set in `librewave-protocol`. It covers the eleven fields of the Wave:3 API 5.3 and 5.4 `/config` message: microphone gain, microphone mute, Clipguard, Low-cut, headphone level, headphone mute, direct monitor balance, knob target, all-LEDs-off, LED flip, and Gain Lock. A field enters the allowlist only after its exact device and API schema is verified. [Protocol evidence](protocol-evidence.md) states which fields also have physical validation.
 
-Every write must be reversible through another normal control write. The implementation must preserve the original value during a physical integration test.
+Another normal control write can reverse every allowlisted write. A physical integration test must preserve the original value.
 
 ### Prohibited operations
 
@@ -48,38 +47,37 @@ Production binaries must not contain a hidden command for these operations.
 
 A session becomes writable only when all of these values match a reviewed schema:
 
-1. USB vendor and product identifier.
+1. USB vendor and product identifier (`0fd9:0070` for Wave:3).
 2. Device family and model.
-3. Protocol API major and minor version where available.
+3. Protocol API major and minor version (5.3 or 5.4).
 4. Message identifier.
 5. Payload size.
 6. Field encoding and access mode.
 
-An unknown value keeps the session in diagnostic read-only mode. Similar model names and nearby firmware versions are not sufficient evidence.
+An unsupported API version stops the probe before the configuration read. Similar model names and nearby firmware versions are not sufficient evidence.
 
 ## Write transaction
 
 A normal control write follows one path:
 
-1. Read the complete message into the device state shadow.
-2. Confirm that the baseline has the exact expected size and schema.
-3. Validate the requested semantic value.
-4. Encode only the selected field in a copy of the baseline.
-5. Preserve reserved and unknown bytes.
-6. Send the complete message.
-7. Read the message again.
-8. Compare the selected field and all protected bytes.
-9. Report success or a precise mismatch.
+1. Confirm that the caller's baseline matches the session's complete configuration.
+2. Validate the requested semantic value against its range and step.
+3. Encode only the selected field in a copy of the baseline. Reserved and unknown bytes stay unchanged.
+4. Read the complete message from the device. Reject the write as stale if it differs from the baseline.
+5. Send the complete message.
+6. Read the complete message again.
+7. Compare the readback with the complete expected message.
+8. Report success or a precise mismatch.
 
-One daemon-owned session accepts one mutable transaction at a time. The code that owns the platform transport and daemon session must ensure that only one admitted session exists for each device connection. A session rejects stale transactions instead of merging them with a newer baseline.
+One daemon-owned session accepts one mutable transaction at a time. The platform transport and daemon session code must keep only one admitted session for each device connection. A session rejects a stale transaction. It does not merge the transaction with a newer baseline.
 
-The local IPC interface accepts semantic controls only. It does not accept setup packets, payload bytes, field offsets, message names, or arbitrary field names. A command includes the daemon-issued device generation. The daemon validates and persists a pending semantic command before it performs USB I/O.
+The local IPC interface accepts semantic controls only. It does not accept setup packets, payload bytes, field offsets, message names, or arbitrary field names. Each `SetWave3Control` command includes the daemon-issued device generation. The daemon validates and persists a pending semantic command before it performs USB I/O. The GUI sends one `SetWave3Control` at a time with the current generation. While a command is in flight, the GUI keeps only the latest slider value. It sends that value after the command succeeds and drops it after a stale generation, disconnect, or write error.
 
-The daemon clears a pending command after a failed transaction. It promotes the command to managed desired state only after verified apply or an unchanged result. If it cannot verify either persistence step, it locks writes and reports persistence ambiguity. A restart does not restore a topology that still has a pending command.
+After a failed transaction, the daemon clears the pending command. After a verified apply or an unchanged result, it promotes the command to managed desired state. If it cannot persist either step, it locks writes and reports persistence ambiguity. Admission of a topology that still has a pending command also locks writes with persistence ambiguity and restores nothing.
 
-Reconnect restoration uses the same reversible transaction path. Each managed field is a separate transaction, so restoration can make partial progress. Any failure stops the sequence. The daemon locks the retained connection, or drops it when the device disconnected.
+Reconnect restoration uses the same transaction path. Each managed field is a separate transaction, so restoration can make partial progress. Any failure stops the sequence. The daemon locks the retained connection, or drops it when the device disconnected.
 
-If a failure occurs after a write attempt, the transaction makes one restoration attempt. It writes the complete original payload and reads the message again. The result includes both the first failure and the restoration result. If restoration cannot be verified, the session rejects more writes until a new admission probe succeeds.
+If a failure occurs after a write attempt, the transaction makes one restoration attempt. It writes the complete original payload and reads the message again. The result includes the first failure and the restoration result. After any failed transaction, the daemon locks writes on that connection. The lock reason states whether restoration was verified. Writes stay locked until a new admission probe succeeds.
 
 ## Physical test rules
 
@@ -98,10 +96,10 @@ Tests must not run in parallel against one physical device.
 
 ## Sensitive data
 
-Logs and fixtures must remove USB serial numbers, user names, application titles, and unrelated audio metadata. A fixture should use a stable test identifier that cannot be traced back to one physical microphone.
+Logs and fixtures must not contain USB serial numbers, user names, application titles, or unrelated audio metadata. A fixture uses a stable test identifier that cannot identify one physical microphone.
 
 ## Control ownership
 
-The physical device owns microphone gain and mute, headphone level and mute, direct-monitor balance, and knob selection. Admission and reconnect read these controls without restoring saved values. This also preserves adjustments made while the daemon was stopped. An explicit client command still uses generation checks and complete-baseline readback verification.
+The physical device owns microphone gain and mute, headphone level and mute, direct monitor balance, and knob target. Admission and reconnect read these controls and do not restore saved values, so adjustments made while the daemon was stopped stay in place. An explicit client command still uses the generation check and complete readback verification.
 
-LibreWave restores only settings previously changed through its interface that are not physical level controls: Clipguard, low cut, LED settings, and gain lock. Pending or ambiguous writes still block new hardware writes until recovery resolves them.
+On reconnect, LibreWave restores only the non-level settings that a client changed through LibreWave: Clipguard, Low-cut, the LED settings, and Gain Lock. A pending or ambiguous write blocks new hardware writes until recovery resolves it.

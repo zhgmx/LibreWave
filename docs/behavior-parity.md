@@ -1,10 +1,10 @@
 # Wave Link behavior parity
 
-Status: required compatibility research. The gain-lock contract and the Windows endpoint feedback paths are recovered. Exact physical and user-interface feedback still needs validation.
+Status: compatibility research is required. The Gain Lock contract and the Windows endpoint feedback paths are recovered. The exact physical and user-interface feedback still needs validation.
 
 ## Goal
 
-LibreWave should match the user-visible precedent set by Wave Link on Windows and macOS where those products agree. When they differ because of an operating-system audio model, LibreWave should preserve the same separation between hardware controls and software mix controls through Linux audio APIs.
+LibreWave matches the user-visible behavior of Wave Link on Windows and macOS where those products agree. Where they differ because of the operating-system audio model, LibreWave keeps the same separation between hardware controls and software mix controls through Linux audio APIs.
 
 Matching behavior does not mean copying the implementation. macOS uses CoreAudio and a virtual audio driver. Windows uses WASAPI and installed driver facilities. Linux uses PipeWire, WirePlumber, and ALSA.
 
@@ -13,14 +13,14 @@ Matching behavior does not mean copying the implementation. macOS uses CoreAudio
 - Microphone preamp gain.
 - Hardware microphone mute.
 - Wave headphone output level.
-- Direct-monitor balance.
+- Direct monitor balance.
 - Operating-system source volume.
 - Operating-system sink volume.
 - Wave Link channel volume.
 - Monitor mix volume.
 - Stream mix volume.
 
-Two controls may share a displayed percentage and still represent different values. LibreWave will not link them until evidence shows that Wave Link links them.
+Two controls can show the same percentage and still be different values. LibreWave does not link them until evidence shows that Wave Link links them.
 
 ## Observation method
 
@@ -31,7 +31,7 @@ Each Windows and macOS test records four snapshots:
 3. Wave Link application state.
 4. Physical knob mode and displayed level.
 
-For each action, the test changes one control and records which snapshots changed. Restart and reconnect tests then determine which component persists or restores the value.
+For each action, the test changes one control and records which snapshots changed. Restart and reconnect tests then show which component persists or restores the value.
 
 The required actions are:
 
@@ -51,10 +51,10 @@ Every behavior-matrix cell has one of these states:
 - `observed`: confirmed on a physical system with before and after state.
 - `documented`: stated as user-visible behavior in vendor documentation.
 - `recovered`: established by a specific static code path or protocol field.
-- `inferred`: likely from available evidence but not safe to implement as a compatibility rule.
+- `inferred`: likely from available evidence, but not safe to implement as a compatibility rule.
 - `unknown`: no sufficient evidence.
 
-Implementation requires `observed` evidence for exact volume linking and persistence. A `documented` or `recovered` result defines the expected test, but it does not prove how an operating-system slider reports a rejected or synchronized change.
+Exact volume linking and persistence require `observed` evidence before implementation. A `documented` or `recovered` result defines the expected test. It does not prove how an operating-system slider reports a rejected or synchronized change.
 
 ## Recovered control paths
 
@@ -62,27 +62,27 @@ Wave Link keeps physical hardware settings separate from software mixer levels o
 
 ### Windows endpoint feedback
 
-The Windows MMDevice endpoint observer registers for master-volume and mute notifications. An incoming notification copies the new scalar or mute state into the endpoint model. A block guard prevents that copy from sending the same value back to the endpoint. Separate flags can also suppress outgoing volume and mute writes.
+The Windows MMDevice endpoint observer registers for master-volume and mute notifications. An incoming notification copies the new scalar or mute state into the endpoint model. A block guard stops that copy from sending the same value back to the endpoint. Separate flags can also suppress outgoing volume and mute writes.
 
-The physical Wave input model enables the ignore flag for its input endpoint model and its paired hardware-device model. As a result, an MMDevice input-volume or mute notification does not become a Wave Link channel-volume or channel-mute change. Microphone gain, hardware microphone mute, and headphone level use a separate Wave device-settings path. That path also has an origin guard so a setting reported by the device is not written back as a new user change.
+The physical Wave input model sets the ignore flag on its input endpoint model and its paired hardware-device model. So an MMDevice input-volume or mute notification does not become a Wave Link channel-volume or channel-mute change. Microphone gain, hardware microphone mute, and headphone level use a separate Wave device-settings path. That path has an origin guard, so a setting reported by the device is not written back as a new user change.
 
-The Wave:3 physical output follows the normal endpoint path. An operating-system output-volume or output-mute notification updates the output endpoint model under the block guard. The recovered Wave:3 path does not convert that notification into a mixer fader change or a Wave device-setting write. This does not prove whether the Windows driver changes the physical headphone level or mute state.
+The Wave:3 physical output follows the normal endpoint path. An operating-system output-volume or output-mute notification updates the output endpoint model under the block guard. The recovered Wave:3 path does not turn that notification into a mixer fader change or a Wave device-setting write. This does not show whether the Windows driver changes the physical headphone level or mute state.
 
-Ordinary virtual Wave Link mix-output endpoints keep their MMDevice scalar and mute state separate from mix master faders. These endpoint values are software values. They are not microphone preamp gain or Wave headphone level.
+Ordinary virtual Wave Link mix-output endpoints keep their MMDevice scalar and mute state separate from the mix master faders. These endpoint values are software values. They are not microphone preamp gain or Wave headphone level.
 
-The recovered Windows disposal path only unregisters endpoint and session notifications. It does not reset endpoint volume or mute. This shows that Wave Link is an observer and client of the Windows endpoint while it runs. It does not establish what the driver or physical device does after Wave Link closes.
+The recovered Windows disposal path only unregisters endpoint and session notifications. It does not reset endpoint volume or mute. Wave Link is therefore an observer and client of the Windows endpoint while it runs. This does not establish what the driver or physical device does after Wave Link closes.
 
 ### macOS property feedback
 
-The macOS code has CoreAudio property listeners and setters for mute, scalar volume, unified volume, per-channel volume, and virtual-main volume. Listener subscriptions are added and removed with the CoreAudio property-listener API. Wave microphone gain, hardware mute, headphone level, and Gain Lock use a separate Wave device-settings model and parameter paths.
+The macOS code has CoreAudio property listeners and setters for mute, scalar volume, unified volume, per-channel volume, and virtual-main volume. It adds and removes listener subscriptions with the CoreAudio property-listener API. Wave microphone gain, hardware mute, headphone level, and Gain Lock use a separate Wave device-settings model and parameter paths.
 
-The recovered code confirms that these control mechanisms are separate. It does not prove whether a macOS input or output slider changes a Wave hardware field, whether Wave Link reflects that change in its device-settings view, or what happens after Wave Link closes.
+The recovered code shows that these control mechanisms are separate. It does not show whether a macOS input or output slider changes a Wave hardware field, whether Wave Link shows that change in its device-settings view, or what happens after Wave Link closes.
 
-The recovered Wave:3 schema defines Gain Lock as a switch that ignores input-volume `SET_CUR` requests from the operating system. Its recovered default is off. The schema description applies to input volume, not to microphone mute. Elgato's [Wave Gain Lock guide](https://help.elgato.com/hc/en-us/articles/360050731352-Elgato-Wave-Link-Wave-Gain-Lock) states that, when the switch is on, applications cannot change microphone gain, while the physical dial and Wave Link can still change it.
+The recovered Wave:3 schema defines Gain Lock as a switch that ignores input-volume `SET_CUR` requests from the operating system. Its recovered default is off. The schema description applies to input volume, not to microphone mute. Elgato's [Wave Gain Lock guide](https://help.elgato.com/hc/en-us/articles/360050731352-Elgato-Wave-Link-Wave-Gain-Lock) states that applications cannot change microphone gain while the switch is on, but the physical dial and Wave Link still can.
 
-This means Gain Lock is an optional hardware policy. LibreWave must show and preserve the device setting. It must not force the setting on during setup. When Gain Lock is enabled, an operating-system slider for the physical Wave capture endpoint may stop changing hardware gain by design. A LibreWave software microphone endpoint can still have a separate, working software level.
+Gain Lock is therefore an optional hardware policy. LibreWave must show and preserve the device setting, and it must not force the setting on during setup. With Gain Lock on, an operating-system slider for the physical Wave capture endpoint can stop changing hardware gain by design. A LibreWave software microphone endpoint keeps its own working software level.
 
-## Current evidence
+## Evidence matrix
 
 | Behavior | macOS | Windows | Linux target |
 | --- | --- | --- | --- |
@@ -99,30 +99,30 @@ This means Gain Lock is an optional hardware policy. LibreWave must show and pre
 
 ## Provisional Linux rule
 
-Until the parity matrix is complete, LibreWave keeps hardware gain and headphone level separate from ordinary software endpoint volume. This avoids the current Linux failure where desktop policy becomes an accidental hardware writer.
+Until the parity matrix is complete, LibreWave keeps hardware gain and headphone level separate from ordinary software endpoint volume. Without this separation, Linux desktop policy can become an accidental hardware writer.
 
-The operating-system microphone slider changes software gain on the LibreWave microphone endpoint. Gain in the device settings and on the physical dial changes the Wave preamp. Gain Lock protects that preamp from outside control requests, but it does not disable LibreWave's software level.
+The operating-system microphone slider changes software gain on the LibreWave microphone endpoint. The device settings and the physical dial change the Wave preamp gain. Gain Lock protects that preamp from outside control requests. It does not disable the LibreWave software level.
 
-The default system playback target is a LibreWave software input channel, as Wave Link uses virtual inputs for system and application audio. Its operating-system volume is a software channel value. The Wave headphone level remains a hardware setting controlled by the device settings and physical dial. LibreWave will not expose the raw physical Wave sink as a second ordinary desktop output while it manages the device.
+The default system playback target is a LibreWave software input channel, because Wave Link uses virtual inputs for system and application audio. Its operating-system volume is a software channel value. The Wave headphone level is a hardware setting that the device settings and the physical dial control. While LibreWave manages the device, it does not expose the raw physical Wave sink as a second ordinary desktop output.
 
-Every synchronized path tags the change origin as device, LibreWave client, or operating system. Applying an observed change must not create a second outgoing change to the origin. This is the Linux equivalent of the feedback guards recovered on Windows.
+Every synchronized path tags the change origin as device, LibreWave client, or operating system. Applying an observed change must not send a second change back to its origin. This is the Linux equivalent of the feedback guards recovered on Windows.
 
 An explicit LibreWave inspection or refresh reads the complete Wave:3 configuration on the daemon's retained connection. If a physical setting changed, the observed device state wins for that read. LibreWave updates its portable snapshot and does not write the managed value back to the device. Sparse desired state stays unchanged.
 
-The recovered feedback guards prove that a device setting report must not cause a write back to its origin. They do not establish whether Wave Link updates, clears, or retains saved intent for every physical control. LibreWave therefore keeps the observed state without changing saved intent. Reconnect still applies the existing managed-control contract. Physical tests on Windows and macOS must resolve this persistence rule before LibreWave claims exact parity.
+The recovered feedback guards show that a device setting report must not cause a write back to its origin. They do not show whether Wave Link updates, clears, or keeps saved intent for each physical control. LibreWave therefore keeps the observed state and leaves saved intent unchanged. Reconnect follows the managed-control contract in [Hardware safety](hardware-safety.md). Physical tests on Windows and macOS must settle this persistence rule before LibreWave claims exact parity.
 
-No product documentation may claim exact Wave Link parity while required cells remain `unknown` or `inferred`.
+No product documentation may claim exact Wave Link parity while required cells are `unknown` or `inferred`.
 
 ## Read-only Linux hardware-control observation
 
 A read-only live inspection of the Wave:3 ALSA card found two simple control groups. `Mic Capture Volume` has integer steps from 0 to 80, mapped from 0.00 to 40.00 dB. `PCM Playback Volume` has integer steps from 0 to 120, mapped from -60.00 to 0.00 dB. Each group also has a switch and a read-only channel map.
 
-These ranges match the Wave:3 microphone gain and headphone level ranges. LibreWave therefore treats the physical card controls as hardware aliases. They are not software endpoint volumes, and the future LibreWave endpoints must not use them for desktop volume or mute.
+These ranges match the Wave:3 microphone gain and headphone level ranges. LibreWave treats these card controls as hardware aliases. They are not software endpoint volumes, and LibreWave endpoints must not use them for desktop volume or mute.
 
 ## Gain across reconnect
 
-A physical observation reported 18.4609375 dB before reconnect and 16 dB after reconnect. The recovered value uses eight fractional bits. Regression tests preserve the exact raw gain during a knob-target change and do not place an unmanaged readback value into desired hardware state. These tests found no LibreWave rounding path that explains the change.
+One physical observation reported 18.4609375 dB before reconnect and 16 dB after reconnect. The device value uses eight fractional bits. Regression tests keep the exact raw gain during a knob-target change and do not put an unmanaged readback value into desired hardware state. These tests found no LibreWave rounding path that explains the change.
 
-The reference system's saved ALSA microphone capture volume is 32 on a 0 through 80 range. Its dB range is 0 through 4000 hundredths of a dB, so that saved value corresponds to 16 dB. The installed ALSA restore unit invokes `alsactl restore`. The ALSA udev rule also invokes restore when a sound control device is added. The restore unit was inactive during inspection; that does not exclude the separate udev path on reconnect.
+On the reference system, the saved ALSA microphone capture volume is 32 on a 0 through 80 range. Its dB range is 0 through 4000 hundredths of a dB, so the saved value is 16 dB. The installed ALSA restore unit runs `alsactl restore`. The ALSA udev rule also runs restore when a sound control device is added. The restore unit was inactive during inspection. That does not exclude the separate udev path on reconnect.
 
-This evidence makes ALSA restoration a plausible cause. It does not prove that ALSA wrote the observed change. A controlled reconnect trace must establish the writer before any ALSA persistence change. LibreWave does not disable ALSA restoration or change its saved state as part of setup or audio takeover.
+ALSA restoration is therefore a plausible cause, but this evidence does not prove that ALSA wrote the change. A controlled reconnect trace must identify the writer before any change to ALSA persistence. LibreWave setup and audio ownership do not disable ALSA restoration or change its saved state.

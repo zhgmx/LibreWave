@@ -1,53 +1,72 @@
-# LibreWave
+<p align="center">
+  <img src="assets/librewave.svg" width="128" height="128" alt="">
+</p>
 
-LibreWave is a Linux application for Elgato Wave audio hardware. It aims to provide the device controls, software mixer, monitor mix, and stream mix that Wave Link provides on its supported systems.
+<h1 align="center">LibreWave</h1>
 
-The project is written in Rust. It starts with the Wave:3 on Linux and keeps the shared device and mixer code separate from Linux audio integration. Other operating systems may be supported later, but the repository will not contain placeholder platform crates.
+<p align="center">Device control and a software mixer for the Elgato Wave:3 on Linux.</p>
 
-## Product shape
+LibreWave controls the Wave:3 hardware and provides a software mixer for it, like Wave Link does on Windows and macOS. It reads and changes the microphone gain, the headphone level, mute, Clipguard, Low-cut, and Gain Lock. The mixer has separate Monitor and Stream mixes and can route each application to its own input.
 
-LibreWave has three user-facing programs:
+LibreWave is written in Rust. The device and mixer code is portable. Linux is the only supported platform.
 
-- `librewaved` is the user-session daemon. It owns the device, audio graph, profiles, and recovery state.
-- `librewavectl` is the complete command-line interface. Every management operation must be available here.
-- `librewave` is the optional GPUI desktop application. It uses the same local interface as the CLI.
+## Features
 
-The daemon is the only normal writer to Wave hardware. The CLI and UI do not access USB devices directly.
+- Hardware controls with exact protocol checks. LibreWave reads every change back and refuses writes to unknown firmware layouts.
+- Inputs for Microphone and System, plus up to ten software inputs. Each input has a Monitor fader and a Stream fader.
+- A Monitor mix for the Wave:3 headphones and a Stream mix that other applications can record.
+- Saved application rules. LibreWave moves an application's streams to its input when the application plays, including Flatpak applications.
+- Default inputs for Music, Browser, Voice Chat, and Game, with installed applications assigned on first run.
+- Desktop volume changes the software mixer, not the hardware gain or headphone level.
+- Clean start and stop. Stopping LibreWave restores the previous desktop audio setup.
 
-## Initial goals
+## Programs
 
-- Control Wave:3 gain, mute, headphone output, direct monitoring, filters, and supported lighting settings.
-- Stop the desktop audio service from changing hardware gain or headphone volume behind the user's back.
-- Replace the current capture-first workaround with daemon-owned recovery. Experimental start can install a reversible card-disable rule. Production use still requires controlled live ownership and recovery tests.
-- Expose stable software endpoints for applications, monitor output, and stream output.
-- Match established Wave Link behavior when Windows and macOS handle operating-system volume changes differently from physical controls.
-- Provide exact protocol-version checks and refuse unsafe writes to unknown layouts.
+- `librewaved` is the user-session daemon. It is the only program that talks to the device and owns the audio graph, the profiles, and the recovery state.
+- `librewavectl` is the command-line interface. Every operation is available here.
+- `librewave` is the optional desktop application. It uses the same local interface as the CLI.
+
+## Install
+
+You need PipeWire, WirePlumber, systemd, a local desktop session, and the Rust toolchain from `rust-toolchain.toml`. Install the build packages listed in [docs/setup.md](docs/setup.md), then run these commands from the checkout:
+
+```text
+cargo build --release -p librewavectl -p librewaved -p librewave
+target/release/librewavectl setup --desktop --autostart --source-root . --profile release
+```
+
+Setup prints its plan and asks for confirmation. It asks for your password once, to install a udev rule that gives your session access to the Wave:3. Then open LibreWave from your application menu.
+
+To remove LibreWave, run `librewavectl stop` and then `librewavectl uninstall`. [docs/setup.md](docs/setup.md) explains every step and file.
 
 ## Documentation
 
+- [Install, run, and remove LibreWave](docs/setup.md)
+- [Desktop application](docs/ui.md)
 - [Architecture](docs/architecture.md)
-- [Hardware safety](docs/hardware-safety.md)
 - [Linux audio integration](docs/linux-audio.md)
-- [Setup, development installs, and removal](docs/setup.md)
-- [Wave Link behavior parity](docs/behavior-parity.md)
+- [Hardware safety](docs/hardware-safety.md)
 - [Protocol evidence](docs/protocol-evidence.md)
+- [Wave Link behavior parity](docs/behavior-parity.md)
 - [Roadmap](docs/roadmap.md)
 
 ## Safety
 
-LibreWave does not provide firmware updates, DFU commands, bootloader commands, or device reset tools. Hardware writes must use a reviewed allowlist and readback verification. Unknown firmware remains in read-only diagnostic mode.
+LibreWave has no firmware update, DFU, bootloader, or reset commands. Hardware writes use a reviewed allowlist, start from a complete device baseline, and are read back. Unknown firmware stays read-only.
 
-Do not use a development build to try undocumented writes on another person's hardware. See `AGENTS.md` before changing device or audio code.
+Do not use a development build to try undocumented writes on another person's hardware. Read `AGENTS.md` before you change device or audio code.
 
-## Distribution
+## Status
 
-The first releases will support source builds and GitHub CI. Native RPM, Arch, and Debian packaging may follow. Flatpak and AppImage are outside the project scope.
+LibreWave is in beta. It is tested on Fedora 44 with KDE Plasma and a Wave:3 with API 5.4. Physical reconnect, sleep, and login recovery are not yet tested. The [roadmap](docs/roadmap.md) lists the remaining work.
+
+Releases are source builds. Native RPM, Arch, and Debian packages may follow. Flatpak and AppImage are outside the project scope.
 
 ## Project name and trademarks
 
-LibreWave is an independent project. It is not affiliated with, endorsed by, or supported by Elgato or Corsair. Elgato, Wave, and Wave Link are trademarks of their respective owners.
+LibreWave is an independent project. It is not affiliated with, endorsed by, or supported by Elgato or Corsair. Elgato, Wave, and Wave Link are trademarks of their owners.
 
-The project will not copy Wave Link artwork, branding, application binaries, or other proprietary assets.
+LibreWave does not contain Wave Link artwork, branding, application binaries, or other proprietary assets.
 
 ## License
 

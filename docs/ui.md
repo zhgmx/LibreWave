@@ -1,289 +1,151 @@
-# GPUI application
+# Desktop application
 
-The optional `librewave` application uses the same local IPC interface as
-`librewavectl`. It shows the daemon's Wave:3 state and sends hardware control
-requests through `librewaved`. The application does not open the USB device.
+`librewave` is the optional desktop application. It uses the same local IPC interface as `librewavectl` and sends every hardware and mixer change through `librewaved`. It never opens the USB device or the audio services itself.
 
-## Prerequisites
+## Open the application
 
-Install the Rust toolchain and native build packages in [Setup](setup.md).
-For lifecycle controls, install matching CLI and daemon binaries with `librewavectl setup`. Setup uses persistent device access by default, which requires separate approval. Use `setup --device-access existing` for separately approved temporary access. In Settings, use **Show plan** on the **Setup** page to see the paths and access rule without changes. Audio startup still requires reviewed device access and a running PipeWire and WirePlumber session.
+Install LibreWave with `--desktop` as described in [Install, run, and remove LibreWave](setup.md). Then open LibreWave from the application menu or run `librewave`. This starts the mixer, then the window.
 
-## Start the application
+During development, run `cargo run -p librewave`. Select **Start mixer** in the title bar to start audio through the installed lifecycle. To work on the device or mixer without an installation, run `cargo run -p librewaved` in another terminal. `LIBREWAVE_SOCKET` selects a development IPC socket. Lifecycle actions always use the normal session socket.
 
-1. Run `cargo run -p librewave`.
-2. Select **Start mixer** in the title bar.
+`cargo run -p librewave -- --settings` opens Settings at launch.
 
-The start action launches the installed daemon service and waits for ready audio and selected desktop defaults. If an existing WirePlumber fragment conflicts with ownership, open **Settings**, select **Audio**, and use **Choose file…** to select the exact `.conf` file. The lifecycle backs it up and restores it on failure or stop. See [Setup](setup.md) for the full contract.
+## Layout
 
-While audio runs, the title bar shows **Mixer ready** and a **Stop** button. **Stop** releases audio and restores desktop ownership. Closing the window keeps audio running. Lifecycle operations run on the background executor. The application prevents overlapping actions and preserves a restoration error while status polling continues. A deliberate stop clears the active snapshot and suppresses the expected disconnect error.
+The window has a title bar, a device stage on the left, and the mixer on the right. When the window is too narrow for the stage and two input strips, the stage moves above the mixer. The default window is 1280 by 840 px and the minimum is 850 by 650 px.
 
-For device and mixer development without an installation, run `cargo run -p librewaved` separately. The application checks status every 500 ms and removes old status after an unexpected disconnect. It shows a new snapshot when the daemon becomes available again. The daemon reads hardware controls automatically while it runs. Opening the window requests its latest snapshot. `LIBREWAVE_SOCKET` selects a development IPC socket; installed service lifecycle controls use the normal session socket.
+The title bar is the only place in the main view that shows and changes the audio state. While audio runs, it shows **Mixer ready** and **Stop**. **Stop** releases audio and restores the desktop defaults. Closing the window keeps audio running. **Mixer ready** means the daemon has admitted the device and activated its graph. It does not mean that an application is playing.
 
-## Main view
+When the daemon is unavailable, the stage dims the illustration and the mixer area shows one notice with **Start mixer** and **Open Settings**.
 
-The main view has a title bar, a device stage, and a mixer. The title bar is
-the only place on the main view that shows and changes the audio state. In a
-window too narrow for the stage and two input strips side by side, the stage
-sits above the mixer. The default window is 1280 by 840 px. The minimum is
-850 by 650 px.
+The application uses Geist on dark surfaces and Geist Mono for commands and paths. Surfaces differ by fill, and outlines show only keyboard focus. Monitor is mint and Stream is blue everywhere. Red marks a muted state, an error, or a destructive action. Amber marks a read-only state. Icon-only buttons name themselves when the pointer rests on them.
 
-In the side-by-side layout, the stage and the mixer use the same 32 px inset.
-The device name and the **Inputs** label share a top edge. The faders use
-the available window height. When the controls need more height, the mixer
-scrolls. Output rows wrap in a narrow mixer.
+## Device stage
 
-The application uses Geist type on dark surfaces. Surfaces differ by fill.
-Outlines show keyboard focus only. Monitor is mint and Stream is blue in every
-place they appear. Red marks a muted state or an error. Amber marks an
-experimental or read-only state. Icon-only buttons show their name when the
-pointer rests on them. Commands, paths, and command output use Geist Mono.
+The stage shows the Wave:3 illustration, its connection state, and the admitted API version. The build renders the illustration ahead of time, so it appears with the first frame. The lights on it follow the daemon snapshot:
 
-Every text field uses the same control. It has the button height and corner
-radius. It supports Ctrl+A, Ctrl+C, Ctrl+X, Ctrl+V, Shift+Insert, Ctrl+Insert,
-Ctrl+Z, and Ctrl+Shift+Z or Ctrl+Y. Ctrl+Left and Ctrl+Right move by word, and
-Shift extends the selection. Ctrl+Backspace and Ctrl+Delete delete a word.
-Drag to select text, double-click to select a word, and triple-click to select
-all. Enter saves the field where saving applies.
+- The mode light shows the knob target.
+- The ring is white when the microphone is live and red when it is muted. The glow behind the illustration follows the ring.
+- On API 5.4, the level dots follow the measured brackets for microphone gain, headphone level, and the Mix position. Values outside the measured brackets stay dark. Hover over the illustration to see when the mapping is unverified. [Protocol evidence](protocol-evidence.md) has the measurements.
+- All lights are dark when controls are unavailable, the device is disconnected, or the device LEDs are off.
 
-When the daemon is unavailable, the stage dims the illustration and the mixer
-area shows one notice with **Start mixer** and **Open Settings**. The main
-view does not expose socket diagnostics or invent device or channel state.
-Live peak meters appear on input strips and output rows while audio runs.
-The mixer has linked channel levels, application assignment, and software
-output level and mute controls. Effects and output destination selection
-remain unavailable.
-
-### Device stage
-
-The stage shows the Wave:3 illustration, its connection state, and the
-admitted API version. The build draws the illustration once, so it appears
-with the first frame. The lights are drawn over it from the daemon snapshot.
-
-The mode light shows the reported knob target. The ring is white when reported
-microphone mute is off and red when it is on. The light behind the
-illustration follows the ring. All lights are dark when controls are
-unavailable, the device is disconnected, or hardware LEDs are disabled.
-The knob face is drawn in front of the ring. In Microphone mode on API 5.4,
-the level dots follow the measured gain brackets. The seventh dot lights at
-40 dB; it stays dark at 39.5 dB. At exactly 16 dB, the three left dots stay
-lit when hardware microphone mute is on. Other muted gain values remain
-unverified. In Headphone mode on API 5.4, the dots fill from left to right
-using the measured headphone-level brackets. In Mix mode, one dot moves from
-the right at 0 percent to the left at 100 percent. Each 5-percent value has a
-verified position. Unmeasured fractional transitions, other APIs, flipped
-patterns, and other mute states stay dark. Hover over the illustration to see
-when the level mapping is unverified. See [Protocol evidence](protocol-evidence.md)
-for the observations and limits.
-
-The daemon reads the Wave:3 configuration every 500 ms while connected.
-The mode light, mute ring, level dots, and controls follow its observed state.
-Polling never changes hardware values. Select **Read controls** to retry admission.
-This command can restore managed Clipguard, low-cut, LED, and gain-lock settings. Physical gain, mute, headphone level, direct mix, and knob mode follow the device baseline.
-After a read, the same command is the circular arrow beside the device name.
+The daemon reads the device configuration every 500 ms while it is connected. Polling never changes hardware values. **Read controls** retries admission. It can restore the managed Clipguard, Low-cut, LED, and Gain Lock settings. After the first read, the same action is the circular arrow beside the device name.
 
 The hardware controls sit under the illustration:
 
-- **Microphone gain** and **Headphone level** each show a level in dB and a bar
-  for its position in the reviewed range. Physical readings use two decimal places.
-  The **−** and **+** buttons change a level
-  by 0.5 dB. The bars are not draggable.
-- The icon button before each level mutes or unmutes it. A muted level is dim
-  and its button is red.
-- The **Clipguard**, **Low-cut**, and **Gain Lock** tiles are lit when the
-  option is on. Select a tile to change it.
+- **Microphone gain** (0 to 40 dB) and **Headphone level** (−60 to 0 dB) each have a slider. Drag the slider or click its track to set the level. The level snaps to the device's 0.5 dB steps. With the slider focused, the arrow keys move it by 0.5 dB, and Home and End select the limits. The **−** and **+** buttons also step by 0.5 dB.
+- The icon button before each level mutes it. A muted level is dim and its button is red.
+- **Clipguard**, **Low-cut**, and **Gain Lock** are lit when on. Select one to change it. Hover over one to see what it does.
 
-When the daemon reports locked write access, the stage shows the reason and
-disables every control. Transaction errors appear above the mixer and can be
-dismissed.
+Each change is one `SetWave3Control` request with the observed device generation. The daemon checks the schema and the complete baseline, writes, and reads the value back. While a slider is dragged, one request is in flight and only the latest position waits. That position is sent with the device generation from the previous reply. An error ends the drag and drops the waiting position.
 
-Each enabled control sends one command with the observed device generation.
-The daemon checks the exact schema and complete baseline, then reads back a
-successful write. A locked or unknown device cannot be changed. The
-microphone preamp and headphone hardware level are separate from desktop
-volume and software mixer levels.
+When the daemon reports locked write access, the stage shows the reason and disables every control. The microphone preamp and headphone level are hardware values, separate from desktop volume and the software mixer.
 
-### Mixer
+## Mixer
 
-**Inputs** has one strip for each input. Microphone and System are permanent
-inputs. Up to ten additional software inputs can receive application audio.
-Every strip is 212 px wide. A long input name or source ends with an ellipsis
-instead of moving other controls. Each strip has a stereo input peak meter, a
-Monitor fader, and a Stream fader with a dB scale between them. Input meters
-observe samples before the faders.
-Output meters observe each final mix after clipping. The meter scale is
--60 to 0 dBFS. A source peak above full scale appears red. A dim track means
-that no recent reading is available, not measured silence. A line on each track marks 0 dB.
+### Inputs
 
-Drag a fader or click its track to set the level. Select the level under a
-fader to reset it to 0 dB. The speaker button under each fader mutes that
-input in that mix. A muted fader is grey and its button is red. Setting or
-resetting a level preserves its mute state. Levels changed while audio is
-stopped are saved.
+**Inputs** has one strip for each input. Microphone and System are permanent. Up to ten more software inputs receive application audio. Each strip is 212 px wide. A long name ends with an ellipsis instead of moving other controls. The strips scroll sideways when they do not fit.
 
-A headphones icon marks the Monitor fader and a broadcast icon marks the
-Stream fader. The plugs button between the two icons links the two fader
-levels in the current window. When linked, either fader sets both levels in one
-daemon transaction. Each mix keeps its own mute state. Unlinking permits
-independent levels again. The link preference lasts until the window closes.
+Each input has its own icon. Microphone and System have fixed icons. A software input whose name states a kind, such as Music, Browser, Chat, Game, or Video, gets that kind's icon. Other inputs get one of the remaining icons by identity, so neighbors differ.
 
-An **Add input** panel follows the last strip. Add or remove software inputs
-while the mixer is ready or cleanly stopped. **Add input** creates an input
-with a new stable identity. The
-small close button on a software input removes it. The daemon saves each
-complete layout before it acknowledges the change. Built-in inputs cannot
-be removed. The strips scroll sideways when they do not fit.
+A strip has a stereo peak meter, a Monitor fader, and a Stream fader with a dB scale between them. Input meters measure the signal before the faders. Output meters measure each final mix after clipping. The meter scale is −60 to 0 dBFS. A peak above full scale is red. A dim track means no recent reading, not silence.
 
-The CLI accepts a name: `librewavectl mixer add <generation> "Music"`.
-Each input has a stable public sink name, such as `librewave.input.3`.
-Select its LibreWave device in an application's audio settings. While audio is
-ready, the application button on a software input opens the active playback
-application list. Select an application's plus button to save its assignment and move its current
-streams to that input. The panel shows pending, verified, or failed movement.
-Protected streams and disabled WirePlumber movement prevent an immediate move.
-Saved rules remain editable while the mixer is stopped. Live layout changes
-require a ready mixer; starting or incomplete cleanup blocks them.
+- Drag a fader or click its track to set the level. Select the level under a fader to reset it to 0 dB.
+- The speaker button under a fader mutes the input in that mix. A muted fader is grey and its button is red.
+- The link button between the mix icons links the two faders of a strip. Either fader then sets both levels in one request. Each mix keeps its own mute. The link lasts until the window closes.
+- With a fader focused, the arrow keys step by 0.5 dB, Home selects −60 dB, End selects +12 dB, and Enter resets to 0 dB.
 
-The CLI lists groups with `librewavectl apps list`. To move a group, use
-`librewavectl apps route desktop "org.example.Player" 3`, or replace `desktop`
-with `executable` for an executable identity from the list. The clients use
-the same daemon commands. Application grouping and routing passed private
-software tests and a bounded disposable-player desktop test. Native assignment
-and remembered-target recovery on the desktop remain unverified. The list
-identifies applications, not individual browser tabs.
-LibreWave sends the observed input serial as `target.object`. WirePlumber
-resolves it and stores the stable input name when target restoration is enabled.
-A private test confirmed restoration after stream recreation, input recreation,
-and a WirePlumber restart. LibreWave saves explicit assignments in the mixer profile and applies them to new stream incarnations. It does not repeatedly override later external routing changes
-after restart. A stream's first audio can reach its previous destination before
-movement completes.
+### Edit an input
 
-**Outputs** is under the inputs and has one row for each mix. A row names the
-mix and where it goes. The Monitor mix plays in the Wave:3 headphones. The
-Stream mix is a source for other applications. Drag or click the horizontal
-level control to change a software output. Arrow keys change it by 0.5 dB.
-Home and End select the level limits. The speaker button mutes that output,
-and the dB button resets it to 0 dB while preserving mute. Output controls are
-saved even when audio is stopped. They do not change hardware headphone level
-or microphone gain. Destination selection remains unavailable.
+Select the pencil button in a strip heading to open **Edit input**. The pop-up opens over the mixer and does not move other controls. A click outside it, the close button, or Escape closes it and discards unsaved text.
 
-The CLI accepts `librewavectl mixer output <generation> monitor on -6.5`.
-Replace `monitor` with `stream` for the other output, or use `off` to mute it.
-`librewavectl mixer faders <source> <generation> -6.5 -6.5` changes both channel
-faders atomically without changing mute states. These controls passed software
-tests and a bounded Wave:3 audio run through the CLI. A native Wave:3 check
-verified channel fader movement, linked levels, separate mutes, and Monitor
-output level and mute. Native keyboard control and Stream output interaction
-remain unverified.
+- The name field at the top renames a software input. Press Enter or select the check button to save.
+- **Assigned here** lists the saved application rules for this input, including rules for closed applications.
+- **Active** lists playing applications that the input does not have yet.
+- **All applications** lists applications with a visible desktop entry. LibreWave reads entries from the XDG data directories and the Flatpak export directories, once, when the first pop-up opens. Each row shows the icon from the current icon theme, then Breeze, Adwaita, `hicolor`, or the pixmap directories. A row without an icon shows a generic glyph.
+- Select a row to assign that application to this input and move its current streams here. Select a row under **Assigned here** to forget its rule. A row assigned to another input names that input.
+- The field at the bottom filters the list. To save a rule the list does not show, type the identity and press Enter or select the plus button. Text that names an installed or playing application takes that application's kind. Other text with a dot is an app ID, and other text is an executable name. The icon before the field shows the kind. The folder button opens a file picker: a `.desktop` file gives its desktop ID, and any other file gives its file name as an executable.
+- The line under the field shows routing progress and counts playing streams that name no application.
+- **Remove input**, at the bottom of a software input's pop-up, asks for confirmation. Removing an input deletes its levels and moves its assigned applications to System. Microphone and System cannot be removed.
+
+The pop-up keeps one height while you filter it. Adding and removing inputs needs a ready or cleanly stopped mixer.
+
+### Reorder inputs
+
+Drag the six dots at the top of a strip onto another strip. The input takes that strip's position. Only the dots start a drag. With the dots focused, Left and Right move the input by one place.
+
+### Add an input
+
+The **Add input** panel after the last strip creates a software input with a new identity. Each input has a stable sink name, such as `librewave.input.3`, that applications can select directly.
+
+### Outputs
+
+**Outputs** has one row for each mix. The Monitor mix plays in the Wave:3 headphones. The Stream mix is a source for other applications. Drag or click the level control to change a software output, or use the arrow keys, Home, and End. The speaker button mutes the output. The dB button resets it to 0 dB. Output levels do not change the hardware headphone level or microphone gain.
+
+### Requests
+
+A fader drag keeps one request in flight and only the latest waiting position. Each request uses the mixer generation from the previous reply. A stale generation, a disconnect, or an error ends the drag and shows the error. Changes made while audio is stopped are saved and apply when audio starts.
+
+## Application routing
+
+LibreWave groups playback streams by application identity: the desktop app ID, or the executable name when no app ID exists. For a Flatpak stream without its own identity, the daemon reads the app ID from the PipeWire client that owns the stream. The list identifies applications, not browser tabs.
+
+A saved rule moves every current stream of the application and applies to new streams when they appear. LibreWave sends the input's serial as `target.object`. WirePlumber stores the stable input name when its target restoration is on. A stream's first audio can reach its previous destination before the move completes. Protected streams and disabled stream movement in WirePlumber prevent a move. Forgetting a rule does not move a current stream back.
+
+A new profile assigns installed applications by their desktop entry categories:
+
+| Input | Categories |
+| --- | --- |
+| Game | `Game` |
+| Voice Chat | `InstantMessaging`, `Chat`, `Telephony`, or `VideoConference` |
+| Browser | `WebBrowser` |
+| Music | `Music`, or `Audio` with `Player` and without `Video` |
 
 ## Settings
 
-Open **Settings** with the gear button or Ctrl+,. Use
-`cargo run -p librewave -- --settings` to open Settings at launch.
-Settings takes keyboard focus. Tab and Shift+Tab stay inside the dialog.
-Escape, the close button, or a click outside the dialog closes it and restores
-the previous focus. Mixer and hardware input are blocked while Settings is
-open.
+Open Settings with the gear button or Ctrl+,. Tab and Shift+Tab stay inside the dialog. Escape, the close button, or a click outside it closes the dialog and restores focus. The mixer and hardware controls do not accept input while Settings is open.
 
-Settings has three pages:
-
-- **Audio** shows whether audio runs and why it is stopped. Its **Engine**
-  section has **Start mixer** and **Stop and restore**. Its **Troubleshooting**
-  section has the WirePlumber conflict file.
-- **Setup** has **Show plan**, which lists the paths and the access rule that
-  setup installs without changes. Its **Terminal commands** section names the
-  `librewavectl setup`, `doctor`, and `uninstall` commands. The button after
-  each command copies it.
-- **Connection** shows the daemon connection and the IPC socket under
-  **Daemon**, and the state of PipeWire and WirePlumber under
-  **Audio services**.
+- **Audio** shows whether audio runs and why it is stopped. **Engine** has **Start audio** and **Stop and restore**. **Troubleshooting** chooses a conflicting WirePlumber file. **Configuration** has **Reset…**, which asks for confirmation and then restores the default inputs, levels, and application assignments. Reset does not change the microphone and headphone settings on the device.
+- **Setup** has **Show plan**, which lists what setup installs without making changes. **Terminal commands** names `librewavectl setup`, `doctor`, and `uninstall`, each with a copy button.
+- **Connection** shows the daemon connection, the IPC socket, and the state of PipeWire and WirePlumber.
 
 The Audio and Setup pages show the last lifecycle result under **Result**.
 
-## Mixer requests
+## Text fields
 
-Dragging keeps one request in flight and only the latest pending pointer level.
-After the daemon acknowledges a request, the next request uses its new mixer
-generation and current mute state. A stale generation, disconnect, or command
-failure ends the gesture, cancels the pending level, and shows the error.
-Pointer previews are not saved until the daemon accepts the change.
+Every text field uses one shared control with the button height and corner radius. It supports:
 
-Focus a fader with the Tab key. Use the arrow keys for 0.5 dB steps, Home for
--60 dB, and End for +12 dB. Enter resets a channel fader to 0 dB. Each action
-uses the current mixer generation. Linked channel edits set both levels in
-one request. Output edits change one software mix. The daemon returns the complete mixer
-snapshot after it saves the change. Routes can be
-saved while the audio host is inactive; they apply when an opt-in audio attempt
-becomes active. A stale generation error is shown until the next action, while
-status polling obtains the current profile.
+- Ctrl+A, Ctrl+C, Ctrl+X, and Ctrl+V, plus Shift+Insert, Ctrl+Insert, and Shift+Delete.
+- Ctrl+Z to undo, and Ctrl+Shift+Z or Ctrl+Y to redo.
+- Ctrl+Left and Ctrl+Right to move by word, with Shift to extend the selection.
+- Ctrl+Backspace and Ctrl+Delete to delete a word.
+- Drag to select, double-click to select a word, and triple-click to select all.
+- Enter to save where saving applies.
 
-## Current limits
+## CLI equivalents
 
-A fresh daemon leaves the mixer audio path inactive. A daemon restart reloads
-a previously accepted audio intent. Experimental start reports ready audio only
-after the host owns the audio path. The daemon publishes actual software
-peak and RMS values over a separate IPC request. The UI reads meters every
-100 ms while audio is active. Readings expire after 350 ms without a block.
-Meters report individual processed blocks, not a peak hold over the interval.
-Default tests check the signal path with fakes. A bounded Wave:3 run verified
-software meters with a quiet disposable test source. Wave:3 API 5.4 control
-tests verified Low-cut readback, microphone gain LED counts, hardware microphone
-mute in both directions, headphone LED brackets, and Mix LED positions.
-The LED and mute tests used no audio. They do not verify audio attenuation,
-blend feed weights, or mute timing. Other hardware controls still require
-physical validation.
-Service launch, default restoration, service restart, and removal are verified
-on the reference Wave:3. Reconnect, sleep, login recovery, and longer startup
-and routing stability remain unverified.
+| Action | Command |
+| --- | --- |
+| Add an input | `librewavectl mixer add <generation> "Music"` |
+| Remove an input | `librewavectl mixer remove <source> <generation>` |
+| Rename an input | `librewavectl mixer rename <source> <generation> <name>` |
+| Move an input | `librewavectl mixer move <source> <generation> <zero-based-position>` |
+| Set both faders | `librewavectl mixer faders <source> <generation> -6.5 -6.5` |
+| Set an output | `librewavectl mixer output <generation> monitor on -6.5` |
+| Reset the configuration | `librewavectl mixer reset <generation>` |
+| List playing applications | `librewavectl apps list` |
+| Save or forget a rule | `librewavectl apps assign <generation> <desktop\|executable> <identity> <source\|forget>` |
+| Move an application now | `librewavectl apps route <desktop\|executable> <identity> <source>` |
 
-GPUI fixture tests cover command mapping, pointer geometry, state handling,
-Ready and Locked layouts, initial keyboard focus, modal focus containment,
-Settings restoration errors, and backdrop dismissal. They also check output
-controls from 850 to 1920 px wide, repeated command copying in Settings,
-and cancellation of queued fader edits when Settings opens. Native Wave:3 API 5.4
-captures cover the connected view, loaded controls, minimum-window device
-stage, and Settings dialog with audio inactive and hardware controls unchanged.
-Captures alone do not verify native input, active audio, or other desktops.
-Physical selector and tap-mute updates in the native UI are verified with
-audio inactive. The cause of a small gain change remains uncertain; incidental
-knob rotation is possible. Selector and mute results remain valid.
+`librewavectl mixer show` prints the generation, the inputs, and the saved rules.
 
-CLI and native tests verify linked and independent channel levels and separate
-channel mutes. CLI tests also verify software output mute and attenuation, and
-disposable application moves between System and a named input. Native tests
-also verify headphone playback, channel fader movement, and Monitor output
-level and mute. Native keyboard control, application assignment, and Stream
-output interaction remain unverified. Channel and output fader tracks support
-drag, click, and keyboard input. Hardware level bars are not draggable.
-Effects and output destination selection remain work for later increments.
+## Tests and limits
 
-The Linux application uses upstream Zed GPUI and `gpui_platform` from
-Zed tag `v0.233.9`, commit `236e6ddf54e0763d0343f4d3e369d2ae00fe9670`,
-with Wayland and X11 backends. The GPUI feature remains disabled in the
-default workspace build.
+GPUI fixture tests cover command mapping, pointer geometry, slider snapping, layouts from 850 to 1920 px wide, keyboard focus, the Settings dialog, the confirmation dialog, the Edit input pop-up, and cancellation of queued fader edits.
 
-Geist fonts and Phosphor icons are bundled with their required license notices
-under `crates/librewave-ui/assets/`. No vendor application artwork is bundled.
+On a Wave:3 with API 5.4, native checks verified the connected view, channel fader movement, linked levels, separate mutes, Monitor output level and mute, physical selector and tap-mute updates, and headphone playback. CLI tests verified software output mute and level and application moves between System and a named input.
 
-## Saved channels and assignments
+Native drag-and-drop reordering, keyboard control, and Stream output interaction are not yet verified. Effects and output destination selection are not implemented.
 
-New profiles contain Microphone, System, Game, Chat, and Music. Microphone monitoring starts muted to avoid duplicate direct monitoring. Existing profiles keep their channels and levels. Channel IDs do not change when a channel is renamed or reordered. A removed ID is not reused.
-
-To move a channel, drag the dots at the top of its strip onto another strip. Only the dots start a drag. The channel takes the position of the strip where you drop it. With the dots focused, the Left and Right arrow keys move the channel by one place.
-
-Select the application button in a channel heading to open the channel menu. The menu opens over the mixer and does not move other controls. A click outside the menu, the close button, or Escape closes it and discards unsaved text.
-
-- The menu heading renames a software channel.
-- **Assigned here** lists the saved rules for this channel, including rules for closed applications.
-- **Active** lists playing applications that this channel does not have yet.
-- **All applications** lists the applications that have a visible desktop entry. LibreWave reads the entries from the XDG data directories and the Flatpak export directories. It reads them once, when a menu first opens. Each row shows the icon that the desktop entry names. LibreWave looks for it in the icon theme set in `~/.config/kdeglobals` or the GTK 3 settings, then in Breeze, Adwaita, `hicolor`, and the pixmap directories. A playing application uses the icon of the entry with the same desktop ID, or of the entry that starts the same executable. A row without an icon shows a generic glyph.
-- Select a row to save a rule for this channel. Select a row under **Assigned here** to forget its rule. A row assigned to another channel names that channel; selecting it moves the rule here.
-- The field at the bottom filters the list. To save a rule that the list does not show, type the identity and press Enter or select the plus button. LibreWave decides the rule kind: text that names an installed or playing application takes that kind, other text with a dot is an app ID, and other text is an executable name. The icon before the field shows the kind.
-- A playing application appears only under **Active**, not again under **All applications**. The menu keeps the same height while you filter it.
-- The folder button opens a file picker. A `.desktop` file fills in its desktop ID. Any other file fills in its file name as an executable.
-
-Deleting its channel changes the saved destination to System. Forgetting a rule stops future enforcement; it does not move a current stream. WirePlumber may retain its last stream target. The menu shows routing progress, and it counts playing streams that name no application.
-
-The CLI supports `mixer rename <source> <generation> <name>`, `mixer move <source> <generation> <zero-based-position>`, and `apps assign <generation> <desktop|executable> <identity> <source|forget>`. `mixer show` lists saved rules. Assignment success confirms that the rule was saved. The channel menu reports routing progress separately.
-
-**Mixer ready** means that the daemon has admitted the device and activated its graph. It does not assert that a playback application is streaming or that a signal is audible. The device stage reports device access. The meters report recent signal levels. Lifecycle progress names the start or stop operation; a fader edit does not replace the mixer state label.
+The application uses upstream Zed GPUI and `gpui_platform` from Zed tag `v0.233.9`, commit `236e6ddf54e0763d0343f4d3e369d2ae00fe9670`, with Wayland and X11 backends. The GPUI tests are behind the `gpui-tests` feature. Geist fonts and Phosphor icons are bundled with their license notices under `crates/librewave-ui/assets/`. No vendor artwork is bundled.

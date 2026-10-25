@@ -1,46 +1,36 @@
-# Setup, development installs, and removal
+# Install, run, and remove LibreWave
 
-## Goals
+LibreWave installs from a source checkout into your user account. `librewavectl` owns the complete lifecycle: `setup`, `start`, `stop`, `doctor`, and `uninstall`. The `xtask` development commands build the current checkout and call the same `librewavectl` operations.
 
-Setup and removal are product features. They must be safe for a first source build and quick enough for repeated hardware development.
+## Requirements
 
-The lifecycle has one implementation in `librewavectl`. `xtask` builds the current checkout and invokes that implementation. It does not copy or remove installation files itself.
+- Linux with PipeWire and WirePlumber running in your desktop session.
+- systemd user services, systemd-udev, and systemd-logind.
+- An active local desktop session. An SSH connection alone does not get device access.
+- `pkexec` with a polkit authentication agent, and the `getfacl` and `setfacl` commands. Setup uses these only for the device access rule.
+- One Elgato Wave:3 connected over USB.
+- The Rust toolchain from `rust-toolchain.toml`.
 
-## Installed build identity
+## Install the build packages
 
-Each installation records:
+On Fedora:
 
-- The source commit.
-- Whether the source tree had uncommitted changes.
-- A deterministic content fingerprint for a dirty build.
-- The Rust profile and target triple.
-- The installed CLI, daemon, and optional GUI hashes.
-- The installation time.
-- The manifest schema version.
-
-`librewavectl doctor --expect-current` compares this identity with the current checkout. A live test report can name the exact code that ran.
-
-## Installation manifest and journal
-
-The manifest is the source of truth for paths that LibreWave owns. It records:
-
-- Versioned executable files and stable links.
-- The inactive daemon unit and optional desktop service.
-- The desktop launcher and login entry when desktop installation is selected.
-- The selected device access mode.
-- The exact Wave:3 udev access rule when setup manages access.
-- Original numeric USB ACLs and exact node identities when setup manages access.
-- The active build directory.
-- User files that setup replaced.
-- Original file hashes and exact backup paths.
-
-The persistent journal records setup or removal progress. Setup validates the complete manifest and journal before it changes an owned path. Recovery either rolls back a build before the active switch or finishes cleanup after the new manifest becomes active.
-
-Removal validates every owned path before its first deletion. If one path was already changed, removal stops and leaves all paths in place. It also revalidates each path at its mutation boundary. If a path changes after removal starts, removal stops there; earlier owned removals can already be complete, and the journal keeps the operation resumable. LibreWave never removes an extra path because it is under a broad directory or matches a filename pattern.
-
-## Build prerequisites
-
-Install the Rust toolchain from `rust-toolchain.toml` and the native development files before you run a Cargo or `xtask` build.
+```text
+sudo dnf install \
+  acl \
+  alsa-lib-devel \
+  clang \
+  fontconfig \
+  fontconfig-devel \
+  libusb1-devel \
+  libX11-devel \
+  libxcb-devel \
+  libxkbcommon-devel \
+  libxkbcommon-x11-devel \
+  pipewire-devel \
+  pkgconf-pkg-config \
+  wayland-devel
+```
 
 On Ubuntu 24.04, install the same packages that CI uses:
 
@@ -65,267 +55,138 @@ sudo apt-get install --no-install-recommends \
   pkg-config
 ```
 
-On Fedora, install these packages:
+These packages are only needed to build LibreWave. They do not install or configure it.
 
-```text
-sudo dnf install \
-  acl \
-  alsa-lib-devel \
-  clang \
-  fontconfig \
-  fontconfig-devel \
-  libusb1-devel \
-  libX11-devel \
-  libxcb-devel \
-  libxkbcommon-devel \
-  libxkbcommon-x11-devel \
-  pipewire-devel \
-  pkgconf-pkg-config \
-  wayland-devel
-```
+## Install LibreWave
 
-These packages are prerequisites for builds from source. They do not install or configure LibreWave.
+Run these steps from the root of the checkout.
+
+1. Build the CLI, the daemon, and the desktop application:
+
+   ```text
+   cargo build --release -p librewavectl -p librewaved -p librewave
+   ```
+
+2. Install them:
+
+   ```text
+   target/release/librewavectl setup --desktop --autostart --source-root . --profile release
+   ```
+
+3. Read the plan that setup prints, then confirm it. Setup asks for your password once to install the device access rule.
+
+4. Open LibreWave from your application menu, or run `librewave`.
+
+Opening LibreWave starts the mixer and then shows the window. Closing the window keeps the mixer running. To release the Wave:3 and restore your previous audio setup, select **Stop** in the title bar or run `librewavectl stop`.
+
+Omit `--autostart` if LibreWave should not start when you log in. To change this later, run setup again with `--autostart` or `--no-autostart`.
+
+To install only the CLI and the daemon, omit `--desktop`. Then start and stop audio with `librewavectl start` and `librewavectl stop`.
+
+### What setup installs
+
+| Path | Purpose |
+| --- | --- |
+| `~/.local/share/librewave/` | Versioned build directories and the active build link |
+| `~/.local/bin/librewavectl`, `~/.local/bin/librewaved` | Links to the active build |
+| `~/.config/systemd/user/librewaved.service` | The daemon unit. Setup leaves it disabled. |
+| `/etc/udev/rules.d/70-librewave-wave3.rules` | Gives the logged-in user access to the Wave:3 |
+
+With `--desktop`, setup also installs:
+
+| Path | Purpose |
+| --- | --- |
+| `~/.local/bin/librewave` | Launcher that starts `librewave-desktop.service` |
+| `~/.config/systemd/user/librewave-desktop.service` | Starts the mixer, then the window |
+| `~/.local/share/applications/com.zhgmx.LibreWave.desktop` | Application menu entry |
+| `~/.config/autostart/com.zhgmx.LibreWave.desktop` | Login entry. It is hidden unless login startup is on. |
+| `~/.local/share/icons/hicolor/scalable/apps/com.zhgmx.LibreWave.svg` | Application icon |
+
+Setup does not start the daemon, enable a unit, open ALSA, create PipeWire objects, or change hardware controls.
 
 ## Device access
 
-The default `persistent` mode manages device access during installation. It is
-not required for each application launch. Setup installs
-`/etc/udev/rules.d/70-librewave-wave3.rules`. The rule tags
-only normal-mode USB vendor `0fd9`, product `0070`, with `uaccess`.
+The udev rule tags only USB vendor `0fd9`, product `0070` in normal mode with `uaccess`. systemd-logind then grants the user of the active local session access to the device. The grant follows the device through reconnects and reboots while that session is active. The rule stays installed when LibreWave closes.
 
-Automatic access requires systemd-udev, systemd-logind, and an active local
-desktop session. The same user can then use the device from the application,
-CLI, or daemon. An SSH connection alone does not create the local-seat grant.
-Setup also requires `pkexec`, a polkit authentication agent, and the `getfacl`
-and `setfacl` commands.
+Setup records the original numeric ACL of each connected Wave:3 node before it installs the rule. It refuses an ACL that `uaccess` would change for another user or widen for another group. Uninstall removes the rule and restores the recorded ACL when the exact node is still connected. It does not guess the permissions of a node that connected later.
 
-The rule stays installed when the application closes. It applies to new device
-nodes after reconnect or reboot when the local session is active. This is the
-intended permission lifecycle; reconnect and login acceptance tests remain
-required. A temporary `setfacl` grant used for development applies only to one
-current node and disappears when that node is replaced.
+If you manage device access yourself, use `setup --device-access existing`. This mode installs the same files without the udev rule and does not ask for your password. `start` still checks that the current user can open the device. Use the same access mode for every upgrade. To change the mode, uninstall first.
 
-Uninstall removes the owned rule and restores recorded permissions when the
-exact node still matches. Permission-record recovery for a new connection is
-separate from the persistent rule. Do not bypass the ownership checks to make
-cleanup succeed.
+Run `setup --plan` to see the complete plan without making changes.
 
-For development with separately approved access, use
-`setup --device-access existing`. This mode installs the same binaries, links,
-manifest, and inactive unit. It does not install or refresh a udev rule, record
-USB ACLs, or request elevation. `start` still checks the current device access.
-`doctor` reports that installation checks cannot verify external access.
-Uninstall leaves those permissions alone. A temporary grant does not cover a
-replacement node after reconnect.
+## Start and stop audio
 
-Use the same access mode on each upgrade. To change modes, uninstall the current
-installation first. This prevents an upgrade from abandoning an owned access
-rule or treating a temporary grant as a persistent one. Use
-`setup --plan --device-access existing` to review this plan without changes.
+`librewavectl start`:
 
-## Source setup
+1. Verifies the installed files and refuses extra or modified daemon processes.
+2. Starts `librewaved.service` if it is not running.
+3. Checks PipeWire, WirePlumber, and read-only device admission. This check does not restore saved hardware settings.
+4. Saves your current default output and input.
+5. Installs the WirePlumber rule `80-librewave-wave3.conf`, which hides the raw Wave:3 card, and restarts WirePlumber.
+6. Waits for the mixer, then selects `librewave.system` and `librewave.microphone` as the defaults.
 
-Build both runnable binaries before setup. A test build does not guarantee that the plain executable files are current.
+`librewavectl stop` releases the audio resources, waits until every LibreWave node is gone, and removes the WirePlumber rule. It restores each saved default only where LibreWave still owns it, so a default you changed yourself stays. A failed start runs the same restoration.
+
+If another WirePlumber fragment creates competing Wave endpoints, start reports it. Name that file with `--suspend-config` and an absolute path:
 
 ```text
-cargo build --release -p librewaved -p librewavectl
-./target/release/librewavectl setup --source-root . --profile release
+librewavectl start --suspend-config /absolute/path/to/wireplumber.conf.d/51-elgato.conf
 ```
 
-The setup command shows its plan and asks for confirmation before its first mutation. It requests elevation only for the exact system udev operation.
+LibreWave backs up that file, suspends it while audio runs, and restores it on stop. In the application, choose the file in **Settings > Audio > WirePlumber conflict**.
 
-Setup then:
+The daemon stores the audio intent in `~/.config/librewave/profiles/audio-state.json`. After a daemon, PipeWire, or WirePlumber restart, the daemon restores audio and reselects missing defaults. Explicit user choices are kept. Hotplug uses the same recovery path.
 
-1. Validates the exact daemon and CLI files that it will install.
-2. Reads the current manifest and any interrupted journal.
-3. Records exact backups for user files that it must replace.
-4. Stages the complete installation in a versioned build directory.
-5. Installs the inactive user unit and, in persistent mode, the exact udev access rule.
-6. In persistent mode, reloads udev rules and refreshes only connected normal-mode Wave:3 devices.
-7. Switches the active link atomically.
-8. Verifies and stores the new manifest.
-9. Removes superseded, unmodified LibreWave build files.
-10. Leaves audio inactive.
+A runtime journal records every file that start changed. Setup and uninstall refuse to run while this record exists. If restoration fails, keep the journal and the backup and run `librewavectl stop` again. Do not delete the journal to bypass the check.
 
-A failure before the manifest switch restores the previous paths byte for byte. A failure after the switch leaves a journal so the next setup can finish exact cleanup.
+Start and stop never change Gain Lock, the hardware gain, the headphone level, or ALSA saved state.
 
-Setup does not install or reload the WirePlumber card-disable rule. It does not enable the unit, start the daemon, open ALSA, or publish PipeWire objects. The separate experimental start operation composes the endpoint engine and physical workers. The new application lifecycle still needs controlled hardware and recovery tests. Setup alone cannot take ownership of the physical Wave card.
+## Check the installation
 
-The udev refresh matches USB vendor `0fd9` and product `0070`. It does not trigger another USB product, a device interface, or firmware mode. If the privileged install or refresh operation fails, setup fails and does not claim that access is current. Rollback or journal recovery preserves or restores the prior rule state.
+Run `librewavectl doctor`. It reports:
 
-Setup records the original numeric ACL for each connected Wave:3 node before it installs the access rule. The manifest also records the boot ID, USB topology, node inode, and filesystem identity. It contains no device serial. An upgrade retains the original baseline. Setup refuses an ACL that `uaccess` would change for another user or widen for another group.
+- The manifest and any interrupted transaction.
+- The hashes of the installed files and the targets of the links.
+- The unit state and the running daemon executables.
+- The udev rule, the WirePlumber rule, and the audio ownership journal.
+- Stale build directories, temporary files, and backups.
+- Live product nodes, through the installed daemon, while audio runs.
 
-An upgrade reuses an unchanged owned access rule and verified grant. It does not install or refresh that rule again. A new installation or a missing owned rule still requires the privileged operation.
+`doctor --expect-current --desktop` also compares the installed build with the current checkout. A missing PipeWire observation is reported as blocked, never as passed. A changed file, a stale daemon, or an incomplete restoration is a failure.
 
-Removal of the udev rule alone can leave its ACL on a connected node. Uninstall therefore restores the recorded ACL after it removes and refreshes the rule. Restoration accepts only the exact recorded connection and an unchanged owned grant. It pins that node while it restores the original ACL and verifies the result. An interrupted restoration retains the manifest, journal, and binaries so uninstall can resume.
+## Uninstall
 
-A changed ACL is preserved. A node connected after setup, after reconnect, or after a reboot has no original baseline unless the recorded node identity still matches. Uninstall refuses to guess its permissions. Keep the installation records and review that exact connection before cleanup. Reconnect and login permission recovery remain acceptance gates.
+1. Run `librewavectl stop` if audio is running.
+2. Run `librewavectl uninstall`.
+3. Read the plan and confirm it.
 
-## Experimental application lifecycle
+Uninstall checks every owned path first and stops before the first deletion if one was changed. It restores replaced files from backups, removes the udev rule, restores the recorded USB ACLs, and removes the links, units, desktop files, and build directories. It then verifies that nothing owned remains.
 
-Prerequisites: install matching CLI and daemon binaries with the current manifest schema. Connect exactly one supported Wave:3. PipeWire and WirePlumber must run in the same user session. The device must already have reviewed USB access. A start operation cannot grant access. Approve any persistent access rule separately before you run setup.
+Your profiles stay in `~/.config/librewave/profiles/`. To remove them too, run `librewavectl uninstall --purge` and confirm.
 
-Keep the installed unit disabled. Use the normal session socket for service control. Explicitly configured default names derived from USB identities cannot be saved because they can contain a device serial. Automatic defaults and stable virtual defaults are supported.
+## Installation records
 
-1. Run `librewavectl start --experimental`.
-2. Run `librewavectl doctor`.
-3. Run `librewavectl stop` when you want to release audio ownership.
+The manifest, `~/.local/state/librewave/install-manifest.json`, lists every path that LibreWave owns, with its hash, mode, and any backup of a file it replaced. LibreWave never removes a path that is not in the manifest. Setup and uninstall write a journal while they run. An interrupted setup rolls back or finishes on the next run, and an interrupted uninstall resumes.
 
-If an existing user WirePlumber fragment creates competing Wave endpoints, select that exact file in the application or use an absolute path:
+Each installation records its build identity: the source commit, whether the tree had uncommitted changes, a content fingerprint for a dirty tree, the Rust profile and target, and the hashes of the installed executables.
 
-```text
-librewavectl start --experimental --suspend-config /absolute/path/to/wireplumber.conf.d/51-elgato.conf
-```
+LibreWave supports only the current manifest, profile, and IPC formats. The lifecycle refuses an unknown manifest or journal schema. Remove an incompatible installation with the CLI that installed it, then run setup again. Do not edit a manifest to bypass validation.
 
-Start verifies the installed artifacts and refuses extra, stale, or modified daemon processes. It reloads the user units and starts `librewaved.service` when necessary. It checks host services and read-only device admission before it changes the audio policy. The admission check uses the daemon's control connection and reads fresh state. It does not restore saved hardware settings or open a competing USB handle.
+`librewaved --check-config` validates the profiles without starting a service, opening hardware, or changing files. `start` runs this check before it changes anything.
 
-The daemon saves the configured default selections. The lifecycle backs up the selected regular `.conf` file, including its mode, and suspends only that file. It creates the exact `80-librewave-wave3.conf` policy and restarts WirePlumber. It waits for ready audio before selecting `librewave.system` and `librewave.microphone`. Success requires both configured and effective defaults to select those endpoints.
+## Profiles
 
-The generated unit quotes executable paths and pins the installation's configuration root so the daemon uses the same profiles as the clients.
+Profiles live in `~/.config/librewave/profiles/`:
 
-The runtime journal records every owned file and whether the daemon service was already active. Repeated starts reuse that record. A repeated start without `--suspend-config` uses the recorded file. Setup and uninstall refuse to run until the ownership record is cleared. One process lock serializes all lifecycle operations.
+- `mixer-state.json` holds the inputs, levels, output levels, and application assignments.
+- `device-state.json` holds the hardware controls that LibreWave manages, keyed by USB topology. It never contains a device serial.
+- `audio-state.json` holds the audio intent.
 
-A failed start runs the same restoration path as stop. Stop cancels durable audio recovery, releases the audio resources, and waits for all LibreWave nodes to disappear. Cleanup failure retains the policy and backup. After successful cleanup, the daemon restores each configured default only while it still selects LibreWave. A later user selection is preserved. The lifecycle restores the exact fragment, removes its policy, restarts WirePlumber, and verifies the defaults. The daemon retains the baseline until this verification is complete. The lifecycle stops a service that it launched and removes its journal and backup.
+With no saved mixer profile, the daemon creates the inputs Microphone, System, Music, Browser, Voice Chat, and Game. It assigns installed applications to them from their desktop entry categories. Setup never changes an existing profile.
 
-The daemon records the confirmed restoration selections before the policy restart. If WirePlumber reloads an earlier LibreWave selection, the daemon restores that selection again. A later user choice remains in place.
+For an old schema-2 mixer profile, stop audio and the daemon, then run `librewavectl convert-profile`. It backs up the original file in the LibreWave state directory. `librewavectl convert-profile --rollback` restores that backup when the profile has not been edited since.
 
-If restoration fails, keep the journal and backup and retry `librewavectl stop`. A modified file is preserved. The error names the conflicting artifact or failed operation. Do not delete the journal to bypass that check. An interrupted final service stop resumes without starting a new daemon or restarting WirePlumber again.
-
-The daemon stores active audio intent in `librewave/profiles/audio-state.json` below the configuration root. A daemon restart reloads that intent. Hotplug and host-service recovery use the existing capture-first supervisor. After graph recovery, the daemon reselects missing defaults and preserves explicit user choices. Stop saves disabled audio intent before cleanup. An interrupted or failed persistence operation reports an error instead of claiming that stop completed.
-
-These commands do not enable login startup, change Gain Lock, or change an ALSA saved state. Closing the application window keeps the daemon running.
-
-The daemon handles termination on its control thread. It releases its current audio resources, retains accepted restart intent, and removes its own IPC socket. Stop verifies socket removal before it discards the ownership journal. Lifecycle operations lock a stable parent directory so removal cannot replace the lock authority or recreate the removed application state directory.
-
-## Desktop installation and login startup
-
-Build all three binaries from the same checkout:
-
-```sh
-cargo build --release -p librewavectl -p librewaved -p librewave
-```
-
-Stop the desktop service and mixer before setup. Use the resulting CLI to
-install the desktop artifacts through the same transaction as the daemon:
-
-```sh
-target/release/librewavectl setup --desktop --autostart --profile release
-```
-
-If the build uses a separate target directory, use its exact executable path.
-`--gui-path <PATH>` and `--daemon-path <PATH>` select explicit build artifacts.
-Use `--suspend-config <PATH>` only for a reviewed legacy loader that the mixer
-must suspend. Setup stores that path in the desktop service; the start
-operation validates and backs up the loader before suspension.
-
-`--desktop` installs the GUI in the active build, a `librewave` launcher,
-`librewave-desktop.service`, and `io.github.zhgmx.LibreWave.desktop` entries
-in the application and autostart directories. New desktop installs do not
-start at login unless `--autostart` is selected. Upgrades preserve the saved
-login setting and suspended-loader path. `--no-autostart` disables login
-startup. Setup leaves the desktop and mixer stopped.
-
-The launcher and both desktop entries use `systemctl --user start
-librewave-desktop.service`. Repeated launches reuse the service instance.
-The service starts the mixer through `librewavectl start --experimental`
-before it starts the GUI. Closing the GUI keeps the mixer running. Use
-`librewavectl stop` to release audio ownership.
-
-The manifest records the GUI hash and every desktop artifact. Setup backs up
-replaced files, and rollback or uninstall restores unchanged originals.
-Modified owned files stop replacement. Setup and uninstall refuse a running
-desktop process. The lifecycle reloads the user service manager after changes.
-Use `doctor --expect-current --desktop` to compare all three build artifacts.
-
-Manifest schema 5 includes desktop ownership. A stopped schema-4 installation
-can use the new CLI’s `convert-installation` command before setup. It validates
-the exact artifact paths and hashes, retains the USB access baseline, and
-backs up the original record as `install-manifest-schema-4.json`. It changes
-only the record, so the approved udev rule and device ACL stay in place.
-Modified artifacts or an interrupted setup journal block conversion.
-Other incompatible development installs need removal with their matching CLI.
-Keep old binaries, manifests, original-file backups, and profiles for recovery.
-Do not edit a manifest to bypass validation.
-
-Desktop transaction tests use isolated files and fake system services.
-Actual login and session recovery remain physical acceptance tests.
-
-## Controlled live validation
-
-The lifecycle has isolated regression tests. The reference physical run below verifies a bounded recovery scope. Native interaction, login, physical reconnect, and sleep remain separate acceptance gates.
-
-Before a live run, review `setup --plan`, the selected fragment, the current installation manifest, and the saved hardware profile. Record the current configured and effective defaults, fragment bytes and mode, unit state, daemon path, product nodes, and hardware gain without recording a serial. Confirm the exact access grant separately. Existing read-only USB access is sufficient for takeover; the plan includes no hardware control write.
-
-1. Install the reviewed build with `setup --device-access existing` for separately approved access, or approve the persistent rule and its exact Wave:3 refresh first.
-2. Run `librewavectl start --experimental --suspend-config <absolute-fragment-path>`.
-3. Verify application audio, software microphone monitoring, independent mixes, and the four deliberate desktop endpoints.
-4. Run `librewavectl start --experimental` again.
-5. Verify that one daemon and one audio graph remain.
-6. Change one software endpoint volume.
-7. Verify that hardware gain is unchanged.
-8. Run `systemctl --user restart librewaved.service`.
-9. Verify that accepted audio intent recovers.
-10. Run `systemctl --user restart pipewire.service`.
-11. Verify audio recovery.
-12. Run `systemctl --user restart wireplumber.service`.
-13. Verify audio recovery.
-14. Test reconnect only after approval for the physical action and the exact temporary access grant.
-15. Run `librewavectl stop`.
-16. Verify exact fragment restoration, preserved user default changes, original service state, and zero LibreWave graph nodes.
-17. Run `librewavectl uninstall`.
-18. Verify every manifest-owned path, service, access rule, process, and graph object.
-
-Stop immediately on unexpected hardware changes or a cleanup failure. Preserve the ownership files and use the normal stop path for recovery. Do not retire the existing workaround until this sequence passes. Sleep and login recovery require separate acceptance runs before production support.
-
-### Bounded existing-access validation
-
-This five-minute audio run checks setup, startup, mixer controls, application
-routing, and stop. It does not replace the complete recovery sequence above.
-Approve its installation, profile, desktop, and sound changes before it starts.
-Use the current signed build and its normal installation manifest.
-
-Record exact profile backups, fragment bytes and mode, configured and effective
-defaults, unit state, daemon ownership, USB node identity and permissions, and
-current hardware controls. Review a current-format profile before replacing
-old development state. Keep the hardware desired-state file unchanged.
-
-1. Install with `setup --device-access existing` and leave the unit disabled.
-2. Start the installed daemon with audio inactive.
-3. Add one temporary software input and disable the microphone's Monitor and Stream routes.
-4. Set both software outputs to muted at -30 dB before audio starts.
-5. Run `start --experimental --suspend-config <absolute-fragment-path>`.
-6. Check one daemon, the deliberate endpoints, and selected defaults.
-7. Start only disposable test-player streams and move them between System and the temporary input.
-8. Check input meters, linked and independent channel levels, and software output mute and level controls.
-9. Run `stop` before five minutes of active audio have elapsed.
-10. Verify restored defaults and fragment, released audio resources, and zero LibreWave nodes.
-11. Restore the test mixer settings and stop a daemon launched only for this test.
-
-Use silence for routing first. Any listening phase needs a separately stated
-signal ceiling and output ceiling. Software output controls cannot change the
-hardware headphone level or microphone gain. Keep test players' target and
-property restoration disabled during this first desktop run, so disposable
-assignments cannot affect an existing application's saved state. Remembered
-targets already have a private software test; desktop persistence needs a
-separate approved run.
-
-Start may suspend the one selected fragment, create
-`wireplumber.conf.d/80-librewave-wave3.conf`, restart WirePlumber, and select
-`librewave.system` and `librewave.microphone` as defaults. It does not restart
-PipeWire or enable the daemon at login. Stop restores only owned selections
-and preserves independent changes. A failure or deadline ends the test through
-the normal stop path. Retain ownership records if cleanup cannot be verified.
-Do not remove an unowned or modified file to force success.
-
-State the final installation choice in the approval. Retaining the user
-installation leaves the unit disabled, audio off, and the reviewed profile in
-place. Removal uses `uninstall` and restores the reviewed original profile only
-when it still matches the test-owned state. Existing access remains externally
-managed in either case. This run does not grant access to a replacement USB node.
-
-## Development loop
-
-Use these commands during development:
+## Development installs
 
 ```text
 cargo xtask dev-install
@@ -333,112 +194,19 @@ cargo xtask dev-status
 cargo xtask dev-uninstall
 ```
 
-`dev-install` and `dev-status` first ask Cargo to build the runnable `librewavectl` and `librewaved` binaries. `xtask` reads the compiler artifact messages, hashes those exact files, and invokes the exact CLI path that Cargo returned. It does not search `PATH` or call an older installed CLI.
+`dev-install` builds the current checkout in debug mode, hashes the exact files that Cargo produced, and runs that CLI's `setup`. Add `--device-access existing` to skip the udev rule. `dev-status` compares the source identity and binary hashes with the manifest and fails on a mismatch. `dev-uninstall` builds only the CLI and uses it for removal.
 
-`cargo xtask dev-install --device-access existing` uses separately managed access.
-The default development install uses persistent access.
+`xtask` does not install the desktop application. If a desktop installation exists, use the release steps above.
 
-`dev-install` records the source revision and dirty fingerprint. `dev-status` compares the current source identity and exact binary hashes with the manifest. A mismatch is an error. `dev-uninstall` builds only the current CLI and uses it for cleanup. Broken daemon work cannot prevent removal.
+## Tested behavior
 
-## Doctor checks
+On Fedora 44 with KDE Plasma and a Wave:3 with API 5.4:
 
-`librewavectl doctor` reports:
+- Repeated launches reused one desktop service and one daemon.
+- Adding and removing an input three times while audio ran kept the existing graph node IDs. Rename and reorder ran during playback.
+- Saved application rules handled a relaunch, two concurrent streams, and fallback to System after the assigned input was removed.
+- A quiet generated tone reached the monitor mix with no silent 100 ms window during the edits. This measures signal continuity, not what a listener hears.
+- Audio recovered about 1.2 s after a daemon restart and about 3.1 s after a PipeWire and WirePlumber restart. Saved assignments and hardware control values survived both.
+- In a 118.44 s monitor capture, every 100 ms window after the start and end were trimmed contained the test signal. Closing and opening the window during playback kept the same daemon and did not interrupt the signal.
 
-- The manifest and interrupted journal.
-- CLI and daemon file hashes.
-- Stable link targets and the active build directory.
-- Unit state and running daemon executable paths.
-- The exact udev rule, temporary WirePlumber policy, and audio ownership journal.
-- Stale build directories, temporary files, and backups.
-- The remaining production validation gate.
-- Live product nodes and audio readiness through the installed daemon while ownership is recorded.
-
-An unavailable graph observation is a blocked check. Doctor does not report it as a successful cleanup. A changed policy, backup, stale daemon, or incomplete restoration is a failed check.
-
-Doctor also scans fixed LibreWave paths when the manifest is missing. It does not claim that an unavailable PipeWire check passed.
-
-## Uninstall
-
-`librewavectl uninstall` shows its plan and asks for confirmation. It then:
-
-1. Validates the manifest and journal schema.
-2. Checks all owned paths for local changes.
-3. Stops before any deletion if one owned path was changed.
-4. Restores replaced files from verified backups.
-5. Removes the exact manifest-owned udev rule, reloads udev, and refreshes only connected normal-mode Wave:3 devices.
-6. Restores and verifies the original USB ACLs for the recorded connected nodes.
-7. Removes executable links, the inactive unit, and exact build files.
-8. Removes its exact backup and transaction files.
-9. Verifies that no manifest-owned path, running daemon, active unit, stale policy, or build directory remains.
-
-Normal uninstall preserves profiles and says where they remain. `librewavectl uninstall --purge` removes profiles only after explicit confirmation. The journal records this choice, so an interrupted removal cannot resume with different profile behavior.
-
-Daemon-owned desired hardware state is stored at `librewave/profiles/device-state.json` below the selected configuration root. It uses serial-free USB topology keys and contains only controls explicitly managed through LibreWave. Normal uninstall preserves this file with the profile directory. `uninstall --purge` removes it as part of that exact directory.
-
-Setup never changes Gain Lock. Uninstall and unmanage do not restore a saved Gain Lock value.
-
-## Pre-release policy
-
-Development installations support only the current manifest, configuration, and IPC formats. The lifecycle refuses an unknown manifest or journal schema. Use the explicit schema-4 installation conversion above, or remove another incompatible pre-release installation before setup.
-
-Run `librewaved --check-config` to validate profiles without starting a service,
-opening hardware, recovering a pending write, or changing files. Experimental
-start invokes this check through the verified installed daemon before its first
-service or desktop change. An error names the incompatible profile path.
-
-The current mixer file uses schema 3. The daemon rejects older schemas without
-changing the file. Setup preserves profiles and does not inject first-run
-channels into existing profiles.
-
-For a local schema-2 development profile, stop the desktop service and use
-`librewavectl stop` first. With the daemon stopped, run the newly built
-`librewavectl convert-profile`. The command uses the lifecycle operation lock.
-It preserves generation, channel IDs, order, routes, output levels, and file
-mode. It adds the next channel ID and an empty saved-rule list. Schema 2 had
-no saved-rule field. It stores the exact original bytes and mode in
-`mixer-schema-2-backup.json` under the LibreWave state directory before it
-replaces the profile. Run `librewaved --check-config` before starting the mixer.
-
-If installation fails, keep the daemon stopped and run
-`librewavectl convert-profile --rollback` with the new CLI. Rollback restores
-the exact original file and retains the backup. It refuses to overwrite a
-profile edited since conversion. Conversion also refuses pending profile
-writes, symbolic links, unknown schemas, and invalid profiles. Repeating an
-interrupted conversion or rollback is safe when the profile still matches
-one of the recorded states. This explicit development conversion is not an
-automatic compatibility path in the daemon.
-
-Do not add compatibility readers, deprecated commands, dual writers, or fallback installation paths before the first public release.
-
-
-## Reference physical validation
-
-A Fedora 44 KDE session with Wave:3 API 5.4 tested revision `69d8170` on
-2026-10-24. The installed CLI, daemon, and GUI hashes matched the release
-build. Repeated launches reused the same service instance. The schema
-conversions preserved the original two inputs, routes, output levels, and
-hardware settings. The narrow udev rule and its recorded ACL stayed unchanged.
-
-Three live input add/remove cycles preserved the existing graph node IDs.
-Rename and reorder also ran while playback continued. Saved application
-rules handled relaunch, two concurrent streams, and fallback to System after
-the assigned channel was removed. A quiet generated tone reached the monitor
-mix with no silent 100 ms windows during the measured edit run. This verifies
-signal continuity, not a listener’s perception.
-
-Daemon restart recovered in about 1.2 seconds. PipeWire and WirePlumber restart
-recovered in about 3.1 seconds. Saved assignments and physical control values
-survived both cases. The tests exposed and corrected repeated ALSA status
-sampling and stale disconnected adapter-buffer handling. Active buffer,
-clock-discontinuity, and stalled-device checks remain strict. Initial graph
-publication can still fail an attempt and retry before readiness; the run
-observed that retry without losing the restored desktop fallback.
-
-A two-minute playback run captured 118.44 seconds of monitor output. After
-trimming capture startup and shutdown, every measured 100 ms window contained
-the test signal. Closing and relaunching the GUI during playback retained the
-same daemon process and did not interrupt that signal.
-
-These measurements do not verify physical USB reconnect, sleep, an actual
-logout/login cycle, native keyboard or pointer interactions, or long-duration
-reliability. Production support remains gated on those acceptance tests.
+Physical USB reconnect, sleep, a real logout and login, and long runs are not yet tested.
