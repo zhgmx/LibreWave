@@ -109,7 +109,7 @@ fn access_baseline_is_durable_preserved_across_upgrade_and_restored_on_removal()
     assert_eq!(lifecycle.udev.captures.get(), 1);
     assert_eq!(lifecycle.udev.rule.events, vec!["install", "refresh"]);
     assert_eq!(lifecycle.read_manifest().unwrap().unwrap().usb_access[0].original_acl, ORIGINAL);
-    assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed);
+    assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed { kept: Vec::new() });
     assert_eq!(lifecycle.udev.acl.borrow().as_str(), ORIGINAL);
 }
 
@@ -163,7 +163,7 @@ fn failed_acl_restoration_retains_records_and_binaries_and_resumes_idempotently(
     assert!(!lifecycle.paths.udev_rule.exists());
     assert_eq!(lifecycle.udev.acl.borrow().as_str(), GRANTED);
     lifecycle.udev.restore_fails = false;
-    assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed);
+    assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed { kept: Vec::new() });
     assert_eq!(lifecycle.udev.acl.borrow().as_str(), ORIGINAL);
     assert!(!lifecycle.paths.journal().exists());
     assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::NotInstalled);
@@ -233,7 +233,7 @@ fn existing_access_install_upgrade_and_removal_preserve_external_permissions_and
                 && c.state == super::engine::CheckState::Blocked)
         );
     }
-    assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed);
+    assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed { kept: Vec::new() });
     assert_eq!(fs::read(&paths.udev_rule).unwrap(), b"externally managed access");
     assert_eq!(fs::read(profile).unwrap(), b"original profile");
 }

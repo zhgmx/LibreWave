@@ -90,6 +90,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
                 remove_manifest_backups(previous)?;
                 self.verify_uninstalled(previous)?;
                 remove_if_exists(&self.paths.journal())?;
+                // Unowned files stay in place; `doctor` reports leftover backups.
                 remove_if_unused(&self.paths.backup_root())?;
                 remove_if_unused(&self.paths.state_root)?;
                 return Ok(());

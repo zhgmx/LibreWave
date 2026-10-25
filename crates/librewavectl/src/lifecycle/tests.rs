@@ -98,7 +98,7 @@ fn first_install_records_exact_build_and_preserves_profiles() {
     );
     assert_eq!(fs::read_link(&manifest.active_link).unwrap(), manifest.active_build_directory);
     assert!(!manifest.wireplumber_policy_path.exists());
-    assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed);
+    assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed { kept: Vec::new() });
     assert_eq!(fs::read(profiles).unwrap(), b"profile");
     assert!(!paths.udev_rule.exists());
 }
@@ -111,7 +111,11 @@ fn uninstall_keeps_unowned_state_files_and_their_directory() {
     fixture.install(&mut lifecycle, "revision-1");
     let unowned = paths.state_root.join("mixer-schema-2-backup.json");
     write_file(&unowned, b"backup");
-    assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed);
+    // The unowned file stays, and uninstall names it.
+    assert_eq!(
+        lifecycle.uninstall(false).unwrap(),
+        UninstallOutcome::Removed { kept: vec![unowned.clone()] }
+    );
     assert_eq!(fs::read(&unowned).unwrap(), b"backup");
     assert!(!paths.state_root.join("install-manifest.json").exists());
     assert!(!paths.state_root.join("install-journal.json").exists());
@@ -124,7 +128,7 @@ fn explicit_purge_removes_profiles() {
     write_file(&profiles, b"profile");
     let mut lifecycle = fixture.lifecycle();
     fixture.install(&mut lifecycle, "revision-1");
-    assert_eq!(lifecycle.uninstall(true).unwrap(), UninstallOutcome::Removed);
+    assert_eq!(lifecycle.uninstall(true).unwrap(), UninstallOutcome::Removed { kept: Vec::new() });
     assert!(!profiles.exists());
 }
 
@@ -158,7 +162,7 @@ fn upgrade_removes_the_old_exact_build_and_reports_identity_mismatch() {
             .iter()
             .any(|check| check.name == "current build identity" && check.state == CheckState::Fail)
     );
-    assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed);
+    assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed { kept: Vec::new() });
     assert_eq!(fs::read(unit).unwrap(), b"original-unit");
 }
 
@@ -412,7 +416,7 @@ fn udev_install_and_remove_are_each_followed_by_an_exact_refresh() {
     let mut lifecycle = fixture.lifecycle();
     fixture.install(&mut lifecycle, "revision-1");
     assert_eq!(lifecycle.udev.events, vec!["install", "refresh"]);
-    assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed);
+    assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed { kept: Vec::new() });
     assert_eq!(lifecycle.udev.events, vec!["install", "refresh", "remove", "refresh"]);
 }
 
@@ -424,7 +428,7 @@ fn preexisting_nonempty_data_directory_is_preserved() {
     write_file(&user_file, b"keep");
     let mut lifecycle = fixture.lifecycle();
     fixture.install(&mut lifecycle, "revision-1");
-    assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed);
+    assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed { kept: Vec::new() });
     assert_eq!(fs::read(user_file).unwrap(), b"keep");
 }
 
@@ -444,7 +448,7 @@ fn interrupted_uninstall_resumes_after_backup_cleanup() {
     assert!(paths.journal().exists());
 
     let mut lifecycle = fixture.lifecycle();
-    assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed);
+    assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed { kept: Vec::new() });
     assert!(!paths.manifest().exists());
     assert!(!paths.journal().exists());
 }

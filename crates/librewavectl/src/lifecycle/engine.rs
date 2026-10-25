@@ -107,7 +107,10 @@ pub struct Check {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UninstallOutcome {
-    Removed,
+    /// Removed, apart from the listed files that `LibreWave` does not own.
+    Removed {
+        kept: Vec<PathBuf>,
+    },
     NotInstalled,
     Modified(Vec<PathBuf>),
 }
@@ -284,6 +287,15 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
         Ok(())
     }
 
+    /// Removes the empty state directories. Returns the files that kept them.
+    fn remove_state_directories(&self) -> io::Result<Vec<PathBuf>> {
+        let mut kept = remove_if_unused(&self.paths.backup_root())?;
+        kept.extend(remove_if_unused(&self.paths.state_root)?);
+        // The backup directory is listed once, as kept content of the state root.
+        kept.retain(|path| path != &self.paths.backup_root());
+        Ok(kept)
+    }
+
     pub fn uninstall(&mut self, purge_profiles: bool) -> io::Result<UninstallOutcome> {
         let _lock = super::runtime::lock(&self.paths)?;
         self.preflight_runtime()?;
@@ -301,7 +313,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
         self.recover_for_uninstall()?;
         let Some(manifest) = self.read_manifest()? else {
             return Ok(if recovering {
-                UninstallOutcome::Removed
+                UninstallOutcome::Removed { kept: Vec::new() }
             } else {
                 UninstallOutcome::NotInstalled
             });
@@ -382,9 +394,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
         journal.phase = Phase::Committed;
         self.write_journal(&journal)?;
         remove_if_exists(&self.paths.journal())?;
-        remove_if_unused(&self.paths.backup_root())?;
-        remove_if_unused(&self.paths.state_root)?;
-        Ok(UninstallOutcome::Removed)
+        Ok(UninstallOutcome::Removed { kept: self.remove_state_directories()? })
     }
 
     pub fn doctor(&self, expected: Option<&BuildIdentity>) -> Vec<Check> {

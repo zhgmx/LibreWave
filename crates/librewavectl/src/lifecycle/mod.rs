@@ -28,6 +28,24 @@ pub fn is_command(arguments: &[String]) -> bool {
     )
 }
 
+fn report_removed(output: &mut impl Write, purge: bool, kept: &[PathBuf]) -> io::Result<()> {
+    writeln!(
+        output,
+        "LibreWave was removed. Profiles were {}.",
+        if purge { "removed" } else { "preserved" }
+    )?;
+    if !kept.is_empty() {
+        writeln!(
+            output,
+            "These files are not owned by LibreWave and were kept. Remove them yourself if you do not need them:"
+        )?;
+        for path in kept {
+            writeln!(output, "  {}", path.display())?;
+        }
+    }
+    Ok(())
+}
+
 pub fn run<O: Write, E: Write>(
     arguments: &[String],
     output: &mut O,
@@ -103,12 +121,8 @@ pub fn run<O: Write, E: Write>(
                 return Ok(0);
             }
             match lifecycle.uninstall(options.purge)? {
-                UninstallOutcome::Removed => {
-                    writeln!(
-                        output,
-                        "LibreWave was removed. Profiles were {}.",
-                        if options.purge { "removed" } else { "preserved" }
-                    )?;
+                UninstallOutcome::Removed { kept } => {
+                    report_removed(output, options.purge, &kept)?;
                     Ok(0)
                 }
                 UninstallOutcome::NotInstalled => {

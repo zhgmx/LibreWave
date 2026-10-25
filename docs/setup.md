@@ -160,7 +160,7 @@ Run `librewavectl doctor`. It reports:
 2. Run `librewavectl uninstall`.
 3. Read the plan and confirm it.
 
-Uninstall checks every owned path first and stops before the first deletion if one was changed. It restores replaced files from backups, removes the udev rule, restores the recorded USB ACLs, and removes the links, units, desktop files, and build directories. It then verifies that nothing owned remains.
+Uninstall checks every owned path first and stops before the first deletion if one was changed. It restores replaced files from backups, removes the udev rule, restores the recorded USB ACLs, and removes the links, units, desktop files, and build directories. It then verifies that nothing owned remains. Files in the LibreWave state directory that LibreWave does not own stay in place, and uninstall lists each one.
 
 Your profiles stay in `~/.config/librewave/profiles/`. To remove them too, run `librewavectl uninstall --purge` and confirm.
 

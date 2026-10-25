@@ -197,7 +197,10 @@ mod tests {
                 .iter()
                 .all(|check| check.state != crate::lifecycle::engine::CheckState::Fail)
         );
-        assert_eq!(lifecycle.uninstall(false).expect("uninstall"), UninstallOutcome::Removed);
+        assert_eq!(
+            lifecycle.uninstall(false).expect("uninstall"),
+            UninstallOutcome::Removed { kept: Vec::new() }
+        );
         assert_eq!(fs::read(&entry).expect("restored"), b"original desktop entry");
         assert!(!lifecycle.paths.bin_root.join("librewave").exists());
     }

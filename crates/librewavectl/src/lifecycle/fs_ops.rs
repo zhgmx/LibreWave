@@ -404,17 +404,18 @@ pub(super) fn remove_empty(path: &Path) -> io::Result<()> {
 }
 
 /// Removes a shared directory when it is empty. A directory that still holds
-/// files that `LibreWave` does not own stays in place with those files.
-pub(super) fn remove_if_unused(path: &Path) -> io::Result<()> {
+/// files that `LibreWave` does not own stays in place with those files, and
+/// the result names them.
+pub(super) fn remove_if_unused(path: &Path) -> io::Result<Vec<PathBuf>> {
     match fs::remove_dir(path) {
-        Ok(()) => Ok(()),
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
-            ) =>
-        {
-            Ok(())
+        Ok(()) => Ok(Vec::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => {
+            let mut kept = fs::read_dir(path)?
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<io::Result<Vec<_>>>()?;
+            kept.sort();
+            Ok(kept)
         }
         Err(error) => Err(error),
     }
