@@ -274,7 +274,7 @@ Select the application button in a channel heading to open the channel menu. The
 - The menu heading renames a software channel and moves a channel left or right.
 - **Assigned here** lists the saved rules for this channel, including rules for closed applications.
 - **Active** lists playing applications that this channel does not have yet.
-- **All applications** lists the applications that have a visible desktop entry. LibreWave reads the entries from the XDG data directories and the Flatpak export directories. It reads them once, when a menu first opens.
+- **All applications** lists the applications that have a visible desktop entry. LibreWave reads the entries from the XDG data directories and the Flatpak export directories. It reads them once, when a menu first opens. Each row shows the icon that the desktop entry names. LibreWave looks for it in the icon theme set in `~/.config/kdeglobals` or the GTK 3 settings, then in Breeze, Adwaita, `hicolor`, and the pixmap directories. A playing application uses the icon of the entry with the same desktop ID, or of the entry that starts the same executable. A row without an icon shows a generic glyph.
 - Select a row to save a rule for this channel. Select a row under **Assigned here** to forget its rule. A row assigned to another channel names that channel; selecting it moves the rule here.
 - The field at the bottom filters the list. To save a rule that the list does not show, type the identity, choose **App ID** or **Executable** with the button before the field, and select the plus button.
 - The folder button opens a file picker. A `.desktop` file fills in its desktop ID. Any other file fills in its file name as an executable.

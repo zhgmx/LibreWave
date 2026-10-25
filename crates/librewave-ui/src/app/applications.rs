@@ -43,6 +43,21 @@ impl Installed {
             Self::NotRead | Self::Reading => &[],
         }
     }
+
+    /// The installed entry for an application identity: the desktop ID, or
+    /// the program that the entry starts.
+    fn find(&self, application: ApplicationId) -> Option<&InstalledApplication> {
+        let list = self.list();
+        match application {
+            ApplicationId::Desktop(id) => list
+                .iter()
+                .find(|app| app.id == id.as_str())
+                .or_else(|| list.iter().find(|app| app.id.eq_ignore_ascii_case(id.as_str()))),
+            ApplicationId::Executable(name) => {
+                list.iter().find(|app| app.executable.as_deref() == Some(name.as_str()))
+            }
+        }
+    }
 }
 const LIST_HEIGHT: f32 = 300.;
 
@@ -81,6 +96,7 @@ struct Choice {
     application: ApplicationId,
     name: String,
     detail: String,
+    icon: Option<std::path::PathBuf>,
     enabled: bool,
     hint: &'static str,
 }
@@ -417,17 +433,6 @@ impl Shell {
                 .find(|rule| rule.application == application && rule.source != source)
                 .map(|rule| format!("In {}", channel(rule.source)))
         };
-        let names: std::collections::HashMap<ApplicationId, String> = self
-            .installed_applications
-            .list()
-            .iter()
-            .filter_map(|app| {
-                InputName::try_new(&app.id)
-                    .ok()
-                    .map(|id| (ApplicationId::Desktop(id), app.name.clone()))
-            })
-            .collect();
-
         let mut list = div()
             .id("application-list")
             .max_h(px(LIST_HEIGHT))
@@ -442,14 +447,15 @@ impl Shell {
             .enumerate()
             .filter_map(|(index, rule)| {
                 let (kind, id) = kind_of(rule.application);
-                let name =
-                    names.get(&rule.application).cloned().unwrap_or_else(|| id.as_str().to_owned());
+                let installed = self.installed_applications.find(rule.application);
+                let name = installed.map_or_else(|| id.as_str().to_owned(), |app| app.name.clone());
                 let detail = format!("{} · {}", kind.label(), id.as_str());
                 matches(&name, &detail).then(|| Choice {
                     key: format!("app-assigned-{index}"),
                     application: rule.application,
                     name,
                     detail,
+                    icon: installed.and_then(|app| app.icon.clone()),
                     enabled: !self.pending,
                     hint: "Forget this assignment",
                 })
@@ -477,6 +483,7 @@ impl Shell {
                     application,
                     name: app.name.clone(),
                     detail,
+                    icon: app.icon.clone(),
                     enabled: !self.pending,
                     hint: "Assign to this channel when it plays",
                 })
@@ -529,6 +536,10 @@ impl Shell {
                             application: app.id,
                             name,
                             detail,
+                            icon: self
+                                .installed_applications
+                                .find(app.id)
+                                .and_then(|installed| installed.icon.clone()),
                             enabled: !self.pending && movable && !app.move_blocked,
                             hint: if app.move_blocked {
                                 "This application does not allow its audio to move"
@@ -577,7 +588,7 @@ impl Shell {
                 .items_center()
                 .gap(px(SPACE_MD))
                 .hover(|style| style.bg(rgb(RAISED)))
-                .child(icon(kind.glyph(), if assigned { MONITOR } else { MUTED }, ICON_SMALL))
+                .child(application_icon(choice.icon, kind, assigned))
                 .child(
                     div()
                         .flex_1()
@@ -715,6 +726,19 @@ impl Shell {
                 .text_color(rgb(color))
                 .child(text)
         })
+    }
+}
+
+/// The application's own icon, or a generic glyph when it has none.
+fn application_icon(path: Option<std::path::PathBuf>, kind: RuleKind, assigned: bool) -> Div {
+    let tile = div().size(px(28.)).flex_shrink_0().flex().items_center().justify_center();
+    match path {
+        Some(path) => tile.child(gpui::img(path).size(px(24.))),
+        None => tile.rounded(px(6.)).bg(rgb(RAISED)).child(icon(
+            kind.glyph(),
+            if assigned { MONITOR } else { MUTED },
+            ICON_SMALL,
+        )),
     }
 }
 

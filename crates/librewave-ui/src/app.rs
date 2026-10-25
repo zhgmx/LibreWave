@@ -606,6 +606,8 @@ mod tests {
                 librewave_platform_linux::desktop_entries::InstalledApplication {
                     id: "org.test.Player".to_owned(),
                     name: "Test Player".to_owned(),
+                    executable: Some("player".to_owned()),
+                    icon: None,
                 },
             ]),
             meters: None,
