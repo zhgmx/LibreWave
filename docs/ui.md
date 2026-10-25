@@ -28,8 +28,10 @@ The stage shows the Wave:3 illustration, its connection state, and the admitted 
 
 - The mode light shows the knob target.
 - The ring is white when the microphone is live and red when it is muted. The glow behind the illustration follows the ring.
-- On API 5.4, the level dots follow the measured brackets for microphone gain, headphone level, and the Mix position. Values outside the measured brackets stay dark. Hover over the illustration to see when the mapping is unverified. [Protocol evidence](protocol-evidence.md) has the measurements.
-- All lights are dark when controls are unavailable, the device is disconnected, or the device LEDs are off.
+- On API 5.4, the level dots follow the measured brackets for microphone gain, headphone level, and the Mix position. Values inside an unmeasured interval, Mix values between the 5 percent steps, and other API versions leave the dots dark. Hover over the illustration to see when the mapping is unverified. [Protocol evidence](protocol-evidence.md) has the measurements.
+- Microphone mute changes only the ring. Headphone mute turns off the dots in Headphone mode only. LED flip mirrors the dots.
+- The all-LEDs-off setting showed no visible change on the device, so the lights stay as they are and the hover text says so.
+- All lights are dark when controls are unavailable or the device is disconnected.
 
 The daemon reads the device configuration every 500 ms while it is connected. Polling does not change hardware values, except that the first read after a replug or a boot writes back the saved levels that ALSA overwrote. **Read controls** retries admission. It can restore the managed Clipguard, Low-cut, LED, and Gain Lock settings. After the first read, the same action is the circular arrow beside the device name.
 

@@ -74,7 +74,7 @@ The configuration supplies these candidate display values:
 | Headphone | `/config/headphone_volume` | -60 to 0 dB |
 | Mix | `/config/direct_monitor` | 0 to 100 percent |
 
-The recovered `leds_flip` description reverses the LEDs and knob for an inverted microphone. With the flag on, the seven level LEDs show the same pattern mirrored, starting from the other side. Do not interpret the reserved bytes at offsets 2 and 3 as an LED pattern.
+The recovered `leds_flip` description reverses the LEDs and knob for an inverted microphone. Do not interpret the reserved bytes at offsets 2 and 3 as an LED pattern.
 
 The evidence is pinned to the WaveAPI framework from Wave Link 3.2.2 build 2896, SHA-256 `0c9541ff37662b4e35538bd7040d0706783cce132d42fca2c531322e85149860`. A static x86-64 inspection of `LWT::Wave3Device::open(bool)` at VM address `0xb16120` shows that it passes the three-entry `LWT::Wave3::known_apis` table at `0xc5bdc0` to `lookupSessionAPI` and then initializes tick handling. The normalized message and field catalogs from this inspection describe those API entries. The inspection did not load or execute the framework.
 
@@ -133,6 +133,17 @@ Visual observations on the same device give the effect of each hardware mute on 
 | Mix | Ring red, level LEDs unchanged | Level LEDs unchanged |
 
 Audio attenuation, mute timing, and native UI pointer input are unverified. The tests generated no audio.
+
+### Observed LED flags
+
+Device and API: the Wave:3 API 5.4 above. Method: a visual check after a CLI write of each flag, with no recorded raw values.
+
+| Flag | Observed effect |
+| --- | --- |
+| `leds_flip` on | The seven level LEDs show the same pattern mirrored, starting from the other side. |
+| `all_leds_off` on | No visible change. |
+
+The selector mode during the flip check, the mode LED positions, and the knob direction with flip on were not recorded. The application mirrors the level LEDs in every mode.
 
 ### Observed Headphone-mode LED counts
 
