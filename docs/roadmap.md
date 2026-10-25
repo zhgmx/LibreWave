@@ -19,7 +19,7 @@ Work is ordered by safety and dependency. Later work never weakens an unfinished
 
 - Sleep, a real logout and login, and long playback runs.
 - The Windows and macOS volume behavior matrix, before Linux volume links are frozen. See [Wave Link behavior parity](behavior-parity.md).
-- Accessibility labels, scaling, and reduced-motion checks on Wayland and X11.
+- Screen reader checks of the accessibility tree, and scaling and reduced-motion checks on Wayland and X11.
 - Output destination selection and effects.
 - A documented list of supported firmware versions.
 

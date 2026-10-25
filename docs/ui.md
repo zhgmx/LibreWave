@@ -20,6 +20,8 @@ When the daemon is unavailable, the stage dims the illustration and the mixer ar
 
 The application uses Geist on dark surfaces and Geist Mono for commands and paths. Surfaces differ by fill, and outlines show only keyboard focus. Monitor is mint and Stream is blue everywhere. Red marks a muted state, an error, or a destructive action. Amber marks a read-only state. Icon-only buttons name themselves when the pointer rests on them.
 
+The controls report roles, names, and values to assistive technology. Buttons have their label or hint as the name. Clipguard, Low-cut, and Gain Lock are switches with their on or off state. Faders and level controls are sliders with their level in dB and their range, and assistive technology can move them in 1 dB steps. Text fields report their text. These reports are not verified with a screen reader.
+
 ## Device stage
 
 The stage shows the Wave:3 illustration, its connection state, and the admitted API version. The build renders the illustration ahead of time, so it appears with the first frame. The lights on it follow the daemon snapshot:
