@@ -5,9 +5,9 @@ use super::controls::{
     labeled_icon_button,
 };
 use super::theme::{
-    BACKGROUND, CAPTION, CAPTION_LINE, FAINT, GROUP, HEADING, HEADING_LINE, ICON_SMALL, INK, LINE,
-    MONITOR, MONO, MUTED, PANEL, RADIUS, RADIUS_CARD, RAISED, SPACE_LG, SPACE_MD, SPACE_SM,
-    SPACE_XL, SPACE_XS, TITLE, TITLE_LINE, WARNING,
+    BACKGROUND, CAPTION, CAPTION_LINE, DANGER, FAINT, GROUP, HEADING, HEADING_LINE, ICON_SMALL,
+    INK, LINE, MONITOR, MONO, MUTED, PANEL, RADIUS, RADIUS_CARD, RAISED, SPACE_LG, SPACE_MD,
+    SPACE_SM, SPACE_XL, SPACE_XS, TITLE, TITLE_LINE, WARNING,
 };
 use super::{SettingsModal, Shell, configured_socket_path};
 use gpui::{
@@ -89,6 +89,10 @@ impl Shell {
                     .tab_stop(false)
                     .occlude()
                     .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                        // A click in the confirmation dialog keeps Settings open.
+                        if this.confirmation.is_some() {
+                            return;
+                        }
                         this.close_settings(window, cx);
                         cx.stop_propagation();
                     }))
@@ -223,8 +227,44 @@ impl Shell {
                 ),
             ))
             .child(section("Troubleshooting", group().child(self.conflict_row(cx))))
+            .child(section("Configuration", group().child(self.reset_row(cx))))
             .children(self.outcome())
             .into_any_element()
+    }
+
+    /// Restores the default mixer profile after a confirmation.
+    fn reset_row(&self, cx: &mut Context<Self>) -> Div {
+        let generation = self.snapshot.as_ref().map(|snapshot| snapshot.mixer.generation());
+        let enabled = !self.pending
+            && self.snapshot.as_ref().is_some_and(|snapshot| {
+                super::mixer::input_layout_available(snapshot.mixer.runtime)
+            });
+        row(
+            "Reset configuration",
+            "Restores the default inputs, levels, and application assignments. \
+             The microphone and headphone settings on the device do not change."
+                .to_owned(),
+        )
+        .child(activate(
+            button_face("reset-configuration", Tone::Secondary)
+                .text_color(rgb(DANGER))
+                .child("Reset…"),
+            enabled,
+            cx,
+            move |this, window, cx| {
+                if let Some(expected_generation) = generation {
+                    this.ask(
+                        "Reset LibreWave?",
+                        "All inputs, levels, and application assignments return to their \
+                         defaults. You cannot undo this.",
+                        "Reset",
+                        Command::ResetMixer { expected_generation },
+                        window,
+                        cx,
+                    );
+                }
+            },
+        ))
     }
 
     /// The `WirePlumber` file that start suspends while audio runs.

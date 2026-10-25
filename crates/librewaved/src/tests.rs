@@ -1885,6 +1885,42 @@ fn input_changes_are_durable_atomic_and_refuse_stale_or_running_layout_changes()
 }
 
 #[test]
+fn reset_replaces_the_layout_with_new_default_inputs_and_keeps_hardware_state() {
+    let (mut daemon, retained, saves) = mixer_daemon(vec![]);
+    let name = librewave_core::InputName::try_new("Extra").expect("name");
+    daemon
+        .handle(
+            Command::AddMixerInput { expected_generation: MixerGeneration(0), name },
+            librewave_core::Origin::Client,
+        )
+        .expect("add input");
+    let devices = daemon.snapshot().devices.clone();
+    daemon
+        .handle(
+            Command::ResetMixer { expected_generation: MixerGeneration(1) },
+            librewave_core::Origin::Client,
+        )
+        .expect("reset");
+    let profile = retained.borrow().clone();
+    assert_eq!(profile.generation, MixerGeneration(2));
+    assert_eq!(
+        profile.sources.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        ["Microphone", "System", "Music", "Browser", "Voice Chat", "Game"]
+    );
+    assert!(profile.source(SourceId::new(3)).is_none());
+    assert_eq!(daemon.snapshot().devices, devices);
+    assert_eq!(*saves.borrow(), 2);
+    assert!(
+        daemon
+            .handle(
+                Command::ResetMixer { expected_generation: MixerGeneration(1) },
+                librewave_core::Origin::Client,
+            )
+            .is_err()
+    );
+}
+
+#[test]
 fn failed_input_saves_leave_the_retained_layout_unchanged() {
     for action in [SaveAction::Before, SaveAction::After] {
         let (mut daemon, _, saves) = mixer_daemon(vec![action]);

@@ -1,9 +1,9 @@
 //! Shared controls. Each one has visible hover, focus, and disabled states.
 use super::Shell;
 use super::theme::{
-    BACKGROUND, BODY, BODY_LINE, CAPTION, CAPTION_LINE, CONTROL, FAINT, FOCUS, ICON_SMALL, INK,
-    LABEL, LABEL_LINE, MUTED, PANEL, RADIUS, RADIUS_CARD, RAISED, RAISED_HOVER, SPACE_MD, SPACE_SM,
-    alpha,
+    BACKGROUND, BODY, BODY_LINE, CAPTION, CAPTION_LINE, CONTROL, DANGER, FAINT, FOCUS, ICON_SMALL,
+    INK, LABEL, LABEL_LINE, MUTED, PANEL, RADIUS, RADIUS_CARD, RAISED, RAISED_HOVER, SPACE_MD,
+    SPACE_SM, alpha,
 };
 use gpui::{
     AnyView, App, Context, Div, FontFeatures, FontWeight, Render, SharedString, Stateful, Svg,
@@ -17,6 +17,8 @@ pub(super) enum Tone {
     Primary,
     Secondary,
     Quiet,
+    /// Confirms a change that cannot be undone.
+    Danger,
 }
 
 pub(super) fn icon(name: &'static str, color: u32, extent: f32) -> Svg {
@@ -132,6 +134,7 @@ const fn tone_colors(tone: Tone) -> (Option<u32>, u32, u32) {
         Tone::Primary => (Some(INK), BACKGROUND, 0x00FF_FFFF),
         Tone::Secondary => (Some(RAISED), INK, RAISED_HOVER),
         Tone::Quiet => (None, MUTED, RAISED),
+        Tone::Danger => (Some(DANGER), INK, 0x00FF_6B79),
     }
 }
 

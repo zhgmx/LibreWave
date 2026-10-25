@@ -108,6 +108,15 @@ where
         [mixer, add, generation, name] if mixer == "mixer" && add == "add" => {
             request_input_add(socket_path, generation, name, output, errors)
         }
+        [mixer, reset, generation] if mixer == "mixer" && reset == "reset" => {
+            let command = generation
+                .parse()
+                .map(|generation| librewave_core::Command::ResetMixer {
+                    expected_generation: MixerGeneration(generation),
+                })
+                .map_err(|_| "invalid mixer generation".to_owned());
+            request_software_control(socket_path, command, output, errors)
+        }
         [mixer, remove, source, generation] if mixer == "mixer" && remove == "remove" => {
             request_input_remove(socket_path, source, generation, output, errors)
         }
@@ -1042,6 +1051,10 @@ fn write_help<W: Write>(output: &mut W) -> io::Result<()> {
         "  mixer add <generation> <name>   Add a software input while the mixer is ready or stopped"
     )?;
     writeln!(output, "  mixer remove <source-id> <generation>   Remove a software input")?;
+    writeln!(
+        output,
+        "  mixer reset <generation>   Restore the default inputs and application assignments"
+    )?;
     writeln!(output, "  mixer show      Show desired mixer state and runtime availability")?;
     writeln!(output, "  mixer set <source-id> <generation> <monitor|stream> <on|off> <level-db>")?;
     writeln!(output)?;

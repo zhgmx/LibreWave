@@ -1207,7 +1207,7 @@ mod tests {
     }
 }
 
-fn input_layout_available(runtime: librewave_core::MixerRuntimeState) -> bool {
+pub(super) fn input_layout_available(runtime: librewave_core::MixerRuntimeState) -> bool {
     matches!(
         runtime,
         librewave_core::MixerRuntimeState::Active

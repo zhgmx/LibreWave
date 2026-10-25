@@ -41,6 +41,8 @@ pub struct Daemon {
     desired: DesiredState,
     store: Box<dyn DesiredStateStore>,
     mixer_store: Box<dyn MixerStateStore>,
+    /// Detects installed applications for the default assignments.
+    detect_applications: fn() -> Vec<(librewave_core::ApplicationId, librewave_core::DefaultInput)>,
     allocator: DeviceIdAllocator,
     audio: Option<AudioSupervisor>,
     next_audio_inventory: Instant,
@@ -142,6 +144,7 @@ impl Daemon {
             desired,
             store,
             mixer_store,
+            detect_applications: librewave_platform_linux::desktop_entries::default_assignments,
             allocator: DeviceIdAllocator::default(),
             audio: None,
             next_audio_inventory: Instant::now(),
@@ -180,6 +183,7 @@ impl Daemon {
             desired: DesiredState::default(),
             store: Box::new(MemoryStore::default()),
             mixer_store: Box::new(MemoryMixerStore { profile: mixer_profile }),
+            detect_applications: Vec::new,
             allocator,
             audio: None,
             next_audio_inventory: Instant::now(),
@@ -494,6 +498,14 @@ impl Daemon {
                     self.snapshot().mixer.profile.moved(source, usize::from(position)).map_err(
                         |e| IpcError { kind: IpcErrorKind::InvalidRequest, message: e.to_string() },
                     )?;
+                Ok(Response::MixerChanged { mixer: self.commit_mixer_profile(next, origin)? })
+            }
+            Command::ResetMixer { expected_generation } => {
+                self.prepare_input_change(expected_generation)?;
+                let applications = (self.detect_applications)();
+                let next = self.snapshot().mixer.profile.reset(&applications).map_err(|e| {
+                    IpcError { kind: IpcErrorKind::InvalidRequest, message: e.to_string() }
+                })?;
                 Ok(Response::MixerChanged { mixer: self.commit_mixer_profile(next, origin)? })
             }
             Command::SetApplicationAssignment { expected_generation, application, source } => {

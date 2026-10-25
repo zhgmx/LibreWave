@@ -53,54 +53,88 @@ impl Shell {
             .line_height(px(BODY_LINE))
             .flex()
             .flex_col()
-            .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                if this.settings_modal.is_some() {
-                    match event.keystroke.key.as_str() {
-                        "escape" => this.close_settings(window, cx),
-                        "tab" => {
-                            if event.keystroke.modifiers.shift {
-                                window.focus_prev(cx);
-                            } else {
-                                window.focus_next(cx);
-                            }
-                            if let Some(modal) = &this.settings_modal
-                                && !modal.focus.contains_focused(window, cx)
-                            {
-                                modal.close_focus.focus(window, cx);
-                            }
-                        }
-                        _ => {
-                            if let Some(modal) = &this.settings_modal
-                                && !modal.focus.contains_focused(window, cx)
-                            {
-                                modal.close_focus.focus(window, cx);
-                                cx.stop_propagation();
-                            }
-                            return;
-                        }
-                    }
-                    cx.stop_propagation();
-                } else if event.keystroke.key == "," && event.keystroke.modifiers.control {
-                    this.open_settings(window, cx);
-                    cx.stop_propagation();
-                } else if event.keystroke.key == "escape" && this.application_input.is_some() {
-                    this.close_channel(cx);
-                    cx.stop_propagation();
-                } else if event.keystroke.key == "tab" {
-                    if event.keystroke.modifiers.shift {
-                        window.focus_prev(cx);
-                    } else {
-                        window.focus_next(cx);
-                    }
-                    cx.stop_propagation();
-                }
-            }))
+            .capture_key_down(cx.listener(Self::frame_key))
             .child(self.titlebar(cx))
             .child(body)
             .when(self.application_input.is_some(), |view| view.child(channel_backdrop(cx)))
             .when_some(self.settings_modal.as_ref(), |view, modal| {
                 view.child(self.settings_overlay(modal, cx))
             })
+            .when_some(self.confirmation.as_ref(), |view, confirmation| {
+                view.child(self.confirmation_overlay(confirmation, cx))
+            })
+    }
+
+    /// Window keys: dialogs first, then Settings, then the main view.
+    fn frame_key(
+        this: &mut Self,
+        event: &gpui::KeyDownEvent,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(confirmation) = &this.confirmation {
+            match event.keystroke.key.as_str() {
+                "escape" => this.cancel_confirmation(cx),
+                "enter" if confirmation.focus.is_focused(window) => {
+                    this.accept_confirmation(cx);
+                }
+                "tab" => {
+                    if event.keystroke.modifiers.shift {
+                        window.focus_prev(cx);
+                    } else {
+                        window.focus_next(cx);
+                    }
+                    if let Some(confirmation) = &this.confirmation
+                        && !confirmation.focus.contains_focused(window, cx)
+                    {
+                        confirmation.focus.focus(window, cx);
+                    }
+                }
+                // Enter and space reach the focused dialog button.
+                "enter" | "space" => return,
+                _ => {}
+            }
+            cx.stop_propagation();
+        } else if this.settings_modal.is_some() {
+            match event.keystroke.key.as_str() {
+                "escape" => this.close_settings(window, cx),
+                "tab" => {
+                    if event.keystroke.modifiers.shift {
+                        window.focus_prev(cx);
+                    } else {
+                        window.focus_next(cx);
+                    }
+                    if let Some(modal) = &this.settings_modal
+                        && !modal.focus.contains_focused(window, cx)
+                    {
+                        modal.close_focus.focus(window, cx);
+                    }
+                }
+                _ => {
+                    if let Some(modal) = &this.settings_modal
+                        && !modal.focus.contains_focused(window, cx)
+                    {
+                        modal.close_focus.focus(window, cx);
+                        cx.stop_propagation();
+                    }
+                    return;
+                }
+            }
+            cx.stop_propagation();
+        } else if event.keystroke.key == "," && event.keystroke.modifiers.control {
+            this.open_settings(window, cx);
+            cx.stop_propagation();
+        } else if event.keystroke.key == "escape" && this.application_input.is_some() {
+            this.close_channel(cx);
+            cx.stop_propagation();
+        } else if event.keystroke.key == "tab" {
+            if event.keystroke.modifiers.shift {
+                window.focus_prev(cx);
+            } else {
+                window.focus_next(cx);
+            }
+            cx.stop_propagation();
+        }
     }
 
     /// The mixer, or one notice when the daemon is unavailable.

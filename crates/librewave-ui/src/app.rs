@@ -1,5 +1,6 @@
 mod applications;
 mod chrome;
+mod confirm;
 mod controls;
 mod device_art;
 mod hardware;
@@ -116,6 +117,7 @@ struct Shell {
     settings_modal: Option<SettingsModal>,
     settings_pane: SettingsPane,
     settings_trigger_focus: Option<gpui::FocusHandle>,
+    confirmation: Option<confirm::Confirmation>,
 }
 
 impl Shell {
@@ -170,6 +172,7 @@ impl Shell {
             settings_modal: None,
             settings_pane: SettingsPane::Audio,
             settings_trigger_focus: None,
+            confirmation: None,
         };
         shell.send(Command::GetStatus, cx);
         cx.spawn(async move |this, cx| {
@@ -432,6 +435,7 @@ impl Shell {
                 | Command::RemoveMixerInput { .. }
                 | Command::RenameMixerInput { .. }
                 | Command::MoveMixerInput { .. }
+                | Command::ResetMixer { .. }
                 | Command::SetApplicationAssignment { .. },
                 Response::MixerChanged { mixer },
             ) => {
@@ -633,6 +637,7 @@ mod tests {
             settings_modal: None,
             settings_pane: SettingsPane::Audio,
             settings_trigger_focus: None,
+            confirmation: None,
         }
     }
 

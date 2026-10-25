@@ -503,6 +503,9 @@ pub enum Command {
     RenameMixerInput { expected_generation: MixerGeneration, source: SourceId, name: InputName },
     /// Move an input to a zero-based display position.
     MoveMixerInput { expected_generation: MixerGeneration, source: SourceId, position: u16 },
+    /// Replace the mixer profile with the first-run defaults and the detected
+    /// application assignments. Hardware controls do not change.
+    ResetMixer { expected_generation: MixerGeneration },
     /// Save or clear a remembered application destination.
     SetApplicationAssignment {
         expected_generation: MixerGeneration,
