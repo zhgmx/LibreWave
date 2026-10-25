@@ -16,7 +16,7 @@ pub const MIN_RATE_MATCH_RESOURCE_OUTPUT_FRAMES: usize = 1;
 
 /// Largest output capacity allowed by the portable dependency-safety budget.
 ///
-/// With rubato 4.0.0's default 256-point sinc filter and a dependency ratio
+/// With rubato 5.0.1's default 256-point sinc filter and a dependency ratio
 /// limit of 2.0, `input_frames_max()` is about 2178 frames at the maximum
 /// output size. Rubato's own history buffer adds `2 * sinc_len`, for about
 /// 2690 frames per channel in total.
@@ -679,7 +679,7 @@ impl RateMatcher {
         let resampler = Async::<f32>::new_sinc(
             NOMINAL_RATIO,
             config.ratio_bounds.dependency_ratio_limit,
-            // Rubato 4.0.0's default: 256-point sinc, automatic cutoff,
+            // Rubato 5.0.1's default: 256-point sinc, automatic cutoff,
             // oversampling 128, cubic interpolation, BlackmanHarris2 window.
             &SincInterpolationParameters::default(),
             config.max_output_frames,
