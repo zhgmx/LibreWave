@@ -104,11 +104,22 @@ pub fn snapshot_access() -> io::Result<Vec<AccessSnapshot>> {
     Ok(result)
 }
 
-/// Check that recorded nodes that are still connected have an unchanged ACL.
-/// A node that connected after setup has no baseline. It is left as it is.
+/// Check the permissions of every connected Wave:3 node.
+///
+/// A recorded node must match its owned state exactly. A node that connected
+/// after setup, for example after a reconnect or a reboot, has no baseline:
+/// `LibreWave` never changes its ACL, but checks that the user has access while
+/// the rule is installed and has none after it is removed.
 /// # Errors
-/// Returns missing ownership, identity, or independently changed ACL errors.
+/// Returns missing ownership, identity, independently changed ACL, or
+/// unrecorded-node access errors.
 pub fn verify_access(snapshots: &[AccessSnapshot], state: AccessState) -> io::Result<()> {
+    verify_owned(snapshots, state)?;
+    verify_unrecorded(snapshots, state)
+}
+
+/// Check that recorded nodes that are still connected have an unchanged ACL.
+fn verify_owned(snapshots: &[AccessSnapshot], state: AccessState) -> io::Result<()> {
     for (saved, file) in owned_nodes(snapshots)? {
         let original = canonical_acl(&saved.original_acl)?;
         let current = read_acl(&descriptor_path(&file))?;
@@ -123,6 +134,34 @@ pub fn verify_access(snapshots: &[AccessSnapshot], state: AccessState) -> io::Re
                 "USB ACL differs from its owned state at {}; preserve the access records",
                 saved.node.display()
             )));
+        }
+    }
+    Ok(())
+}
+
+/// Check the user's access on connected nodes that have no record.
+fn verify_unrecorded(snapshots: &[AccessSnapshot], state: AccessState) -> io::Result<()> {
+    // SAFETY: getuid reads the calling user's identity and has no pointer arguments.
+    let uid = snapshots.first().map_or_else(|| unsafe { libc::getuid() }, |saved| saved.grant_uid);
+    for (node, file) in unrecorded_nodes(snapshots)? {
+        let fields = entries(&read_acl(&descriptor_path(&file))?)?;
+        let granted = fields
+            .get(&("user".into(), uid.to_string()))
+            .is_some_and(|permission| permission.starts_with("rw"));
+        match state {
+            AccessState::Granted if !granted => {
+                return Err(invalid(format!(
+                    "user {uid} has no access to the Wave:3 at {}; reconnect it at the active local session, then run `librewavectl doctor`",
+                    node.display()
+                )));
+            }
+            AccessState::Restored if granted => {
+                return Err(invalid(format!(
+                    "user {uid} still has access to the Wave:3 at {}, which connected after setup; reconnect it, then run `librewavectl uninstall` again",
+                    node.display()
+                )));
+            }
+            AccessState::Granted | AccessState::Restored | AccessState::Restorable => {}
         }
     }
     Ok(())
@@ -177,7 +216,8 @@ pub fn restore_access(snapshots: &[AccessSnapshot]) -> io::Result<()> {
             return Err(invalid("original USB ACL restoration was not verified"));
         }
     }
-    verify_access(snapshots, AccessState::Restored)
+    // The helper restores recorded nodes only. The caller checks the rest.
+    verify_owned(snapshots, AccessState::Restored)
 }
 
 /// Run the bounded privileged helper input. No USB control API is reachable here.
@@ -191,6 +231,20 @@ pub fn restore_access_input(input: &mut impl Read) -> io::Result<()> {
     }
     let records: Vec<AccessSnapshot> = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
     restore_access(&records)
+}
+
+/// The connected nodes that match no record: they connected after setup.
+fn unrecorded_nodes(snapshots: &[AccessSnapshot]) -> io::Result<Vec<(PathBuf, File)>> {
+    let owned: BTreeSet<PathBuf> =
+        owned_nodes(snapshots)?.into_iter().map(|(saved, _)| saved.node.clone()).collect();
+    let mut result = Vec::new();
+    for (_, node) in connected_nodes()? {
+        if !owned.contains(&node) {
+            let file = open_node(&node)?;
+            result.push((node, file));
+        }
+    }
+    Ok(result)
 }
 
 /// The connected nodes that match a record exactly. A reconnect or a reboot

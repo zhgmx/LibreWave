@@ -437,7 +437,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
             match self.verify_access(&manifest, AccessState::Granted) {
                 Ok(()) => checks.push(pass(
                     "USB access permissions",
-                    "The connected node ACL matches its owned grant.",
+                    "Every connected Wave:3 node grants access to this user.",
                 )),
                 Err(error) => checks.push(fail("USB access permissions", error.to_string())),
             }
