@@ -104,8 +104,8 @@ pub fn snapshot_access() -> io::Result<Vec<AccessSnapshot>> {
     Ok(result)
 }
 
-/// Check that current connected nodes have an owned, unchanged ACL baseline.
-/// An unknown incarnation is preserved and blocks removal rather than being guessed.
+/// Check that recorded nodes that are still connected have an unchanged ACL.
+/// A node that connected after setup has no baseline. It is left as it is.
 /// # Errors
 /// Returns missing ownership, identity, or independently changed ACL errors.
 pub fn verify_access(snapshots: &[AccessSnapshot], state: AccessState) -> io::Result<()> {
@@ -131,7 +131,7 @@ pub fn verify_access(snapshots: &[AccessSnapshot], state: AccessState) -> io::Re
 /// Restore original ACLs in the exact privileged installer helper.
 /// Already restored records are idempotent. Foreign changes are preserved.
 /// # Errors
-/// Rejects non-root callers, forged users, unowned incarnations, or changed ACLs.
+/// Rejects non-root callers, forged users, or changed ACLs.
 pub fn restore_access(snapshots: &[AccessSnapshot]) -> io::Result<()> {
     // SAFETY: geteuid reads process credentials and has no pointer arguments.
     if unsafe { libc::geteuid() } != 0 {
@@ -193,6 +193,8 @@ pub fn restore_access_input(input: &mut impl Read) -> io::Result<()> {
     restore_access(&records)
 }
 
+/// The connected nodes that match a record exactly. A reconnect or a reboot
+/// creates a new node incarnation, which has no record and is skipped.
 fn owned_nodes(snapshots: &[AccessSnapshot]) -> io::Result<Vec<(&AccessSnapshot, File)>> {
     validate_snapshots(snapshots)?;
     let boot = fs::read_to_string(BOOT_ID)?;
@@ -200,12 +202,18 @@ fn owned_nodes(snapshots: &[AccessSnapshot]) -> io::Result<Vec<(&AccessSnapshot,
     for (topology, node) in connected_nodes()? {
         let file = open_node(&node)?;
         let stat = file.metadata()?;
-        let saved = snapshots.iter().find(|saved| saved.topology == topology
-            && saved.node == node && saved.boot_id == boot.trim()
-            && saved.filesystem == stat.dev() && saved.inode == stat.ino()
-            && saved.device == stat.rdev() && saved.owner == stat.uid() && saved.group == stat.gid())
-            .ok_or_else(|| invalid(format!("no original ACL baseline for connected Wave:3 node {}; preserve the installation records and review this exact connection before cleanup", node.display())))?;
-        result.push((saved, file));
+        if let Some(saved) = snapshots.iter().find(|saved| {
+            saved.topology == topology
+                && saved.node == node
+                && saved.boot_id == boot.trim()
+                && saved.filesystem == stat.dev()
+                && saved.inode == stat.ino()
+                && saved.device == stat.rdev()
+                && saved.owner == stat.uid()
+                && saved.group == stat.gid()
+        }) {
+            result.push((saved, file));
+        }
     }
     Ok(result)
 }
