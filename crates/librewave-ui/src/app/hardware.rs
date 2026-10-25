@@ -48,7 +48,7 @@ struct Level {
 impl Shell {
     pub(super) fn hardware_writable(&self, access: DeviceWriteAccess) -> bool {
         matches!(access, DeviceWriteAccess::Ready)
-            && !self.pending
+            && !self.busy()
             && !self.hardware_state_stale
             && self.settings_modal.is_none()
     }
@@ -82,7 +82,7 @@ impl Shell {
                         "inspect",
                         "Read controls",
                         tone,
-                        !self.pending && self.settings_modal.is_none() && connected,
+                        !self.busy() && self.settings_modal.is_none() && connected,
                         cx,
                         move |this, _, cx| this.send(Command::InspectDevice { id }, cx),
                     )
@@ -109,13 +109,11 @@ impl Shell {
                     generation: *generation,
                     writable: self.hardware_writable(*write_access) && connected,
                 };
-                // A drag stays live while its own write is in flight.
-                let sliding = matches!(self.in_flight_fader, Some(MixerEdit::Hardware { .. }));
                 let slidable = connected
                     && matches!(write_access, DeviceWriteAccess::Ready)
                     && !self.hardware_state_stale
                     && self.settings_modal.is_none()
-                    && (!self.pending || sliding);
+                    && !self.busy();
                 let shown = |kind: fn(Wave3Control) -> Option<FixedPointValue>, value| {
                     self.shown_edit()
                         .and_then(|edit| match edit {

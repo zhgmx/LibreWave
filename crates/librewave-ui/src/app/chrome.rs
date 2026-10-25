@@ -161,7 +161,7 @@ impl Shell {
     }
 
     fn offline_notice(&self, cx: &mut Context<Self>) -> Div {
-        let enabled = !self.pending && self.settings_modal.is_none();
+        let enabled = !self.busy() && self.settings_modal.is_none();
         div()
             .flex_1()
             .flex()
@@ -250,7 +250,7 @@ impl Shell {
 
     /// The one place on the main view that states and changes the audio state.
     fn audio_control(&self, cx: &mut Context<Self>) -> Div {
-        let enabled = !self.pending && self.settings_modal.is_none();
+        let enabled = !self.busy() && self.settings_modal.is_none();
         let state = |color, text: &'static str| {
             div()
                 .h_full()

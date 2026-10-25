@@ -369,7 +369,7 @@ impl Shell {
                     "Save the channel name",
                     Tone::Secondary,
                     INK,
-                    !self.pending,
+                    !self.busy(),
                     cx,
                     |this, _, cx| this.save_channel_text(false, cx),
                 )),
@@ -452,7 +452,7 @@ impl Shell {
                     name,
                     detail,
                     icon: installed.and_then(|app| app.icon.clone()),
-                    enabled: !self.pending,
+                    enabled: !self.busy(),
                     hint: "Forget this assignment",
                 })
             })
@@ -484,7 +484,7 @@ impl Shell {
                     name: app.name.clone(),
                     detail,
                     icon: app.icon.clone(),
-                    enabled: !self.pending,
+                    enabled: !self.busy(),
                     hint: "Assign to this channel when it plays",
                 })
             })
@@ -555,7 +555,7 @@ impl Shell {
                                 .installed_applications
                                 .find(app.id)
                                 .and_then(|installed| installed.icon.clone()),
-                            enabled: !self.pending && movable && !app.move_blocked,
+                            enabled: !self.busy() && movable && !app.move_blocked,
                             hint: if app.move_blocked {
                                 "This application does not allow its audio to move"
                             } else {
@@ -669,7 +669,7 @@ impl Shell {
             "Choose an application or desktop entry",
             Tone::Quiet,
             MUTED,
-            !self.pending,
+            !self.busy(),
             cx,
             |_, _, cx| Shell::choose_application_file(cx),
         ))
@@ -679,7 +679,7 @@ impl Shell {
             "Add this rule to the channel",
             Tone::Secondary,
             INK,
-            !self.pending
+            !self.busy()
                 && self
                     .assignment_name
                     .as_ref()
@@ -702,7 +702,7 @@ impl Shell {
         }
         let name = input.name.clone();
         let generation = snapshot.mixer.generation();
-        let enabled = !self.pending && super::mixer::input_layout_available(snapshot.mixer.runtime);
+        let enabled = !self.busy() && super::mixer::input_layout_available(snapshot.mixer.runtime);
         let button = activate(
             button_face("remove-input", Tone::Quiet)
                 .px(px(SPACE_SM))

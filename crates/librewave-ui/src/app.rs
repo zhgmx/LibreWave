@@ -251,6 +251,13 @@ impl Shell {
         }
     }
 
+    /// A start, stop, or setup operation is running. Controls are disabled
+    /// only then. A short daemon request leaves them as they are, and `send`
+    /// ignores input until it completes.
+    fn busy(&self) -> bool {
+        self.lifecycle_pending.is_some()
+    }
+
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
         let command = self.linked_command(command);
         if self.pending

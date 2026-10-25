@@ -124,7 +124,7 @@ impl Shell {
                                 "confirmation-accept",
                                 confirmation.action,
                                 Tone::Danger,
-                                !self.pending,
+                                !self.busy(),
                                 cx,
                                 |this, _, cx| this.accept_confirmation(cx),
                             )),

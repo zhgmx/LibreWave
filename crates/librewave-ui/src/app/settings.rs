@@ -180,7 +180,7 @@ impl Shell {
     }
 
     fn audio_pane(&self, cx: &mut Context<Self>) -> AnyElement {
-        let enabled = !self.pending;
+        let enabled = !self.busy();
         let runtime = self.snapshot.as_ref().map(|snapshot| snapshot.mixer.runtime);
         let running = matches!(runtime, Some(MixerRuntimeState::Active));
         let (color, state, detail) = match runtime {
@@ -235,7 +235,7 @@ impl Shell {
     /// Restores the default mixer profile after a confirmation.
     fn reset_row(&self, cx: &mut Context<Self>) -> Div {
         let generation = self.snapshot.as_ref().map(|snapshot| snapshot.mixer.generation());
-        let enabled = !self.pending
+        let enabled = !self.busy()
             && self.snapshot.as_ref().is_some_and(|snapshot| {
                 super::mixer::input_layout_available(snapshot.mixer.runtime)
             });
@@ -269,7 +269,7 @@ impl Shell {
 
     /// The `WirePlumber` file that start suspends while audio runs.
     fn conflict_row(&self, cx: &mut Context<Self>) -> Div {
-        let enabled = !self.pending;
+        let enabled = !self.busy();
         let chosen = self.suspend_config.as_ref().map(|path| path.display().to_string());
         row(
             "WirePlumber conflict",
@@ -348,7 +348,7 @@ impl Shell {
                         "setup-plan",
                         "Show plan",
                         Tone::Secondary,
-                        !self.pending,
+                        !self.busy(),
                         cx,
                         |this, _, cx| {
                             this.run_lifecycle(librewavectl::SessionAction::SetupPlan, cx);
@@ -396,7 +396,7 @@ impl Shell {
                             "Check the connection again",
                             Tone::Quiet,
                             MUTED,
-                            !self.pending,
+                            !self.busy(),
                             cx,
                             |this, _, cx| this.send(Command::GetStatus, cx),
                         ),

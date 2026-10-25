@@ -87,6 +87,8 @@ The **Add input** panel after the last strip creates a software input with a new
 
 While you drag a fader or an output level, the window sends `PreviewMixer` requests. The daemon applies each one to the running mixer, so you hear the change, but it does not save it or change the mixer generation. One preview is in flight at a time and only the latest position waits. Releasing the pointer sends one normal request, which the daemon saves. If no request follows a preview within 3 seconds, the daemon restores the saved level. A held drag repeats its preview every second. A stale generation, a disconnect, or an error ends the drag without a change and shows the error. Changes made while audio is stopped are saved and apply when audio starts.
 
+Controls are dimmed only while a start, stop, or setup operation runs. During a short daemon request, the window ignores input instead.
+
 ## Application routing
 
 LibreWave groups playback streams by application identity: the desktop app ID, or the executable name when no app ID exists. For a Flatpak stream without its own identity, the daemon reads the app ID from the PipeWire client that owns the stream. The list identifies applications, not browser tabs.

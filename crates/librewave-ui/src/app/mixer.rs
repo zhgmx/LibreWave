@@ -380,7 +380,7 @@ impl Shell {
                         "Edit input",
                         Tone::Quiet,
                         FAINT,
-                        !self.pending,
+                        !self.busy(),
                         cx,
                         move |this, _, cx| {
                             this.open_channel(id, cx);
@@ -402,7 +402,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let id = source.controls.source();
-        let enabled = !self.pending && self.settings_modal.is_none();
+        let enabled = !self.busy() && self.settings_modal.is_none();
         let drag = ChannelDrag { source: id, name: source.name.as_str().to_owned().into() };
         let handle = identified(&format!("drag-channel-{}", id.get()))
             .absolute()
@@ -479,7 +479,7 @@ impl Shell {
             "Link or unlink channel fader levels in this window",
             Tone::Quiet,
             if self.linked_faders.contains(&id) { INK } else { FAINT },
-            !self.pending && self.settings_modal.is_none(),
+            !self.busy() && self.settings_modal.is_none(),
             cx,
             move |this, _, cx| {
                 if !this.linked_faders.remove(&id) {
@@ -539,7 +539,7 @@ impl Shell {
                 generation,
                 shown,
                 if muted { FAINT } else { color },
-                open && (!self.pending || self.in_flight_fader.is_some()),
+                open && !self.busy(),
                 cx,
             ))
             .child(
@@ -577,7 +577,7 @@ impl Shell {
                     },
                     Tone::Secondary,
                     if muted { DANGER } else { MUTED },
-                    open && !self.pending,
+                    open && !self.busy(),
                     cx,
                     move |this, _, cx| this.send(toggle, cx),
                 )
@@ -593,7 +593,7 @@ impl Shell {
             && snapshot.mixer.profile.next_source_id < u16::MAX)
             .then_some(snapshot.mixer.profile.next_source_id);
         let enabled = free.is_some()
-            && !self.pending
+            && !self.busy()
             && self.settings_modal.is_none()
             && input_layout_available(snapshot.mixer.runtime);
         let generation = snapshot.mixer.generation();
@@ -658,7 +658,7 @@ impl Shell {
             .unwrap_or(route.fader());
         let generation = snapshot.mixer.generation();
         let controls_open = self.settings_modal.is_none();
-        let mutable = controls_open && !self.pending;
+        let mutable = controls_open && !self.busy();
         let identity = output_identity(target, glyph, destination, levels, error);
         let controls = div()
             .flex_1()

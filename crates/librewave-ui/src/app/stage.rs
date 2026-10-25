@@ -115,7 +115,7 @@ impl Shell {
                     "Read controls again. Reading may restore saved device settings.",
                     Tone::Quiet,
                     MUTED,
-                    !self.pending && self.settings_modal.is_none(),
+                    !self.busy() && self.settings_modal.is_none(),
                     cx,
                     move |this, _, cx| this.send(Command::InspectDevice { id }, cx),
                 ))
