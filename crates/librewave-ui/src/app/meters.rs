@@ -15,6 +15,10 @@ impl Shell {
     }
 
     pub(super) fn poll_meters(&mut self, cx: &mut Context<Self>) {
+        // A hidden window draws nothing, so it reads no meters.
+        if self.window_visibility == gpui::WindowVisibility::Hidden {
+            return;
+        }
         if self.expire_meters(std::time::Instant::now()) {
             cx.notify();
         }

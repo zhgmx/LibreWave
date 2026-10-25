@@ -58,6 +58,16 @@ pub fn run(view: LaunchView) {
         cx.open_window(options, move |window, cx| {
             cx.new(|cx| {
                 let mut shell = Shell::new(cx);
+                shell.window_visibility = if window.is_visible() {
+                    gpui::WindowVisibility::Visible
+                } else {
+                    gpui::WindowVisibility::Hidden
+                };
+                shell.visibility_subscription =
+                    Some(cx.observe_window_visibility(window, |this, visibility, _, cx| {
+                        this.window_visibility = visibility;
+                        this.poll_meters(cx);
+                    }));
                 if view == LaunchView::Settings {
                     shell.open_settings(window, cx);
                 }
@@ -134,6 +144,10 @@ struct Shell {
     input_scroll: gpui::ScrollHandle,
     /// Where the pointer holds the strip scrollbar thumb, during a drag.
     scrollbar_grab: Option<gpui::Pixels>,
+    /// Whether the compositor shows any part of the window. Meter reads
+    /// pause while it does not.
+    window_visibility: gpui::WindowVisibility,
+    visibility_subscription: Option<gpui::Subscription>,
     /// The daemon IPC socket for status, mixer, and device requests.
     socket: std::path::PathBuf,
     poll_in_flight: bool,
@@ -196,6 +210,8 @@ impl Shell {
             wheel_travel: 0.,
             input_scroll: gpui::ScrollHandle::new(),
             scrollbar_grab: None,
+            window_visibility: gpui::WindowVisibility::Visible,
+            visibility_subscription: None,
             socket: configured_socket_path(),
             poll_in_flight: false,
             request_epoch: 0,
@@ -802,6 +818,8 @@ mod tests {
             wheel_travel: 0.,
             input_scroll: gpui::ScrollHandle::new(),
             scrollbar_grab: None,
+            window_visibility: gpui::WindowVisibility::Visible,
+            visibility_subscription: None,
             // Tests never reach the session daemon.
             socket: std::env::temp_dir().join("librewave-ui-tests-no-daemon.sock"),
             poll_in_flight: false,
@@ -1566,6 +1584,22 @@ mod tests {
         wheel(cx, fader.center(), 0., 10.);
         view.read_with(cx, |view, _| {
             assert_eq!(view.request_epoch, requests.wrapping_add(1));
+        });
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
+    fn a_hidden_window_reads_no_meters(cx: &mut gpui::TestAppContext) {
+        let mut snapshot = Snapshot::empty();
+        snapshot.mixer = MixerSnapshot::active(MixerProfile::default());
+        let (view, cx) = cx.add_window_view(|_, _| shell_with(snapshot));
+        view.update(cx, |view, cx| {
+            view.window_visibility = gpui::WindowVisibility::Hidden;
+            view.poll_meters(cx);
+            assert!(view.meter_request_epoch.is_none(), "hidden: no meter read");
+            view.window_visibility = gpui::WindowVisibility::Visible;
+            view.poll_meters(cx);
+            assert!(view.meter_request_epoch.is_some(), "visible: one meter read");
         });
     }
 
