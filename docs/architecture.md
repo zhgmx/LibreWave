@@ -131,10 +131,15 @@ profile generation. The CLI exposes `librewavectl mixer meters`.
 ## Application routing
 
 The active graph observes playback streams through its existing PipeWire
-registry connection. It groups streams by `application.id`, or by
-`application.process.binary` when no valid application ID exists. It does not
-use process IDs or window titles. Streams without a verified identity remain
-unassigned. Observation is limited to 128 streams. Routing refuses an incomplete
+registry connection. It groups streams by the stream node's `application.id`,
+or by its `application.process.binary` when no valid application ID exists.
+When the node has neither, the daemon reads the full properties of the client
+that created the stream. It uses the client's `pipewire.access.portal.app_id`,
+then `application.id`, then `application.process.binary`. PipeWire sets the
+portal app ID from the sandbox, so a Flatpak application cannot change it. The
+observed Flatpak Spotify stream names only `application.name` on its node and
+is grouped as `com.spotify.Client`. The daemon does not use process IDs or
+window titles. Streams without any of these identities remain unassigned. Observation is limited to 128 streams. Routing refuses an incomplete
 list above that limit.
 
 `GetApplications` returns a transient list. Its generation identifies the

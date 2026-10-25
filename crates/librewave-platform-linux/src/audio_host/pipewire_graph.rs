@@ -48,6 +48,9 @@ struct RegistryState {
     input_presence: Vec<bool>,
     input_link_words: Arc<[AtomicU64; MAX_SOFTWARE_INPUTS]>,
     node_properties: HashMap<u32, pw::properties::PropertiesBox>,
+    // Full properties of clients that own playback streams. Sandboxed and
+    // PulseAudio clients keep their identity here, not on the stream node.
+    client_properties: HashMap<u32, pw::properties::PropertiesBox>,
     router: Router,
     owned_application_sinks: Option<HashMap<librewave_core::SourceId, (u32, u64)>>,
 }
@@ -66,6 +69,7 @@ impl RegistryState {
             input_presence: Vec::new(),
             input_link_words,
             node_properties: HashMap::new(),
+            client_properties: HashMap::new(),
             router: Router::default(),
             owned_application_sinks: None,
         }
@@ -144,6 +148,7 @@ impl RegistryState {
     fn remove(&mut self, id: u32) {
         self.router.changed();
         self.node_properties.remove(&id);
+        self.client_properties.remove(&id);
         self.objects.remove(&id);
         self.link_inputs.remove(&id);
         self.publish_input_links();
@@ -271,6 +276,7 @@ pub(super) struct InactiveGraph<P: GraphProcessor> {
 
 pub(super) struct ActiveGraph<P: GraphProcessor> {
     application_nodes: HashMap<u32, (pw::node::NodeListener, pw::node::Node)>,
+    application_clients: HashMap<u32, (pw::client::ClientListener, pw::client::Client)>,
     default_metadata: Option<MetadataBinding>,
     settings_metadata: Option<MetadataBinding>,
     inner: InactiveGraph<P>,
@@ -569,6 +575,7 @@ impl<P: GraphProcessor> InactiveGraph<P> {
             #[cfg(test)]
             fail_input_preparation: false,
             application_nodes: HashMap::new(),
+            application_clients: HashMap::new(),
             default_metadata: None,
             settings_metadata: None,
         })

@@ -347,27 +347,39 @@ impl Router {
     }
 }
 
+/// Resolves a stream's application from its node and, when the node does not
+/// name one, from the client that created it.
+///
+/// Stream nodes keep their earlier identity first, so remembered rules still
+/// match. A sandboxed client, such as a Flatpak application, often sets only
+/// `application.name` on its node. Its client then carries the portal app ID,
+/// which `PipeWire` sets from the sandbox and the application cannot change.
 pub(super) fn identity(
-    properties: &pw::spa::utils::dict::DictRef,
+    node: &pw::spa::utils::dict::DictRef,
+    client: Option<&pw::spa::utils::dict::DictRef>,
 ) -> Option<(ApplicationId, InputName)> {
-    let id = properties
-        .get("application.id")
-        .and_then(|s| InputName::try_new(s).ok())
+    let named = |dict: &pw::spa::utils::dict::DictRef, key: &str| {
+        dict.get(key).and_then(|s| InputName::try_new(s).ok())
+    };
+    let id = named(node, "application.id")
         .map(ApplicationId::Desktop)
+        .or_else(|| named(node, "application.process.binary").map(ApplicationId::Executable))
         .or_else(|| {
-            properties
-                .get("application.process.binary")
-                .and_then(|s| InputName::try_new(s).ok())
-                .map(ApplicationId::Executable)
+            let client = client?;
+            named(client, "pipewire.access.portal.app_id")
+                .or_else(|| named(client, "application.id"))
+                .map(ApplicationId::Desktop)
+                .or_else(|| {
+                    named(client, "application.process.binary").map(ApplicationId::Executable)
+                })
         })?;
     let fallback = match id {
         ApplicationId::Desktop(v) | ApplicationId::Executable(v) => v,
     };
     Some((
         id,
-        properties
-            .get("application.name")
-            .and_then(|s| InputName::try_new(s).ok())
+        named(node, "application.name")
+            .or_else(|| client.and_then(|client| named(client, "application.name")))
             .unwrap_or(fallback),
     ))
 }
@@ -530,11 +542,49 @@ mod tests {
             "application.process.binary" => "player", "application.process.id" => "1234",
             "media.name" => "A changing tab title"
         };
-        let (id, name) = identity(properties.as_ref()).expect("stable identity");
+        let (id, name) = identity(properties.as_ref(), None).expect("stable identity");
         assert_eq!(id, ApplicationId::Desktop(InputName::try_new("org.test.Player").expect("id")));
         assert_eq!(name.as_str(), "Player");
         let properties = pipewire::properties::properties! { "application.process.id" => "1234", "media.name" => "A changing tab title" };
-        assert!(identity(properties.as_ref()).is_none());
+        assert!(identity(properties.as_ref(), None).is_none());
+    }
+
+    #[test]
+    fn sandboxed_streams_take_the_portal_app_id_from_their_client() {
+        // The observed Flatpak Spotify node names only itself; its client
+        // carries the binary and the portal app ID.
+        let node = pipewire::properties::properties! {
+            "application.name" => "Spotify", "media.name" => "Spotify", "client.id" => "130"
+        };
+        let client = pipewire::properties::properties! {
+            "application.name" => "Spotify", "application.process.binary" => "spotify",
+            "application.process.id" => "4", "pipewire.access" => "flatpak",
+            "pipewire.access.portal.app_id" => "com.spotify.Client"
+        };
+        assert!(identity(node.as_ref(), None).is_none());
+        let (id, name) = identity(node.as_ref(), Some(client.as_ref())).expect("client identity");
+        assert_eq!(
+            id,
+            ApplicationId::Desktop(InputName::try_new("com.spotify.Client").expect("id"))
+        );
+        assert_eq!(name.as_str(), "Spotify");
+    }
+
+    #[test]
+    fn stream_node_identity_wins_so_remembered_rules_keep_matching() {
+        let node = pipewire::properties::properties! { "application.process.binary" => "player" };
+        let client = pipewire::properties::properties! {
+            "application.id" => "org.test.Player", "application.name" => "Test Player"
+        };
+        let (id, name) = identity(node.as_ref(), Some(client.as_ref())).expect("node identity");
+        assert_eq!(id, ApplicationId::Executable(InputName::try_new("player").expect("id")));
+        assert_eq!(name.as_str(), "Test Player");
+        let unsandboxed = pipewire::properties::properties! {
+            "application.process.binary" => "player", "application.process.id" => "99"
+        };
+        let node = pipewire::properties::properties! { "media.name" => "Track" };
+        let (id, _) = identity(node.as_ref(), Some(unsandboxed.as_ref())).expect("binary");
+        assert_eq!(id, ApplicationId::Executable(InputName::try_new("player").expect("id")));
     }
 
     #[test]

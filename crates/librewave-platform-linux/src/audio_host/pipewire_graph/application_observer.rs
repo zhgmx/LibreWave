@@ -79,8 +79,58 @@ impl<P: GraphProcessor> ActiveGraph<P> {
                 .register();
             self.application_nodes.insert(id, (listener, node));
         }
+        self.observe_stream_clients();
         self.refresh_metadata(false);
         self.refresh_metadata(true);
+    }
+
+    /// Binds the client that owns each observed stream to read its full
+    /// properties. The registry publishes only a subset of them.
+    fn observe_stream_clients(&mut self) {
+        self.application_clients
+            .retain(|id, _| self.inner.registry_state.borrow().objects.contains_key(id));
+        let clients: Vec<u32> = {
+            let state = self.inner.registry_state.borrow();
+            let mut clients: Vec<u32> = self
+                .application_nodes
+                .keys()
+                .filter_map(|node| stream_client(&state, *node))
+                .filter(|client| {
+                    state.objects.get(client).is_some_and(|o| o.type_ == ObjectType::Client)
+                })
+                .collect();
+            clients.sort_unstable();
+            clients.dedup();
+            clients
+        };
+        for id in clients {
+            if self.application_clients.contains_key(&id) {
+                continue;
+            }
+            let client = {
+                let state = self.inner.registry_state.borrow();
+                self.inner.registry.bind::<pw::client::Client, _>(&state.objects[&id])
+            };
+            let Ok(client) = client else {
+                continue;
+            };
+            let observed = Rc::clone(&self.inner.registry_state);
+            let listener = client
+                .add_listener_local()
+                .info(move |info| {
+                    let Some(props) = info.props() else {
+                        return;
+                    };
+                    let mut state = observed.borrow_mut();
+                    let properties = state.client_properties.entry(id).or_default();
+                    for (key, value) in props.iter() {
+                        properties.insert(key, value);
+                    }
+                    state.router.changed();
+                })
+                .register();
+            self.application_clients.insert(id, (listener, client));
+        }
     }
 
     #[allow(
@@ -232,6 +282,11 @@ impl<P: GraphProcessor> ActiveGraph<P> {
         Ok(())
     }
 }
+/// The client that created a stream node, from the node's registry properties.
+fn stream_client(state: &RegistryState, node: u32) -> Option<u32> {
+    state.objects.get(&node)?.props.as_ref()?.get("client.id")?.parse().ok()
+}
+
 impl RegistryState {
     pub(super) fn application_view(
         &self,
@@ -248,7 +303,10 @@ impl RegistryState {
                 unidentified += 1;
                 continue;
             };
-            let Some((identity, name)) = applications::identity(properties.as_ref()) else {
+            let client = stream_client(self, object.id)
+                .and_then(|client| self.client_properties.get(&client))
+                .map(AsRef::as_ref);
+            let Some((identity, name)) = applications::identity(properties.as_ref(), client) else {
                 unidentified += 1;
                 continue;
             };
