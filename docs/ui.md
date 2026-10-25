@@ -33,7 +33,7 @@ The daemon reads the device configuration every 500 ms while it is connected. Po
 
 The hardware controls sit under the illustration:
 
-- **Microphone gain** (0 to 40 dB) and **Headphone level** (−60 to 0 dB) each have a slider. Drag the slider or click its track to set the level. The level snaps to the device's 0.5 dB steps. With the slider focused, the arrow keys move it by 0.5 dB, and Home and End select the limits. The **−** and **+** buttons also step by 0.5 dB.
+- **Microphone gain** (0 to 40 dB) and **Headphone level** (−60 to 0 dB) each have a slider. Drag the slider, click its track, or turn the mouse wheel over it to set the level. Each wheel notch moves it by 1 dB. The level snaps to the device's 0.5 dB steps. With the slider focused, the arrow keys move it by 0.5 dB, and Home and End select the limits. The **−** and **+** buttons also step by 0.5 dB.
 - The icon button before each level mutes it. A muted level is dim and its button is red.
 - **Clipguard**, **Low-cut**, and **Gain Lock** are lit when on. Select one to change it. Hover over one to see what it does.
 
@@ -45,13 +45,15 @@ When the daemon reports locked write access, the stage shows the reason and disa
 
 ### Inputs
 
-**Inputs** has one strip for each input. Microphone and System are permanent. Up to ten more software inputs receive application audio. Each strip is 212 px wide. A long name ends with an ellipsis instead of moving other controls. The strips scroll sideways when they do not fit.
+**Inputs** has one strip for each input. Microphone and System are permanent. Up to ten more software inputs receive application audio. Each strip is 212 px wide. A long name ends with an ellipsis instead of moving other controls.
+
+When the strips do not fit, the row scrolls sideways. A scrollbar shows under the strips, and a dark fade covers each edge where strips are hidden. Drag the scrollbar, click its track, or turn the mouse wheel over the strips. While strips are hidden, the wheel over the strips scrolls only the row, not the window. Over a fader or level control, the wheel changes that level instead.
 
 Each input has its own icon. Microphone and System have fixed icons. A software input whose name states a kind, such as Music, Browser, Chat, Game, or Video, gets that kind's icon. Other inputs get one of the remaining icons by identity, so neighbors differ.
 
 A strip has a stereo peak meter, a Monitor fader, and a Stream fader with a dB scale between them. Input meters measure the signal before the faders. Output meters measure each final mix after clipping. The meter scale is −60 to 0 dBFS. A peak above full scale is red. A dim track means no recent reading, not silence.
 
-- Drag a fader or click its track to set the level. Select the level under a fader to reset it to 0 dB.
+- Drag a fader or click its track to set the level. Each mouse wheel notch over a fader moves it by 1 dB. Select the level under a fader to reset it to 0 dB.
 - The speaker button under a fader mutes the input in that mix. A muted fader is grey and its button is red.
 - The link button between the mix icons links the two faders of a strip. Either fader then sets both levels in one request. Each mix keeps its own mute. The link lasts until the window closes.
 - With a fader focused, the arrow keys step by 0.5 dB, Home selects −60 dB, End selects +12 dB, and Enter resets to 0 dB.
@@ -81,7 +83,7 @@ The **Add input** panel after the last strip creates a software input with a new
 
 ### Outputs
 
-**Outputs** has one row for each mix. The Monitor mix plays in the Wave:3 headphones. The Stream mix is a source for other applications. Drag or click the level control to change a software output, or use the arrow keys, Home, and End. The speaker button mutes the output. The dB button resets it to 0 dB. Output levels do not change the hardware headphone level or microphone gain.
+**Outputs** has one row for each mix. The Monitor mix plays in the Wave:3 headphones. The Stream mix is a source for other applications. Drag or click the level control, or turn the mouse wheel over it, to change a software output. You can also use the arrow keys, Home, and End. The speaker button mutes the output. The dB button resets it to 0 dB. Output levels do not change the hardware headphone level or microphone gain.
 
 ### Requests
 
