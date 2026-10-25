@@ -123,6 +123,8 @@ struct Shell {
     queued_fader: Option<MixerEdit>,
     linked_faders: std::collections::BTreeSet<librewave_core::SourceId>,
     fader_window: Option<gpui::AnyWindowHandle>,
+    /// The daemon IPC socket for status, mixer, and device requests.
+    socket: std::path::PathBuf,
     poll_in_flight: bool,
     request_epoch: u64,
     action_error: Option<String>,
@@ -179,6 +181,7 @@ impl Shell {
             queued_fader: None,
             linked_faders: std::collections::BTreeSet::new(),
             fader_window: None,
+            socket: configured_socket_path(),
             poll_in_flight: false,
             request_epoch: 0,
             action_error: None,
@@ -281,10 +284,11 @@ impl Shell {
         self.request_epoch = self.request_epoch.wrapping_add(1);
         self.action_error = None;
         cx.notify();
+        let socket = self.socket.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { Client::new(configured_socket_path()).request(command) })
+                .spawn(async move { Client::new(socket).request(command) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.pending = false;
@@ -458,10 +462,11 @@ impl Shell {
         };
         preview.in_flight = true;
         preview.sent = Some(std::time::Instant::now());
+        let socket = self.socket.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { Client::new(configured_socket_path()).request(command) })
+                .spawn(async move { Client::new(socket).request(command) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if let Some(preview) = &mut this.preview {
@@ -511,13 +516,12 @@ impl Shell {
         }
         self.poll_in_flight = true;
         let epoch = self.request_epoch;
+        let socket = self.socket.clone();
         cx.spawn(async move |this, cx| {
-            let result =
-                cx.background_executor()
-                    .spawn(async move {
-                        Client::new(configured_socket_path()).request(Command::GetStatus)
-                    })
-                    .await;
+            let result = cx
+                .background_executor()
+                .spawn(async move { Client::new(socket).request(Command::GetStatus) })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 if this.apply_poll_result(epoch, result) {
                     cx.notify();
@@ -791,6 +795,8 @@ mod tests {
             queued_fader: None,
             linked_faders: std::collections::BTreeSet::new(),
             fader_window: None,
+            // Tests never reach the session daemon.
+            socket: std::env::temp_dir().join("librewave-ui-tests-no-daemon.sock"),
             poll_in_flight: false,
             request_epoch: 0,
             action_error: None,

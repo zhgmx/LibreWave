@@ -9,7 +9,7 @@ use super::theme::{
     INK, LINE, MONITOR, MONO, MUTED, PANEL, RADIUS, RADIUS_CARD, RAISED, SPACE_LG, SPACE_MD,
     SPACE_SM, SPACE_XL, SPACE_XS, TITLE, TITLE_LINE, WARNING,
 };
-use super::{SettingsModal, Shell, configured_socket_path};
+use super::{SettingsModal, Shell};
 use gpui::{
     AnyElement, BoxShadow, Context, Div, FontWeight, IntoElement, div, prelude::*, px, rgb, rgba,
 };
@@ -401,7 +401,7 @@ impl Shell {
                     .child(separator())
                     .child(
                         row("Socket", String::new())
-                            .child(code(&configured_socket_path().display().to_string())),
+                            .child(code(&self.socket.display().to_string())),
                     ),
             ))
             .child(section(

@@ -22,7 +22,7 @@ use librewave_core::{
 };
 use librewave_ipc::Response;
 use librewave_platform_linux::desktop_entries::{self, InstalledApplication};
-use librewave_platform_linux::ipc::{Client, ClientError, configured_socket_path};
+use librewave_platform_linux::ipc::{Client, ClientError};
 use std::time::{Duration, Instant};
 
 const MENU_WIDTH: f32 = 380.;
@@ -274,12 +274,11 @@ impl Shell {
         }
         let epoch = self.request_epoch;
         self.application_request_epoch = Some(epoch);
+        let socket = self.socket.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move {
-                    Client::new(configured_socket_path()).request(Command::GetApplications)
-                })
+                .spawn(async move { Client::new(socket).request(Command::GetApplications) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.apply_application_result(epoch, result) {

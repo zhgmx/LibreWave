@@ -7,7 +7,7 @@ use super::{
 use gpui::{Context, Div, SharedString, Stateful, div, prelude::*, px, rgb};
 use librewave_core::{Command, MeterFrame, MeterSnapshot, MixerRuntimeState, StereoLevels};
 use librewave_ipc::Response;
-use librewave_platform_linux::ipc::{Client, ClientError, configured_socket_path};
+use librewave_platform_linux::ipc::{Client, ClientError};
 
 impl Shell {
     pub(super) fn audio_active(&self) -> bool {
@@ -23,13 +23,12 @@ impl Shell {
         }
         let epoch = self.request_epoch;
         self.meter_request_epoch = Some(epoch);
+        let socket = self.socket.clone();
         cx.spawn(async move |this, cx| {
-            let result =
-                cx.background_executor()
-                    .spawn(async move {
-                        Client::new(configured_socket_path()).request(Command::GetMeters)
-                    })
-                    .await;
+            let result = cx
+                .background_executor()
+                .spawn(async move { Client::new(socket).request(Command::GetMeters) })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 if this.apply_meter_result(epoch, result) {
                     cx.notify();
