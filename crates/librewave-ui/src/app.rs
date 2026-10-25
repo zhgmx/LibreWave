@@ -304,6 +304,7 @@ impl Shell {
         };
         self.queued_fader = None;
         self.cancel_level_gesture(cx);
+        self.scrollbar_grab = None;
         cx.stop_active_drag(window);
         modal.close_focus.focus(window, cx);
         self.settings_modal = Some(modal);

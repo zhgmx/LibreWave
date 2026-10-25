@@ -65,6 +65,18 @@ fn scroll_to(handle: &ScrollHandle, x: Pixels) {
     handle.set_offset(point(x.clamp(-handle.max_offset().x, px(0.)), offset.y));
 }
 
+/// Ends a scrollbar drag when the left button is released.
+fn release_grab_on_mouse_up(window: &mut gpui::Window, shell: WeakEntity<Shell>) {
+    window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+        if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
+            let _ = shell.update(cx, |this, cx| {
+                this.scrollbar_grab = None;
+                cx.notify();
+            });
+        }
+    });
+}
+
 /// A scrollbar for the strip row. It shows only while strips are hidden.
 /// Drag the thumb, click the track, or use the wheel over it.
 pub(super) fn input_scrollbar(
@@ -82,8 +94,21 @@ pub(super) fn input_scrollbar(
             }
         },
         move |_, state, window, _| {
-            let Some((geometry, hitbox)) = state else { return };
+            let Some((geometry, hitbox)) = state else {
+                // The bar went away during its drag: all strips fit now.
+                if grab.is_some() {
+                    release_grab_on_mouse_up(window, shell);
+                }
+                return;
+            };
             let lit = grab.is_some() || hitbox.is_hovered(window);
+            // The thumb lights up while the pointer is over the bar.
+            let hover_hitbox = hitbox.clone();
+            window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, _| {
+                if phase == DispatchPhase::Bubble && hover_hitbox.is_hovered(window) != lit {
+                    window.refresh();
+                }
+            });
             window.paint_quad(
                 fill(geometry.track, rgba(alpha(LINE, 0x99))).corner_radii(px(BAR / 2.)),
             );
@@ -107,14 +132,7 @@ pub(super) fn input_scrollbar(
                         cx.notify();
                     });
                 });
-                window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                    if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
-                        let _ = shell.update(cx, |this, cx| {
-                            this.scrollbar_grab = None;
-                            cx.notify();
-                        });
-                    }
-                });
+                release_grab_on_mouse_up(window, shell);
                 return;
             }
             let press_hitbox = hitbox.clone();
