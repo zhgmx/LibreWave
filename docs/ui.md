@@ -49,7 +49,7 @@ When the daemon reports locked write access, the stage shows the reason and disa
 
 **Inputs** has one strip for each input. Microphone and System are permanent. Up to ten more software inputs receive application audio. Each strip is 212 px wide. A long name ends with an ellipsis instead of moving other controls.
 
-When the strips do not fit, the row scrolls sideways. A scrollbar shows under the strips, and a dark fade covers each edge where strips are hidden. Drag the scrollbar, click its track, or turn the mouse wheel over the strips. While strips are hidden, the wheel over the strips scrolls only the row, not the window. Over a fader or level control, the wheel changes that level instead.
+When the strips do not fit, the row scrolls sideways. A scrollbar shows under the strips, and a fade covers each edge where strips are hidden. The fade grows in as the row scrolls and ends in the color beside the row, including the stage glow. Drag the scrollbar, click its track, or turn the mouse wheel over the strips. While strips are hidden, the wheel over the strips scrolls only the row, not the window. Over a fader or level control, the wheel changes that level instead.
 
 Each input has its own icon. Microphone and System have fixed icons. A software input whose name states a kind, such as Music, Browser, Chat, Game, or Video, gets that kind's icon. Other inputs get one of the remaining icons by identity, so neighbors differ.
 
