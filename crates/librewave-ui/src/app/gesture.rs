@@ -3,10 +3,12 @@
 //! A GPUI drag (`on_drag`) redraws the whole window on every pointer move.
 //! A level drag instead follows the pointer with window mouse listeners, so
 //! the window redraws only when the dragged value reaches a new step.
+//!
+//! The wheel over a level control changes that level by 1 dB per notch.
 use super::{MixerEdit, Shell};
 use gpui::{
     Bounds, Canvas, CursorStyle, DispatchPhase, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, WeakEntity, canvas,
+    MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, WeakEntity, canvas,
 };
 use librewave_core::{MixTarget, SourceId};
 use std::rc::Rc;
@@ -21,6 +23,28 @@ pub(super) enum LevelControl {
 
 /// Converts a pointer position inside the control bounds to a level edit.
 pub(super) type LevelAt = dyn Fn(Point<Pixels>, Bounds<Pixels>) -> Option<MixerEdit>;
+
+/// Moves a level by whole wheel notches, up being louder. It starts from the
+/// value that the control shows, when one is given, and stops at the limits.
+pub(super) type LevelStep = dyn Fn(Option<MixerEdit>, i32) -> Option<MixerEdit>;
+
+/// Touchpad pixels that count as one wheel notch.
+const NOTCH_PIXELS: f32 = 24.;
+
+/// The control that an edit changes.
+fn edit_control(edit: MixerEdit) -> Option<LevelControl> {
+    match edit {
+        MixerEdit::Input(input) => Some(LevelControl::Fader(input.source, input.target)),
+        MixerEdit::Output { target, .. } => Some(LevelControl::Output(target)),
+        MixerEdit::Hardware { control, .. } => match control {
+            librewave_core::Wave3Control::InputGain(_) => Some(LevelControl::Hardware("gain")),
+            librewave_core::Wave3Control::HeadphoneLevel(_) => {
+                Some(LevelControl::Hardware("headphone"))
+            }
+            _ => None,
+        },
+    }
+}
 
 impl Shell {
     fn begin_level_gesture(
@@ -47,6 +71,49 @@ impl Shell {
         self.release_preview(cx);
     }
 
+    /// Applies wheel travel over a level control.
+    fn wheel_level(
+        &mut self,
+        control: LevelControl,
+        step: &LevelStep,
+        delta: ScrollDelta,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if self.settings_modal.is_some() || self.level_gesture.is_some() {
+            return;
+        }
+        let travel = match delta {
+            ScrollDelta::Lines(lines) => {
+                if lines.x.abs() > lines.y.abs() {
+                    -lines.x
+                } else {
+                    lines.y
+                }
+            }
+            ScrollDelta::Pixels(pixels) => {
+                let (x, y) = (f32::from(pixels.x), f32::from(pixels.y));
+                (if x.abs() > y.abs() { -x } else { y }) / NOTCH_PIXELS
+            }
+        };
+        if self.wheel_control != Some(control) {
+            self.wheel_control = Some(control);
+            self.wheel_travel = 0.;
+        }
+        self.wheel_travel += travel;
+        let notches = self.wheel_travel.trunc();
+        self.wheel_travel -= notches;
+        // Whole notches fit an i32: one event never scrolls that far.
+        #[allow(clippy::cast_possible_truncation)]
+        let notches = notches as i32;
+        if notches == 0 {
+            return;
+        }
+        let shown = self.shown_edit().filter(|edit| edit_control(*edit) == Some(control));
+        if let Some(edit) = step(shown, notches) {
+            self.send_fader(edit, cx);
+        }
+    }
+
     /// Stops a level drag without a commit, after an error or a dialog.
     pub(super) fn cancel_level_gesture(&mut self, cx: &mut gpui::Context<Self>) {
         if self.level_gesture.take().is_some() {
@@ -65,6 +132,7 @@ pub(super) fn level_gesture(
     active: bool,
     shell: WeakEntity<Shell>,
     at: Rc<LevelAt>,
+    step: Rc<LevelStep>,
 ) -> Canvas<Option<gpui::Hitbox>> {
     canvas(
         move |bounds, window, _| {
@@ -72,6 +140,17 @@ pub(super) fn level_gesture(
         },
         move |bounds, hitbox, window, _| {
             let Some(hitbox) = hitbox else { return };
+            let wheel_hitbox = hitbox.clone();
+            let wheel_shell = shell.clone();
+            window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
+                if phase == DispatchPhase::Bubble && wheel_hitbox.is_hovered(window) {
+                    // The level takes the wheel, so the strip row does not scroll.
+                    cx.stop_propagation();
+                    let _ = wheel_shell.update(cx, |this, cx| {
+                        this.wheel_level(control, &*step, event.delta, cx);
+                    });
+                }
+            });
             if active {
                 window.set_window_cursor_style(CursorStyle::PointingHand);
                 let position_edit = Rc::clone(&at);

@@ -5,6 +5,7 @@ use super::controls::{
     tabular, tip,
 };
 use super::gesture::{LevelControl, level_gesture};
+use super::scrollbar;
 use super::theme::{
     CAPTION, DANGER, FAINT, FOCUS, HEADING, HEADING_LINE, ICON_SMALL, INK, LINE, MONITOR, MUTED,
     PANEL, RADIUS, RADIUS_CARD, RAISED, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, STREAM,
@@ -198,14 +199,21 @@ impl Shell {
         compact: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let scroll = self.input_scroll.clone();
         let mut strips = div()
             .id("input-strips")
-            .w_full()
-            .flex_1()
-            .min_h_0()
+            .size_full()
             .flex()
             .gap(px(SPACE_MD))
-            .overflow_x_scroll();
+            .overflow_x_scroll()
+            .track_scroll(&self.input_scroll)
+            // The row scrolls sideways first. While strips are hidden, the
+            // wheel stays with the row and does not also scroll the page.
+            .on_scroll_wheel(move |_, _, cx| {
+                if scroll.max_offset().x > px(0.) {
+                    cx.stop_propagation();
+                }
+            });
         for (position, source) in snapshot.mixer.profile.sources.iter().enumerate() {
             strips =
                 strips.child(self.channel_strip(source, position, snapshot.mixer.generation(), cx));
@@ -227,7 +235,32 @@ impl Shell {
                     .flex_col()
                     .gap(px(SPACE_MD))
                     .child(label("Inputs"))
-                    .child(strips),
+                    .child(
+                        div()
+                            .w_full()
+                            .flex_1()
+                            .min_h_0()
+                            .relative()
+                            .child(strips)
+                            .child(
+                                scrollbar::input_fades(self.input_scroll.clone())
+                                    .absolute()
+                                    .inset_0(),
+                            )
+                            .child(
+                                // The bar sits in the gap above Outputs.
+                                scrollbar::input_scrollbar(
+                                    self.input_scroll.clone(),
+                                    self.scrollbar_grab,
+                                    cx.weak_entity(),
+                                )
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .bottom(px(-(SPACE_XL + 12.) / 2.))
+                                .h(px(12.)),
+                            ),
+                    ),
             )
             .child(
                 div()
@@ -774,6 +807,13 @@ fn output_track(
         output_at_pixel(f32::from(position.x), f32::from(area.left()), f32::from(area.size.width))
             .map(|fader| MixerEdit::Output { target, fader })
     };
+    let step = move |current: Option<MixerEdit>, notches: i32| {
+        let base = match current {
+            Some(MixerEdit::Output { fader, .. }) => fader,
+            _ => shown,
+        };
+        Some(MixerEdit::Output { target, fader: wheel_fader(base, notches) })
+    };
     let mut track = identified(key)
         .flex_1()
         .min_w(px(80.))
@@ -810,6 +850,7 @@ fn output_track(
                 gesture == Some(control),
                 cx.weak_entity(),
                 std::rc::Rc::new(at),
+                std::rc::Rc::new(step),
             )
             .absolute()
             .top_0()
@@ -837,6 +878,19 @@ fn output_track(
     }
     track
 }
+/// A fader level moved by wheel notches of 1 dB, inside the fader range.
+fn wheel_fader(base: FaderGain, notches: i32) -> FaderGain {
+    let steps =
+        i32::from(base.half_decibel_steps()).saturating_add(notches.saturating_mul(2)).clamp(
+            i32::from(FaderGain::MIN.half_decibel_steps()),
+            i32::from(FaderGain::MAX.half_decibel_steps()),
+        );
+    i16::try_from(steps)
+        .ok()
+        .and_then(|steps| FaderGain::from_half_decibel_steps(steps).ok())
+        .unwrap_or(base)
+}
+
 fn output_at_pixel(x: f32, left: f32, width: f32) -> Option<FaderGain> {
     if !x.is_finite() || !left.is_finite() || !width.is_finite() || width <= CAP {
         return None;
@@ -892,6 +946,13 @@ fn fader_track(
         fader_at_pixel(f32::from(position.y), f32::from(area.top()), f32::from(area.size.height))
             .map(|fader| MixerEdit::Input(FaderEdit { source, target, fader }))
     };
+    let step = move |current: Option<MixerEdit>, notches: i32| {
+        let base = match current {
+            Some(MixerEdit::Input(edit)) => edit.fader,
+            _ => shown,
+        };
+        Some(MixerEdit::Input(FaderEdit { source, target, fader: wheel_fader(base, notches) }))
+    };
     let mut track = identified(key)
         .w(px(FADER_WIDTH))
         .flex_1()
@@ -913,6 +974,7 @@ fn fader_track(
                 gesture == Some(control),
                 cx.weak_entity(),
                 std::rc::Rc::new(at),
+                std::rc::Rc::new(step),
             )
             .absolute()
             .top_0()

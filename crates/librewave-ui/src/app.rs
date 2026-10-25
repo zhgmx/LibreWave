@@ -7,6 +7,7 @@ mod gesture;
 mod hardware;
 mod meters;
 mod mixer;
+mod scrollbar;
 mod settings;
 mod stage;
 mod text_field;
@@ -125,6 +126,14 @@ struct Shell {
     linked_faders: std::collections::BTreeSet<librewave_core::SourceId>,
     /// The level control that a pointer drag is moving.
     level_gesture: Option<gesture::LevelControl>,
+    /// The level that the last wheel notches changed, and the travel toward
+    /// the next notch.
+    wheel_control: Option<gesture::LevelControl>,
+    wheel_travel: f32,
+    /// The sideways scroll position of the input strips.
+    input_scroll: gpui::ScrollHandle,
+    /// Where the pointer holds the strip scrollbar thumb, during a drag.
+    scrollbar_grab: Option<gpui::Pixels>,
     /// The daemon IPC socket for status, mixer, and device requests.
     socket: std::path::PathBuf,
     poll_in_flight: bool,
@@ -183,6 +192,10 @@ impl Shell {
             queued_fader: None,
             linked_faders: std::collections::BTreeSet::new(),
             level_gesture: None,
+            wheel_control: None,
+            wheel_travel: 0.,
+            input_scroll: gpui::ScrollHandle::new(),
+            scrollbar_grab: None,
             socket: configured_socket_path(),
             poll_in_flight: false,
             request_epoch: 0,
@@ -785,6 +798,10 @@ mod tests {
             queued_fader: None,
             linked_faders: std::collections::BTreeSet::new(),
             level_gesture: None,
+            wheel_control: None,
+            wheel_travel: 0.,
+            input_scroll: gpui::ScrollHandle::new(),
+            scrollbar_grab: None,
             // Tests never reach the session daemon.
             socket: std::env::temp_dir().join("librewave-ui-tests-no-daemon.sock"),
             poll_in_flight: false,
@@ -1483,6 +1500,72 @@ mod tests {
         view.read_with(cx, |view, _| {
             assert_eq!(view.level_gesture, None);
             assert!(view.preview.as_ref().expect("preview").released);
+        });
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    fn crowded_mixer(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::Entity<Shell>, &mut gpui::VisualTestContext) {
+        let mut snapshot = Snapshot::empty();
+        let mut profile = snapshot.mixer.profile.clone();
+        for index in 0..10 {
+            let name = librewave_core::InputName::try_new(&format!("Input {index}"))
+                .expect("valid input name");
+            profile = profile.with_input(name).expect("room for the input");
+        }
+        snapshot.mixer = MixerSnapshot::active(profile);
+        let (view, cx) = cx.add_window_view(|_, _| shell_with(snapshot));
+        cx.simulate_resize(gpui::size(px(1200.), px(650.)));
+        (view, cx)
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    fn wheel(cx: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixels>, x: f32, y: f32) {
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(x), px(y))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
+    fn the_wheel_scrolls_hidden_strips_without_scrolling_the_page(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = crowded_mixer(cx);
+        let page = cx.debug_bounds("mixer").expect("mixer");
+        let edit = cx.debug_bounds("edit-input-3").expect("third strip heading");
+        wheel(cx, edit.center(), 0., -120.);
+        let moved = cx.debug_bounds("edit-input-3").expect("third strip heading");
+        assert_eq!(moved.left(), edit.left() - px(120.), "the strips scroll sideways");
+        assert_eq!(cx.debug_bounds("mixer").expect("mixer").top(), page.top(), "the page stays");
+        view.read_with(cx, |view, _| assert_eq!(view.input_scroll.offset().x, px(-120.)));
+
+        // A sideways swipe outside the strips does not scroll the page.
+        let output = cx.debug_bounds("output-monitor-level").expect("output level");
+        wheel(cx, gpui::point(output.left() - px(40.), output.center().y), -80., 0.);
+        assert_eq!(cx.debug_bounds("mixer").expect("mixer").top(), page.top());
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
+    fn the_wheel_over_a_fader_changes_its_level_instead_of_scrolling(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = crowded_mixer(cx);
+        let fader = cx.debug_bounds("fader-1-monitor").expect("fader");
+        let requests = view.read_with(cx, |view, _| view.request_epoch);
+        // One notch up. Tests have no daemon, so the request itself fails.
+        wheel(cx, fader.center(), 0., 24.);
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.input_scroll.offset().x, px(0.), "the strips stay");
+            assert_eq!(view.request_epoch, requests.wrapping_add(1), "one level request");
+        });
+        // Touchpad travel below one notch sends nothing.
+        wheel(cx, fader.center(), 0., 10.);
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.request_epoch, requests.wrapping_add(1));
         });
     }
 

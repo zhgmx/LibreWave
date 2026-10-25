@@ -24,6 +24,8 @@ impl Shell {
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
+                // A sideways swipe must not scroll the page.
+                .restrict_scroll_to_axis()
                 .child(div().flex().flex_col().child(stage).child(self.work_area(true, cx)))
                 .into_any_element()
         } else {
@@ -39,6 +41,7 @@ impl Shell {
                         .min_w_0()
                         .h_full()
                         .overflow_y_scroll()
+                        .restrict_scroll_to_axis()
                         .child(self.work_area(false, cx)),
                 )
                 .into_any_element()

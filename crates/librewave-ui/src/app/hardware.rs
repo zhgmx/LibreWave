@@ -313,6 +313,18 @@ fn level_slider(
             current,
         ))
     };
+    let step = move |shown_edit: Option<MixerEdit>, notches: i32| {
+        let base = match shown_edit {
+            Some(MixerEdit::Hardware {
+                control: Wave3Control::InputGain(value) | Wave3Control::HeadphoneLevel(value),
+                ..
+            }) => value,
+            _ => shown,
+        };
+        // 1 dB per notch, held inside the reviewed range.
+        let raw = base.raw.saturating_add(notches.saturating_mul(256)).clamp(minimum, maximum);
+        edit(stepped(FixedPointValue { raw, ..base }, 0, minimum, maximum))
+    };
     let mut slider = identified(&format!("{key}-slider"))
         .w_full()
         .h(px(THUMB + 2.))
@@ -331,6 +343,7 @@ fn level_slider(
                 gesture == Some(gesture_control),
                 cx.weak_entity(),
                 std::rc::Rc::new(at),
+                std::rc::Rc::new(step),
             )
             .absolute()
             .top_0()
