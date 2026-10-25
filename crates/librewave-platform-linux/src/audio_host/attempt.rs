@@ -1144,6 +1144,10 @@ pub(in crate::audio_host) mod tests {
         }
         fn drop_stream(&mut self) -> Result<(), PcmIoError> {
             record(&self.calls, "drop playback");
+            if matches!(self.mode, CaptureMode::PrimeThenWait) {
+                // ALSA reports ENODEV for a stream on a removed device.
+                return Err(PcmIoError::Disconnected);
+            }
             Ok(())
         }
     }
@@ -1395,5 +1399,12 @@ pub(in crate::audio_host) mod tests {
             ]
         );
         assert!(host.resource_state().published_endpoints.is_empty());
+        assert_ne!(
+            lifecycle.state(),
+            crate::audio_lifecycle::LifecycleState::Degraded(
+                crate::audio_lifecycle::DegradedState::TeardownFailed
+            ),
+            "a removed device's playback stream counts as released"
+        );
     }
 }

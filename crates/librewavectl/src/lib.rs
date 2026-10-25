@@ -1381,6 +1381,22 @@ mod tests {
     }
 
     #[test]
+    fn mixer_reset_rejects_a_bad_generation_before_ipc() {
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        let exit = run(
+            ["librewavectl", "mixer", "reset", "seven"].map(str::to_owned),
+            Path::new("/unused"),
+            &mut output,
+            &mut errors,
+        )
+        .expect("render invalid reset");
+        assert_eq!(exit, 2);
+        assert!(output.is_empty());
+        assert_eq!(String::from_utf8(errors).expect("UTF-8"), "error: invalid mixer generation\n");
+    }
+
+    #[test]
     fn mixer_output_is_exact_deterministic_and_explicitly_inactive() {
         let mut mixer = MixerSnapshot::default();
         mixer.profile.generation = MixerGeneration(3);
