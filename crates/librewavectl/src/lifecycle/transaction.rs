@@ -4,7 +4,7 @@ use super::engine::{
 };
 use super::fs_ops::{
     atomic_copy_new, atomic_json, checked_exists, matches_snapshot_destination, prepare_snapshot,
-    read_json, remove_empty, remove_if_exists, remove_transaction_files, restore_snapshot,
+    read_json, remove_if_exists, remove_if_unused, remove_transaction_files, restore_snapshot,
     restore_udev_snapshot, verify_saved_snapshots,
 };
 use super::hash;
@@ -90,8 +90,8 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
                 remove_manifest_backups(previous)?;
                 self.verify_uninstalled(previous)?;
                 remove_if_exists(&self.paths.journal())?;
-                remove_empty(&self.paths.backup_root())?;
-                remove_empty(&self.paths.state_root)?;
+                remove_if_unused(&self.paths.backup_root())?;
+                remove_if_unused(&self.paths.state_root)?;
                 return Ok(());
             }
             self.write_manifest(previous)?;

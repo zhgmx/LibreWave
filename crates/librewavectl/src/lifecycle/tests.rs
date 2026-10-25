@@ -104,6 +104,20 @@ fn first_install_records_exact_build_and_preserves_profiles() {
 }
 
 #[test]
+fn uninstall_keeps_unowned_state_files_and_their_directory() {
+    let fixture = Fixture::new();
+    let paths = test_paths(&fixture.root);
+    let mut lifecycle = fixture.lifecycle();
+    fixture.install(&mut lifecycle, "revision-1");
+    let unowned = paths.state_root.join("mixer-schema-2-backup.json");
+    write_file(&unowned, b"backup");
+    assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed);
+    assert_eq!(fs::read(&unowned).unwrap(), b"backup");
+    assert!(!paths.state_root.join("install-manifest.json").exists());
+    assert!(!paths.state_root.join("install-journal.json").exists());
+}
+
+#[test]
 fn explicit_purge_removes_profiles() {
     let fixture = Fixture::new();
     let profiles = test_paths(&fixture.root).config_root.join("librewave/profiles/default.json");

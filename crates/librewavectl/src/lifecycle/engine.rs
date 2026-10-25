@@ -1,6 +1,6 @@
 use super::fs_ops::{
-    checked_exists, matches_entry, matches_snapshot_destination, remove_empty, remove_entry,
-    remove_if_exists, remove_transaction_files, restore_or_remove, saved_snapshot_is_valid,
+    checked_exists, matches_entry, matches_snapshot_destination, remove_entry, remove_if_exists,
+    remove_if_unused, remove_transaction_files, restore_or_remove, saved_snapshot_is_valid,
 };
 use super::hash;
 use super::model::{
@@ -382,8 +382,8 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
         journal.phase = Phase::Committed;
         self.write_journal(&journal)?;
         remove_if_exists(&self.paths.journal())?;
-        remove_empty(&self.paths.backup_root())?;
-        remove_empty(&self.paths.state_root)?;
+        remove_if_unused(&self.paths.backup_root())?;
+        remove_if_unused(&self.paths.state_root)?;
         Ok(UninstallOutcome::Removed)
     }
 

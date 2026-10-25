@@ -403,6 +403,23 @@ pub(super) fn remove_empty(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Removes a shared directory when it is empty. A directory that still holds
+/// files that `LibreWave` does not own stays in place with those files.
+pub(super) fn remove_if_unused(path: &Path) -> io::Result<()> {
+    match fs::remove_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub(super) fn remove_transaction_files(path: &Path, snapshots: &[Snapshot]) -> io::Result<()> {
     if path.file_name().and_then(|name| name.to_str()) != Some("setup")
         || path.parent().and_then(Path::file_name).and_then(|name| name.to_str())
