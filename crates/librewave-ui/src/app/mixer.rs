@@ -704,7 +704,7 @@ impl Shell {
                 target,
                 shown,
                 color,
-                controls_open,
+                mutable,
                 self.level_gesture,
                 cx,
             ))

@@ -98,9 +98,15 @@ struct Preview {
     edit: MixerEdit,
     /// The value changed since the last preview request.
     dirty: bool,
-    in_flight: bool,
     sent: Option<std::time::Instant>,
-    released: bool,
+}
+
+/// A released drag that waits for its commit.
+#[derive(Clone, Copy)]
+struct Release {
+    edit: MixerEdit,
+    /// The daemon applied a preview of this drag.
+    previewed: bool,
 }
 
 /// A held drag repeats its preview so the daemon does not restore the
@@ -173,6 +179,9 @@ struct Shell {
     settings_trigger_focus: Option<gpui::FocusHandle>,
     confirmation: Option<confirm::Confirmation>,
     preview: Option<Preview>,
+    release: Option<Release>,
+    /// When the running preview request was sent. One runs at a time.
+    preview_in_flight: Option<std::time::Instant>,
 }
 
 impl Shell {
@@ -240,6 +249,8 @@ impl Shell {
             settings_trigger_focus: None,
             confirmation: None,
             preview: None,
+            release: None,
+            preview_in_flight: None,
         };
         shell.send(Command::GetStatus, cx);
         let woken = cx.weak_entity();
@@ -316,7 +327,14 @@ impl Shell {
         self.lifecycle_pending.is_some()
     }
 
+    /// Sends one request, as [`Self::try_send`] does.
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
+        self.try_send(command, cx);
+    }
+
+    /// Sends one request. Returns whether it was sent: nothing is sent while
+    /// another request runs, or a mixer or device change while Settings is open.
+    fn try_send(&mut self, command: Command, cx: &mut Context<Self>) -> bool {
         let command = self.linked_command(command);
         if self.pending
             || (self.settings_modal.is_some()
@@ -331,7 +349,7 @@ impl Shell {
                         | Command::SetWave3Control { .. }
                 ))
         {
-            return;
+            return false;
         }
         self.in_flight_fader = None;
         self.queued_fader = None;
@@ -370,6 +388,7 @@ impl Shell {
             });
         })
         .detach();
+        true
     }
 
     fn edit_command(&self, edit: MixerEdit) -> Option<Command> {
@@ -392,12 +411,19 @@ impl Shell {
 
     fn send_fader(&mut self, edit: impl Into<MixerEdit>, cx: &mut Context<Self>) {
         let edit = edit.into();
+        // A newer edit of the same control replaces a commit that waits.
+        if self.release.is_some_and(|release| {
+            gesture::edit_control(release.edit) == gesture::edit_control(edit)
+        }) {
+            self.release = None;
+        }
         if self.defer_fader(edit) {
             cx.notify();
             return;
         }
-        if let Some(command) = self.edit_command(edit) {
-            self.send(command, cx);
+        if let Some(command) = self.edit_command(edit)
+            && self.try_send(command, cx)
+        {
             self.in_flight_fader = Some(edit);
         }
     }
@@ -408,6 +434,7 @@ impl Shell {
         self.preview
             .as_ref()
             .map(|preview| preview.edit)
+            .or(self.release.map(|release| release.edit))
             .or(self.queued_fader)
             .or(self.in_flight_fader)
     }
@@ -419,22 +446,14 @@ impl Shell {
             return;
         }
         match &mut self.preview {
-            Some(preview) if !preview.released => {
+            Some(preview) => {
                 if preview.edit == edit {
                     return;
                 }
                 preview.edit = edit;
                 preview.dirty = true;
             }
-            _ => {
-                self.preview = Some(Preview {
-                    edit,
-                    dirty: true,
-                    in_flight: false,
-                    sent: None,
-                    released: false,
-                });
-            }
+            None => self.preview = Some(Preview { edit, dirty: true, sent: None }),
         }
         cx.notify();
         self.pump_preview(cx);
@@ -442,8 +461,8 @@ impl Shell {
 
     /// Ends a drag. The last value is committed once.
     fn release_preview(&mut self, cx: &mut Context<Self>) {
-        if let Some(preview) = &mut self.preview {
-            preview.released = true;
+        if let Some(preview) = self.preview.take() {
+            self.release = Some(Release { edit: preview.edit, previewed: preview.sent.is_some() });
             self.pump_preview(cx);
         }
     }
@@ -473,40 +492,51 @@ impl Shell {
 
     /// Sends the next preview, or the commit after release. One preview
     /// request is in flight at a time and only the latest value waits.
+    /// Sends the next drag request: a waiting commit first, then a preview.
+    /// One request runs at a time, and none while another request runs.
     fn pump_preview(&mut self, cx: &mut Context<Self>) {
-        let Some(preview) = self.preview.as_ref() else {
+        if self.preview_in_flight.is_some() || self.pending {
+            return;
+        }
+        if let Some(release) = self.release.take() {
+            match self.edit_command(release.edit) {
+                Some(command) => {
+                    if self.try_send(command, cx) {
+                        self.in_flight_fader = Some(release.edit);
+                    } else {
+                        // Settings is open: commit once it closes.
+                        self.release = Some(release);
+                    }
+                }
+                // The drag ended on the saved value. A last preview of that
+                // value replaces the earlier preview in the running mixer.
+                None if release.previewed => {
+                    if let Some(command) = self.preview_command(release.edit) {
+                        self.send_preview(command, cx);
+                    }
+                }
+                None => {}
+            }
+            cx.notify();
+            return;
+        }
+        let Some(preview) = self.preview.as_mut() else {
             return;
         };
-        if preview.in_flight {
-            return;
-        }
-        if preview.released {
-            if self.pending {
-                return;
-            }
-            let edit = preview.edit;
-            self.preview = None;
-            cx.notify();
-            if let Some(command) = self.edit_command(edit) {
-                self.send(command, cx);
-                self.in_flight_fader = Some(edit);
-            }
-            return;
-        }
         let repeat = preview.sent.is_some_and(|sent| sent.elapsed() >= PREVIEW_REPEAT);
         if !preview.dirty && !repeat {
             return;
         }
-        let command = self.preview_command(preview.edit);
-        let Some(preview) = self.preview.as_mut() else {
-            return;
-        };
         preview.dirty = false;
-        let Some(command) = command else {
-            return;
-        };
-        preview.in_flight = true;
         preview.sent = Some(std::time::Instant::now());
+        let edit = preview.edit;
+        if let Some(command) = self.preview_command(edit) {
+            self.send_preview(command, cx);
+        }
+    }
+
+    fn send_preview(&mut self, command: Command, cx: &mut Context<Self>) {
+        self.preview_in_flight = Some(std::time::Instant::now());
         let socket = self.socket.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -514,12 +544,9 @@ impl Shell {
                 .spawn(async move { Client::new(socket).request(command) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if let Some(preview) = &mut this.preview {
-                    preview.in_flight = false;
-                }
+                this.preview_in_flight = None;
                 if let Err(error) = result {
                     // A failed preview ends the drag without a commit.
-                    this.preview = None;
                     let _ = this.apply_error(&error);
                     this.cancel_level_gesture(cx);
                 }
@@ -801,7 +828,9 @@ impl Shell {
 mod tests {
     use super::*;
     use librewave_core::{DeviceGeneration, DeviceId, DeviceWriteAccess, FixedPointValue};
-    use librewave_core::{FaderGain, MixRoute, MixTarget, MixerGeneration, MixerRuntimeState};
+    use librewave_core::{
+        FaderGain, MixRoute, MixTarget, MixerGeneration, MixerRuntimeState, SourceId,
+    };
     use librewave_core::{MixerProfile, MixerSnapshot, SYSTEM_SOURCE_ID};
     use librewave_ipc::IpcError;
     use std::path::PathBuf;
@@ -862,6 +891,8 @@ mod tests {
             settings_trigger_focus: None,
             confirmation: None,
             preview: None,
+            release: None,
+            preview_in_flight: None,
         }
     }
 
@@ -1113,13 +1144,7 @@ mod tests {
         };
         assert!(shell.preview_command(hardware).is_none());
         let mut dragging = shell_with(Snapshot::empty());
-        dragging.preview = Some(Preview {
-            edit: hardware,
-            dirty: false,
-            in_flight: false,
-            sent: None,
-            released: false,
-        });
+        dragging.preview = Some(Preview { edit: hardware, dirty: false, sent: None });
         dragging.queued_fader = Some(edit.into());
         assert_eq!(dragging.shown_edit(), Some(hardware), "the dragged value wins");
     }
@@ -1520,13 +1545,7 @@ mod tests {
         let (view, cx) = cx.add_window_view(|_, _| {
             let mut shell = shell_with(Snapshot::empty());
             // An earlier preview is in flight, so the drag sends nothing.
-            shell.preview = Some(Preview {
-                edit: MixerEdit::Output { target: MixTarget::Stream, fader: FaderGain::UNITY },
-                dirty: false,
-                in_flight: true,
-                sent: None,
-                released: false,
-            });
+            shell.preview_in_flight = Some(std::time::Instant::now());
             shell
         });
         let fader = cx.debug_bounds("fader-1-monitor").expect("Microphone Monitor fader");
@@ -1549,7 +1568,12 @@ mod tests {
         cx.simulate_mouse_up(below, gpui::MouseButton::Left, gpui::Modifiers::none());
         view.read_with(cx, |view, _| {
             assert_eq!(view.level_gesture, None);
-            assert!(view.preview.as_ref().expect("preview").released);
+            assert!(view.preview.is_none());
+            let release = view.release.expect("the release waits for the preview");
+            assert!(matches!(
+                release.edit,
+                MixerEdit::Input(FaderEdit { fader, .. }) if fader == FaderGain::MIN
+            ));
         });
     }
 
@@ -1648,6 +1672,107 @@ mod tests {
             view.window_visibility = gpui::WindowVisibility::Visible;
             view.poll_meters(cx);
             assert!(view.meter_request_epoch.is_some(), "visible: one meter read");
+        });
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    fn press_and_release(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+        let bounds = cx.debug_bounds(selector).expect(selector);
+        cx.simulate_mouse_down(bounds.center(), gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(bounds.center(), gpui::MouseButton::Left, gpui::Modifiers::none());
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
+    fn a_new_press_keeps_the_commit_of_a_released_drag(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| {
+            let mut shell = shell_with(Snapshot::empty());
+            shell.preview_in_flight = Some(std::time::Instant::now());
+            shell
+        });
+        press_and_release(cx, "fader-1-monitor");
+        let fader = cx.debug_bounds("fader-2-stream").expect("second fader");
+        cx.simulate_mouse_down(fader.center(), gpui::MouseButton::Left, gpui::Modifiers::none());
+        view.read_with(cx, |view, _| {
+            let release = view.release.expect("the first commit still waits");
+            assert!(matches!(
+                release.edit,
+                MixerEdit::Input(FaderEdit { source, .. }) if source == SourceId::new(1)
+            ));
+            let preview = view.preview.as_ref().expect("the second drag");
+            assert!(matches!(
+                preview.edit,
+                MixerEdit::Input(FaderEdit { source, .. }) if source == SourceId::new(2)
+            ));
+        });
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
+    fn a_cancelled_drag_is_never_committed_later(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| {
+            let mut shell = shell_with(Snapshot::empty());
+            shell.preview_in_flight = Some(std::time::Instant::now());
+            shell
+        });
+        let fader = cx.debug_bounds("fader-1-monitor").expect("fader");
+        cx.simulate_mouse_down(fader.center(), gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.update(|window, cx| view.update(cx, |view, cx| view.open_settings(window, cx)));
+        cx.simulate_mouse_up(fader.center(), gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.update(|window, cx| view.update(cx, |view, cx| view.close_settings(window, cx)));
+        // A later click anywhere has no drag to end.
+        cx.simulate_mouse_up(fader.center(), gpui::MouseButton::Left, gpui::Modifiers::none());
+        view.read_with(cx, |view, _| {
+            assert!(view.level_gesture.is_none());
+            assert!(view.preview.is_none());
+            assert!(view.release.is_none(), "nothing waits to commit");
+        });
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
+    fn a_drag_sends_nothing_while_another_request_runs(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| {
+            let mut shell = shell_with(Snapshot::empty());
+            shell.pending = true;
+            shell
+        });
+        let requests = view.read_with(cx, |view, _| view.request_epoch);
+        let fader = cx.debug_bounds("fader-1-monitor").expect("fader");
+        cx.simulate_mouse_down(fader.center(), gpui::MouseButton::Left, gpui::Modifiers::none());
+        view.read_with(cx, |view, _| {
+            assert!(view.preview.is_some(), "the drag follows the pointer");
+            assert!(view.preview_in_flight.is_none(), "but sends no preview yet");
+            assert_eq!(view.request_epoch, requests);
+        });
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
+    fn a_newer_edit_of_the_same_level_replaces_a_waiting_commit(cx: &mut gpui::TestAppContext) {
+        let edit = |source, fader| {
+            MixerEdit::Input(FaderEdit {
+                source: SourceId::new(source),
+                target: MixTarget::Monitor,
+                fader,
+            })
+        };
+        let (view, cx) = cx.add_window_view(|_, _| {
+            let mut shell = shell_with(Snapshot::empty());
+            // A request runs, so edits wait instead of being sent.
+            shell.pending = true;
+            shell.in_flight_fader = Some(edit(2, FaderGain::UNITY));
+            shell
+        });
+        view.update(cx, |view, cx| {
+            view.release = Some(Release { edit: edit(1, FaderGain::MIN), previewed: true });
+            // An edit of another level keeps the waiting commit.
+            view.send_fader(edit(2, FaderGain::MAX), cx);
+            assert!(view.release.is_some());
+            // A wheel notch or key on the same level replaces it.
+            view.send_fader(edit(1, FaderGain::MAX), cx);
+            assert!(view.release.is_none());
+            assert_eq!(view.queued_fader, Some(edit(1, FaderGain::MAX)));
         });
     }
 

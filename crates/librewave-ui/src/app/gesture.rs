@@ -40,7 +40,7 @@ const SCROLL_CONTINUES: Duration = Duration::from_millis(400);
 const NOTCH_RESET: Duration = Duration::from_millis(500);
 
 /// The control that an edit changes.
-fn edit_control(edit: MixerEdit) -> Option<LevelControl> {
+pub(super) fn edit_control(edit: MixerEdit) -> Option<LevelControl> {
     match edit {
         MixerEdit::Input(input) => Some(LevelControl::Fader(input.source, input.target)),
         MixerEdit::Output { target, .. } => Some(LevelControl::Output(target)),
@@ -145,11 +145,13 @@ impl Shell {
         }
     }
 
-    /// Stops a level drag without a commit, after an error or a dialog.
+    /// Stops a level drag without a commit, after an error or a dialog. The
+    /// daemon restores the saved level when the previews stop.
     pub(super) fn cancel_level_gesture(&mut self, cx: &mut gpui::Context<Self>) {
-        if self.level_gesture.take().is_some() {
+        if self.level_gesture.take().is_some() || self.preview.take().is_some() {
             cx.notify();
         }
+        self.preview = None;
     }
 }
 
@@ -170,7 +172,18 @@ pub(super) fn level_gesture(
             enabled.then(|| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal))
         },
         move |bounds, hitbox, window, _| {
-            let Some(hitbox) = hitbox else { return };
+            let Some(hitbox) = hitbox else {
+                // A control that turns disabled during its drag, for example
+                // while a lifecycle operation runs, drops the drag on release.
+                if active {
+                    window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
+                            let _ = shell.update(cx, Shell::cancel_level_gesture);
+                        }
+                    });
+                }
+                return;
+            };
             let wheel_hitbox = hitbox.clone();
             let wheel_shell = shell.clone();
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
