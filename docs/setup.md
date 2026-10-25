@@ -108,7 +108,7 @@ Setup does not start the daemon, enable a unit, open ALSA, create PipeWire objec
 
 The udev rule tags only USB vendor `0fd9`, product `0070` in normal mode with `uaccess`. systemd-logind then grants the user of the active local session access to the device. The grant follows the device through reconnects and reboots while that session is active. The rule stays installed when LibreWave closes.
 
-Setup records the original numeric ACL of each connected Wave:3 node before it installs the rule. It refuses an ACL that `uaccess` would change for another user or widen for another group. Uninstall removes the rule and restores the recorded ACL when the exact node is still connected. It does not guess the permissions of a node that connected later.
+Setup records the original numeric ACL of each connected Wave:3 node before it installs the rule. It refuses an ACL that `uaccess` would change for another user or widen for another group. Uninstall removes the rule and restores the recorded ACL when the exact node is still connected. A node that connected later, for example after a reconnect or a reboot, has no recorded ACL. LibreWave does not change it. If your user still has access to that node after the rule is removed, uninstall stops and names the node. Reconnect the Wave:3, then run `librewavectl uninstall` again. `doctor` checks that every connected node grants access while LibreWave is installed.
 
 If you manage device access yourself, use `setup --device-access existing`. This mode installs the same files without the udev rule and does not ask for your password. `start` still checks that the current user can open the device. Use the same access mode for every upgrade. To change the mode, uninstall first.
 
