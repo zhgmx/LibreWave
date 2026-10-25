@@ -1,7 +1,7 @@
 //! Wave:3 hardware controls. Each change is one typed daemon command that
 //! carries the observed device generation.
 use super::controls::{
-    Tone, action_button, activate, caption, icon, icon_button, identified, tabular,
+    Tone, action_button, activate, caption, icon, icon_button, identified, tabular, tip,
 };
 use super::theme::{
     BODY, BODY_LINE, DANGER, FAINT, FOCUS, HEADING, HEADING_LINE, ICON, ICON_SMALL, INK, LINE,
@@ -465,19 +465,35 @@ const fn headphone_of(control: Wave3Control) -> Option<FixedPointValue> {
 
 fn processing(config: &Wave3ConfigSnapshot, target: Target, cx: &mut Context<Shell>) -> Div {
     let mut row = div().flex().gap(px(SPACE_SM));
-    let controls: [(&str, &str, &'static str, bool, Toggle); 3] = [
+    let controls: [(&str, &str, &'static str, &'static str, bool, Toggle); 3] = [
         (
             "Clipguard",
             "clipguard",
             "shield-check",
+            "Prevents distortion from sudden loud sounds by lowering the microphone gain \
+             before the signal clips.",
             config.clipguard_enable,
             Wave3Control::Clipguard,
         ),
-        ("Low-cut", "low-cut", "wave-sine", config.lowcut_enable, Wave3Control::LowCut),
-        ("Gain Lock", "gain-lock", "lock-simple", config.gain_lock, Wave3Control::GainLock),
+        (
+            "Low-cut",
+            "low-cut",
+            "wave-sine",
+            "Removes low rumble, such as desk bumps, fans, and traffic noise.",
+            config.lowcut_enable,
+            Wave3Control::LowCut,
+        ),
+        (
+            "Gain Lock",
+            "gain-lock",
+            "lock-simple",
+            "Stops the dial on the microphone from changing the gain.",
+            config.gain_lock,
+            Wave3Control::GainLock,
+        ),
     ];
-    for (name, key, glyph, on, control) in controls {
-        row = row.child(toggle_tile(name, key, glyph, on, control, target, cx));
+    for (name, key, glyph, hint, on, control) in controls {
+        row = row.child(toggle_tile(name, key, glyph, on, control, target, cx).tooltip(tip(hint)));
     }
     row
 }
