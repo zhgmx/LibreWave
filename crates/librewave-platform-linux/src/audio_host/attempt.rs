@@ -13,7 +13,7 @@ use super::graph_bridge::ClockBridgeGraphProcessor;
 use super::pipewire::RealPipeWireFacade;
 use super::pipewire_graph::{ActiveGraph, AdapterPortMode, InactiveGraph};
 use super::worker::{
-    CaptureWorker, ParkedPlaybackWorker, PlaybackWorker, WorkerIoPolicy, WorkerPhase,
+    CaptureWorker, ParkedPlaybackWorker, PcmIoError, PlaybackWorker, WorkerIoPolicy, WorkerPhase,
 };
 use super::{
     AlsaFacade, AudioResourceState, EndpointPlan, LinuxAudioError, PcmDirection, PipeWireFacade,
@@ -862,7 +862,7 @@ impl AudioHost for ComposedAudioHost {
         if let Some(worker) = self.playback.take() {
             match worker.park_and_join() {
                 Ok(result) => {
-                    if let Err(error) = result.drop_stream_result {
+                    if let Err(error) = released(result.drop_stream_result) {
                         first.get_or_insert(attempt_error("playback drop", format!("{error:?}")));
                     }
                 }
@@ -872,14 +872,14 @@ impl AudioHost for ComposedAudioHost {
             }
         }
         if let Some(worker) = self.parked_playback.take()
-            && let Err(error) = worker.park_and_drop_stream().drop_stream_result
+            && let Err(error) = released(worker.park_and_drop_stream().drop_stream_result)
         {
             first.get_or_insert(attempt_error("parked playback drop", format!("{error:?}")));
         }
         if let Some(worker) = self.capture.take() {
             match worker.park_and_join() {
                 Ok(result) => {
-                    if let Err(error) = result.drop_stream_result {
+                    if let Err(error) = released(result.drop_stream_result) {
                         first.get_or_insert(attempt_error("capture drop", format!("{error:?}")));
                     }
                 }
@@ -908,6 +908,15 @@ impl AudioHost for ComposedAudioHost {
         }
         self.cleanup_failed = first.is_some();
         first.map_or(Ok(()), Err)
+    }
+}
+
+/// A removed device has no stream left to stop, and the handle is closed
+/// after the drop either way. Only other drop errors leave a resource open.
+fn released(result: Result<(), PcmIoError>) -> Result<(), PcmIoError> {
+    match result {
+        Err(PcmIoError::Disconnected) => Ok(()),
+        other => other,
     }
 }
 
@@ -1080,6 +1089,10 @@ pub(in crate::audio_host) mod tests {
         }
         fn drop_stream(&mut self) -> Result<(), PcmIoError> {
             record(&self.calls, "drop capture");
+            if matches!(self.mode, CaptureMode::ImmediateFault) {
+                // ALSA reports ENODEV for a stream on a removed device.
+                return Err(PcmIoError::Disconnected);
+            }
             Ok(())
         }
     }
@@ -1313,6 +1326,13 @@ pub(in crate::audio_host) mod tests {
             ]
         );
         assert!(host.resource_state().published_endpoints.is_empty());
+        assert_ne!(
+            lifecycle.state(),
+            crate::audio_lifecycle::LifecycleState::Degraded(
+                crate::audio_lifecycle::DegradedState::TeardownFailed
+            ),
+            "a removed device's stream counts as released"
+        );
     }
 
     #[test]
