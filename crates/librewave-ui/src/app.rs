@@ -148,6 +148,8 @@ struct Shell {
     /// pause while it does not.
     window_visibility: gpui::WindowVisibility,
     visibility_subscription: Option<gpui::Subscription>,
+    /// Reads the daemon state again when the system wakes from sleep.
+    wake_subscription: Option<gpui::Subscription>,
     /// The daemon IPC socket for status, mixer, and device requests.
     socket: std::path::PathBuf,
     poll_in_flight: bool,
@@ -212,6 +214,7 @@ impl Shell {
             scrollbar_grab: None,
             window_visibility: gpui::WindowVisibility::Visible,
             visibility_subscription: None,
+            wake_subscription: None,
             socket: configured_socket_path(),
             poll_in_flight: false,
             request_epoch: 0,
@@ -228,6 +231,15 @@ impl Shell {
             preview: None,
         };
         shell.send(Command::GetStatus, cx);
+        let woken = cx.weak_entity();
+        shell.wake_subscription = Some(cx.on_system_wake(move |cx| {
+            // Device and audio state can change during sleep. Do not wait
+            // for the next poll.
+            let _ = woken.update(cx, |this, cx| {
+                this.poll_status(cx);
+                this.poll_meters(cx);
+            });
+        }));
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_millis(100)).await;
@@ -820,6 +832,7 @@ mod tests {
             scrollbar_grab: None,
             window_visibility: gpui::WindowVisibility::Visible,
             visibility_subscription: None,
+            wake_subscription: None,
             // Tests never reach the session daemon.
             socket: std::env::temp_dir().join("librewave-ui-tests-no-daemon.sock"),
             poll_in_flight: false,
