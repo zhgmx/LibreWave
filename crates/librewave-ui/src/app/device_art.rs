@@ -91,19 +91,26 @@ const HEADPHONE_TRANSITIONS: [(i32, i32); 7] = [
 const MIX_POSITIONS: [usize; 21] = [6, 5, 5, 5, 4, 4, 4, 3, 3, 3, 3, 2, 2, 2, 1, 1, 1, 0, 0, 0, 0];
 
 fn level_pattern(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) -> Option<[bool; 7]> {
-    let count = match config.volume_select {
-        VolumeSelection::Microphone => microphone_level_count(config, api),
-        VolumeSelection::Headphone => headphone_level_count(config, api),
-        VolumeSelection::Mix => return mix_level_pattern(config, api),
+    let mut pattern = match config.volume_select {
+        VolumeSelection::Microphone => microphone_level_count(config, api).map(filled),
+        VolumeSelection::Headphone => headphone_level_count(config, api).map(filled),
+        VolumeSelection::Mix => mix_level_pattern(config, api),
     }?;
-    Some(std::array::from_fn(|index| index < count))
+    // LED flip mirrors the seven level LEDs for an upside-down microphone.
+    if config.leds_flip {
+        pattern.reverse();
+    }
+    Some(pattern)
+}
+
+fn filled(count: usize) -> [bool; 7] {
+    std::array::from_fn(|index| index < count)
 }
 
 fn mix_level_pattern(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) -> Option<[bool; 7]> {
     if api != Some(ApiVersion::new(5, 4))
         || config.volume_select != VolumeSelection::Mix
         || config.all_leds_off
-        || config.leds_flip
         || config.direct_monitor.fractional_bits != 8
         || !(0..=25600).contains(&config.direct_monitor.raw)
         || config.direct_monitor.raw % 1280 != 0
@@ -119,7 +126,6 @@ fn headphone_level_count(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) 
     if api != Some(ApiVersion::new(5, 4))
         || config.volume_select != VolumeSelection::Headphone
         || config.all_leds_off
-        || config.leds_flip
         || config.headphone_volume.fractional_bits != 8
     {
         return None;
@@ -148,7 +154,6 @@ fn microphone_level_count(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>)
     if api != Some(ApiVersion::new(5, 4))
         || config.volume_select != VolumeSelection::Microphone
         || config.all_leds_off
-        || config.leds_flip
         || config.input_gain.fractional_bits != 8
     {
         return None;
@@ -440,7 +445,6 @@ mod tests {
         config.headphone_volume.raw = -1152;
         for mutation in [
             |config: &mut Wave3ConfigSnapshot| config.all_leds_off = true,
-            |config: &mut Wave3ConfigSnapshot| config.leds_flip = true,
             |config: &mut Wave3ConfigSnapshot| config.headphone_volume.fractional_bits = 7,
             |config: &mut Wave3ConfigSnapshot| config.headphone_volume.raw = -15361,
             |config: &mut Wave3ConfigSnapshot| config.headphone_volume.raw = 1,
@@ -501,7 +505,6 @@ mod tests {
         config.direct_monitor.raw = 12800;
         for mutation in [
             |config: &mut Wave3ConfigSnapshot| config.all_leds_off = true,
-            |config: &mut Wave3ConfigSnapshot| config.leds_flip = true,
             |config: &mut Wave3ConfigSnapshot| config.direct_monitor.fractional_bits = 7,
             |config: &mut Wave3ConfigSnapshot| config.direct_monitor.raw = -1,
             |config: &mut Wave3ConfigSnapshot| config.direct_monitor.raw = 25601,
@@ -516,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn unverified_modes_versions_and_flipped_patterns_stay_unknown() {
+    fn unverified_modes_and_versions_stay_unknown() {
         let mut config = config();
         config.input_gain.raw = 10240;
         for api in [None, Some(ApiVersion::new(5, 3)), Some(ApiVersion::new(5, 5))] {
@@ -529,7 +532,6 @@ mod tests {
         config.volume_select = VolumeSelection::Microphone;
         for mutation in [
             |config: &mut Wave3ConfigSnapshot| config.all_leds_off = true,
-            |config: &mut Wave3ConfigSnapshot| config.leds_flip = true,
             |config: &mut Wave3ConfigSnapshot| config.input_gain.fractional_bits = 7,
             |config: &mut Wave3ConfigSnapshot| config.input_gain.raw = -1,
             |config: &mut Wave3ConfigSnapshot| config.input_gain.raw = 10241,
@@ -560,6 +562,25 @@ mod tests {
             assert_eq!(observation["positions"], serde_json::json!([1, 2, 3]));
             assert_eq!(lights(Some(&config), Some(ApiVersion::new(5, 4)), 360.).len(), 5);
             assert!(level_hint(Some(&config), Some(ApiVersion::new(5, 4))).is_none());
+        }
+    }
+
+    #[test]
+    fn led_flip_mirrors_the_level_leds_in_every_mode() {
+        let mut config = config();
+        config.input_gain.raw = 4096;
+        config.headphone_volume.raw = -1152;
+        config.direct_monitor.raw = 12800;
+        for target in
+            [VolumeSelection::Microphone, VolumeSelection::Headphone, VolumeSelection::Mix]
+        {
+            config.volume_select = target;
+            config.leds_flip = false;
+            let mut expected =
+                level_pattern(&config, Some(ApiVersion::new(5, 4))).expect("measured pattern");
+            expected.reverse();
+            config.leds_flip = true;
+            assert_eq!(level_pattern(&config, Some(ApiVersion::new(5, 4))), Some(expected));
         }
     }
 
