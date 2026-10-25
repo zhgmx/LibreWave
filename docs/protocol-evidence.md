@@ -52,7 +52,15 @@ The transaction path admits only Wave:3 API 5.3 and 5.4. It changes one semantic
 
 Physical Wave:3 API 5.4 reads can report microphone gain between the 0.5 dB write steps. One observed raw Q8.8 value is 4726 (about 18.46 dB). LibreWave accepts any in-range Q8.8 gain on a read and keeps its exact bytes when it writes another field. A gain write must be on a 0.5 dB step.
 
-Physical Wave:3 API 5.4 tests verified Low-cut readback and the transactions for microphone gain, microphone mute, headphone level, monitor balance, and knob target. Clipguard, headphone mute, the LED flags, and Gain Lock are writable from the recovered schema alone. They have no physical validation. Each physical test plan must name the field, original value, requested value, readback, and safe restoration. The LED observations below establish display behavior for the stated conditions only. They do not establish audio attenuation, monitor feed weights, or mute timing.
+These physical effects are not verified:
+
+- The all-LEDs-off flag. With it on, the LEDs showed no visible change.
+- The LED flip effect on the knob direction.
+- The audio effect of Clipguard. The device has no Clipguard indicator.
+- Gain Lock rejection of input-volume requests from the operating system.
+- Audio attenuation, monitor feed weights, and mute timing.
+
+The LED observations below apply to the stated conditions only. Each physical test plan must name the field, original value, requested value, readback, and safe restoration.
 
 ## Wave:3 level LEDs
 
@@ -66,13 +74,13 @@ The configuration supplies these candidate display values:
 | Headphone | `/config/headphone_volume` | -60 to 0 dB |
 | Mix | `/config/direct_monitor` | 0 to 100 percent |
 
-The recovered `leds_flip` description reverses the LEDs and knob for an inverted microphone. This does not establish the segment thresholds or the mix direction. Do not interpret the reserved bytes at offsets 2 and 3 as an LED pattern.
+The recovered `leds_flip` description reverses the LEDs and knob for an inverted microphone. With the flag on, the seven level LEDs show the same pattern mirrored, starting from the other side. Do not interpret the reserved bytes at offsets 2 and 3 as an LED pattern.
 
 The evidence is pinned to the WaveAPI framework from Wave Link 3.2.2 build 2896, SHA-256 `0c9541ff37662b4e35538bd7040d0706783cce132d42fca2c531322e85149860`. A static x86-64 inspection of `LWT::Wave3Device::open(bool)` at VM address `0xb16120` shows that it passes the three-entry `LWT::Wave3::known_apis` table at `0xc5bdc0` to `lookupSessionAPI` and then initializes tick handling. The normalized message and field catalogs from this inspection describe those API entries. The inspection did not load or execute the framework.
 
 The application executable from the same build, SHA-256 `6435476d1c041831a09bc5501ec0820603c1b9f9b57cbe1025868405605d197c`, contains indicator paths for newer devices. Those paths are absent from the original Wave:3 schemas and cannot define its seven level LEDs. A bounded static search did not find an original Wave:3 segment calculation. The hashes identify the analyzed inputs. They do not verify vendor signatures or physical behavior.
 
-These facts support the inference that the device derives the display from the selected value and does not report a segment pattern. Physical Wave:3 API 5.4 tests bracket the Microphone-mode and Headphone-mode count transitions on the 0.5 dB write grid. Mix-mode tests give one LED position at each 5 percent value. Fractional thresholds, flip behavior, and most mute states are unverified. The application shows the measured brackets and positions. It leaves the dots dark inside unmeasured fractional intervals and for unverified states. Software audio peaks cannot replace this evidence.
+These facts support the inference that the device derives the display from the selected value and does not report a segment pattern. Physical Wave:3 API 5.4 tests bracket the Microphone-mode and Headphone-mode count transitions on the 0.5 dB write grid. Mix-mode tests give one LED position at each 5 percent value. Fractional thresholds are unverified. The application shows the measured brackets and positions. It leaves the dots dark inside unmeasured fractional intervals and for unverified states. Software audio peaks cannot replace this evidence.
 
 ### Observed Microphone-mode LED counts
 
@@ -114,7 +122,17 @@ Device: Wave:3, USB `0fd9:0070`, USB `bcdDevice` `0x0124`, API 5.4. Configuratio
 
 The daemon observes a physical tap-mute. CLI hardware-mute commands use the same daemon path as the UI and change the physical ring. PipeWire source volume stays at 0.40 without software mute. Hardware mute and software mute are separate values. The final hardware mute is off, and the raw baseline above is preserved.
 
-The [mute data](../crates/librewave-ui/tests/fixtures/wave3-api5-4-mute-led-positions.json) has three LED observations. Muted level positions are verified only at exact gain raw 4096. Audio attenuation, mute timing, and native UI pointer input are unverified. The test generated no audio.
+The [mute data](../crates/librewave-ui/tests/fixtures/wave3-api5-4-mute-led-positions.json) has three LED observations at exact gain raw 4096.
+
+Visual observations on the same device give the effect of each hardware mute on the level LEDs. They have no recorded raw values.
+
+| Selector | Microphone mute | Headphone mute |
+| --- | --- | --- |
+| Microphone | Ring red, level LEDs unchanged | Level LEDs unchanged |
+| Headphone | Ring red, level LEDs unchanged | All level LEDs off |
+| Mix | Ring red, level LEDs unchanged | Level LEDs unchanged |
+
+Audio attenuation, mute timing, and native UI pointer input are unverified. The tests generated no audio.
 
 ### Observed Headphone-mode LED counts
 
@@ -130,7 +148,7 @@ Device and API: the Wave:3 API 5.4 above. Selector: Headphone. Microphone mute, 
 | 6 | -3.5 dB: 5 | -3.0 dB: 6 |
 | 7 | -0.5 dB: 6 | 0.0 dB: 7 |
 
-At -60 dB, the count is 0. At -4.5 dB, the count is 5. At 0 dB, the count is 7. Rising and falling observations agree at every tested boundary. These are transition brackets, not exact fractional thresholds. Fractional cutoffs, mute effects, and flipped patterns are unverified.
+At -60 dB, the count is 0. At -4.5 dB, the count is 5. At 0 dB, the count is 7. Rising and falling observations agree at every tested boundary. These are transition brackets, not exact fractional thresholds. Fractional cutoffs are unverified.
 
 The [headphone data](../crates/librewave-ui/tests/fixtures/wave3-api5-4-headphone-led-counts.json) has 50 observations with raw values and LED positions. Final headphone level: raw -1152 (-4.5 dB). Final selector: Microphone. Unrelated controls match the baseline. The test generated no audio.
 
@@ -150,7 +168,7 @@ Mix lights one level LED. The LED moves from right to left as `/config/direct_mo
 | 70, 75, 80 percent | 2 |
 | 85, 90, 95, 100 percent | 1 (leftmost) |
 
-Rising and falling observations agree at every tested position change. Values between the tested 5 percent points, mute effects, flipped patterns, and audio feed weights at 0 and 100 percent are unverified. The test generated no audio.
+Rising and falling observations agree at every tested position change. Values between the tested 5 percent points and audio feed weights at 0 and 100 percent are unverified. The test generated no audio.
 
 The [blend data](../crates/librewave-ui/tests/fixtures/wave3-api5-4-blend-led-positions.json) has 33 observations. Final monitor balance: raw 0 (0 percent). Final selector: Microphone. Unrelated controls match the baseline. Software source and sink volumes stay at 0.40 and 0.72.
 

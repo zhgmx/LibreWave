@@ -198,15 +198,6 @@ cargo xtask dev-uninstall
 
 `xtask` does not install the desktop application. If a desktop installation exists, use the release steps above.
 
-## Tested behavior
+## Limits
 
-On Fedora 44 with KDE Plasma and a Wave:3 with API 5.4:
-
-- Repeated launches reused one desktop service and one daemon.
-- Adding and removing an input three times while audio ran kept the existing graph node IDs. Rename and reorder ran during playback.
-- Saved application rules handled a relaunch, two concurrent streams, and fallback to System after the assigned input was removed.
-- A quiet generated tone reached the monitor mix with no silent 100 ms window during the edits. This measures signal continuity, not what a listener hears.
-- Audio recovered about 1.2 s after a daemon restart and about 3.1 s after a PipeWire and WirePlumber restart. Saved assignments and hardware control values survived both.
-- In a 118.44 s monitor capture, every 100 ms window after the start and end were trimmed contained the test signal. Closing and opening the window during playback kept the same daemon and did not interrupt the signal.
-
-Physical USB reconnect, sleep, a real logout and login, and long runs are not yet tested.
+Recovery after sleep and after a logout and login is not verified. Long playback runs are not verified.

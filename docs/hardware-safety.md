@@ -26,7 +26,7 @@ A device read has an exact expected request and a maximum response length. A sho
 
 ### Reversible control writes
 
-The write allowlist is the `Wave3ControlChange` set in `librewave-protocol`. It covers the eleven fields of the Wave:3 API 5.3 and 5.4 `/config` message: microphone gain, microphone mute, Clipguard, Low-cut, headphone level, headphone mute, direct monitor balance, knob target, all-LEDs-off, LED flip, and Gain Lock. A field enters the allowlist only after its exact device and API schema is verified. [Protocol evidence](protocol-evidence.md) states which fields also have physical validation.
+The write allowlist is the `Wave3ControlChange` set in `librewave-protocol`. It covers the eleven fields of the Wave:3 API 5.3 and 5.4 `/config` message: microphone gain, microphone mute, Clipguard, Low-cut, headphone level, headphone mute, direct monitor balance, knob target, all-LEDs-off, LED flip, and Gain Lock. A field enters the allowlist only after its exact device and API schema is verified. [Protocol evidence](protocol-evidence.md) lists the physical effects that are not verified.
 
 Another normal control write can reverse every allowlisted write. A physical integration test must preserve the original value.
 
@@ -100,6 +100,8 @@ Logs and fixtures must not contain USB serial numbers, user names, application t
 
 ## Control ownership
 
-The physical device owns microphone gain and mute, headphone level and mute, direct monitor balance, and knob target. Admission and reconnect read these controls and do not restore saved values, so adjustments made while the daemon was stopped stay in place. An explicit client command still uses the generation check and complete readback verification.
+The physical device owns microphone gain and mute, headphone level and mute, direct monitor balance, and knob target. Admission reads these controls and does not restore saved values, so adjustments made while the daemon was stopped stay in place. An explicit client command still uses the generation check and complete readback verification.
+
+The ALSA restore service writes its saved card volumes when the Wave:3 reconnects. When the daemon sees the device disconnect, it keeps the last microphone gain and mute and headphone level and mute that it read. After the device reconnects, the daemon writes back each of these values that changed, through the normal transaction with readback. A level between 0.5 dB write steps, such as a gain set with the dial, is written as the nearest step. These restored values do not become managed state. A reconnect while the daemon is stopped keeps the values that ALSA wrote.
 
 On reconnect, LibreWave restores only the non-level settings that a client changed through LibreWave: Clipguard, Low-cut, the LED settings, and Gain Lock. A pending or ambiguous write blocks new hardware writes until recovery resolves it.

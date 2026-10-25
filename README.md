@@ -62,7 +62,7 @@ Do not use a development build to try undocumented writes on another person's ha
 
 ## Status
 
-LibreWave is in beta. It is tested on Fedora 44 with KDE Plasma and a Wave:3 with API 5.4. Physical reconnect, sleep, and login recovery are not yet tested. The [roadmap](docs/roadmap.md) lists the remaining work.
+LibreWave is in beta. It is tested on Fedora 44 with KDE Plasma and a Wave:3 with API 5.4. Recovery after sleep and login is not verified. The [roadmap](docs/roadmap.md) lists the remaining work.
 
 Releases are source builds. Native RPM, Arch, and Debian packages may follow. Flatpak and AppImage are outside the project scope.
 

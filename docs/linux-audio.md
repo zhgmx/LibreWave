@@ -1,6 +1,6 @@
 # Linux audio integration
 
-Status: `librewaved` composes the ALSA workers, the independent-clock bridge, and the PipeWire graph into one audio attempt. A fresh daemon leaves audio inactive. Accepted audio intent survives a daemon restart. The CLI and GPUI start the installed service, can suspend one selected user fragment, and restore desktop ownership on stop. Private PipeWire tests use fake PCMs. A bounded Wave:3 run verified startup, software mixing, application moves, and exact restoration through `librewavectl stop`. Complete recovery, latency, and long-duration validation are not done.
+Status: `librewaved` composes the ALSA workers, the independent-clock bridge, and the PipeWire graph into one audio attempt. A fresh daemon leaves audio inactive. Accepted audio intent survives a daemon restart. The CLI and GPUI start the installed service, can suspend one selected user fragment, and restore desktop ownership on stop. Recovery after sleep and login, latency, and long runs are not verified.
 
 ## Reference system
 
@@ -46,7 +46,7 @@ After the lifecycle installs or removes this rule, it reloads the udev rules. It
 
 The rule does not use `MODE="0666"`. It does not match a USB class or interface, and it does not grant access to DFU or another product mode. `snd_usb_audio` stays bound during normal operation.
 
-The installation manifest records the original ACLs of the connected nodes before the access rule applies. Removal restores those exact permissions after the udev refresh. A changed ACL or a new node incarnation stops cleanup and keeps the ownership records. See [Setup and removal](setup.md) for the connection limits.
+The installation manifest records the original ACLs of the connected nodes before the access rule applies. Removal restores those exact permissions after the udev refresh. A changed ACL stops cleanup and keeps the ownership records. A node that connected after setup, for example after a reconnect or a reboot, has no record. Setup and removal leave its permissions as they are. See [Setup and removal](setup.md) for the connection limits.
 
 ## Startup sequence
 
@@ -297,23 +297,17 @@ The final mapping must also match the observed Wave Link behavior on Windows and
 
 `librewavectl doctor` reports graph inspection as blocked, because the CLI never opens PipeWire directly. The lifecycle contract in [Setup, development installs, and removal](setup.md) governs installation, rollback, diagnostics, and removal.
 
-## Open validation
+## Not verified
 
-The ASRC bridge and both ALSA worker directions pass offline tests, and the composed host passes private PipeWire tests. Support claims need all of these results on the reference system:
+- Recovery after sleep and login.
+- Native ALSA partial I/O and the exact PCM status values at a disconnect.
+- Latency and long playback runs.
 
-- `librewaved` owns the physical capture and playback PCMs directly.
-- Capture consumption produces confirmed frames before playback opens.
-- Native ALSA capture and playback status behavior matches the safe API assumptions in the typed observations.
-- PipeWire source and sink directions come from `librewave-core`, and endpoint audio reaches the daemon-owned mixer.
-- No helper, null sink, or physical Wave node appears as a desktop device.
-- Restart, reconnect, sleep, login, teardown, and rollback tests pass.
-- Software volume changes cannot write microphone gain or headphone hardware level.
+Do not claim support for these cases until they are verified.
 
-Native validation must confirm PCM timestamp, availability, delay, state, partial I/O, and disconnect behavior. `EPIPE` and `ESTRPIPE` are terminal attempt faults. Recovery releases the failed attempt and uses the full capture-first startup sequence.
+When a device is removed, ALSA reports `ENODEV` for the open streams. Teardown treats such a stream as released. The LibreWave endpoints disappear until audio recovers, and some applications pause playback when their output disappears. They stay paused after recovery until the user resumes them. `EPIPE` and `ESTRPIPE` are terminal attempt faults. Recovery releases the failed attempt and uses the full capture-first startup sequence.
 
 A confirmed PipeWire core disconnect releases the local graph without waiting for a reply from the disconnected server. Teardown still destroys the local filter and waits for callback quiescence. A timeout without a confirmed disconnect is a cleanup failure and blocks a replacement attempt.
-
-Do not claim Linux audio backend support until these tests pass.
 
 ## Acceptance tests
 

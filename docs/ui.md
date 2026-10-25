@@ -142,12 +142,10 @@ Every text field uses one shared control with the button height and corner radiu
 
 `librewavectl mixer show` prints the generation, the inputs, and the saved rules.
 
-## Tests and limits
+## Limits
 
-GPUI fixture tests cover command mapping, pointer geometry, slider snapping, layouts from 850 to 1920 px wide, keyboard focus, the Settings dialog, the confirmation dialog, the Edit input pop-up, and cancellation of queued fader edits.
+Effects and output destination selection are not implemented.
 
-On a Wave:3 with API 5.4, native checks verified the connected view, channel fader movement, linked levels, separate mutes, Monitor output level and mute, physical selector and tap-mute updates, and headphone playback. CLI tests verified software output mute and level and application moves between System and a named input.
-
-Native drag-and-drop reordering, keyboard control, and Stream output interaction are not yet verified. Effects and output destination selection are not implemented.
+## Dependencies
 
 The application uses upstream Zed GPUI and `gpui_platform` from Zed tag `v0.233.9`, commit `236e6ddf54e0763d0343f4d3e369d2ae00fe9670`, with Wayland and X11 backends. The GPUI tests are behind the `gpui-tests` feature. Geist fonts and Phosphor icons are bundled with their license notices under `crates/librewave-ui/assets/`. No vendor artwork is bundled.

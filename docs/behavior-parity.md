@@ -1,6 +1,6 @@
 # Wave Link behavior parity
 
-Status: compatibility research is required. The Gain Lock contract and the Windows endpoint feedback paths are recovered. The exact physical and user-interface feedback still needs validation.
+Status: compatibility research is required. The exact physical and user-interface feedback of Gain Lock and of the Windows endpoint paths is not verified.
 
 ## Goal
 
@@ -119,10 +119,10 @@ A read-only live inspection of the Wave:3 ALSA card found two simple control gro
 
 These ranges match the Wave:3 microphone gain and headphone level ranges. LibreWave treats these card controls as hardware aliases. They are not software endpoint volumes, and LibreWave endpoints must not use them for desktop volume or mute.
 
-## Gain across reconnect
+## Levels across reconnect
 
-One physical observation reported 18.4609375 dB before reconnect and 16 dB after reconnect. The device value uses eight fractional bits. Regression tests keep the exact raw gain during a knob-target change and do not put an unmanaged readback value into desired hardware state. These tests found no LibreWave rounding path that explains the change.
+`alsa-state.service` runs `alsactl` to save the card controls and to restore them when a card is added. For the Wave:3, `Mic Capture Volume` and `PCM Playback Volume` are the microphone gain and the headphone level.
 
-On the reference system, the saved ALSA microphone capture volume is 32 on a 0 through 80 range. Its dB range is 0 through 4000 hundredths of a dB, so the saved value is 16 dB. The installed ALSA restore unit runs `alsactl restore`. The ALSA udev rule also runs restore when a sound control device is added. The restore unit was inactive during inspection. That does not exclude the separate udev path on reconnect.
+On the reference system, the saved values are 32 (16 dB) and 73 (−23.5 dB). Before a reconnect, the device reported a headphone level of −6 dB. About 1.6 s after the device returned, the first daemon read reported −23.5 dB. An earlier reconnect changed a microphone gain of 18.4609375 dB to 16 dB. ALSA restoration is the writer.
 
-ALSA restoration is therefore a plausible cause, but this evidence does not prove that ALSA wrote the change. A controlled reconnect trace must identify the writer before any change to ALSA persistence. LibreWave setup and audio ownership do not disable ALSA restoration or change its saved state.
+LibreWave does not change ALSA persistence. The daemon writes back the levels it read before the disconnect, as [Hardware safety](hardware-safety.md) describes. If ALSA writes after the daemon, the ALSA value stays.
