@@ -1503,20 +1503,19 @@ pub(crate) fn persist_mixer_profile<H: crate::audio::SupervisedAudioHost>(
 }
 
 /// The level controls that ALSA can overwrite on reconnect, where they
-/// differ from the levels before the disconnect. A level that is not on the
-/// write grid, such as a gain set with the dial, is not rounded. It stays as
-/// the device reports it.
+/// differ from the levels before the disconnect. A level between write steps,
+/// such as a gain set with the dial, is rounded to the nearest 0.5 dB step.
 fn levels_to_restore(
     observed: &Wave3ConfigSnapshot,
     before: &Wave3ConfigSnapshot,
 ) -> Vec<Wave3Control> {
+    let gain = nearest_step(before.input_gain);
+    let headphone = nearest_step(before.headphone_volume);
     [
-        (observed.input_gain != before.input_gain)
-            .then_some(Wave3Control::InputGain(before.input_gain)),
+        (observed.input_gain != gain).then_some(Wave3Control::InputGain(gain)),
         (observed.input_mute != before.input_mute)
             .then_some(Wave3Control::MicrophoneMute(before.input_mute)),
-        (observed.headphone_volume != before.headphone_volume)
-            .then_some(Wave3Control::HeadphoneLevel(before.headphone_volume)),
+        (observed.headphone_volume != headphone).then_some(Wave3Control::HeadphoneLevel(headphone)),
         (observed.headphone_mute != before.headphone_mute)
             .then_some(Wave3Control::HeadphoneMute(before.headphone_mute)),
     ]
@@ -1524,6 +1523,14 @@ fn levels_to_restore(
     .flatten()
     .filter(|control| control::validate_control(*control).is_ok())
     .collect()
+}
+
+/// Rounds a Q8.8 level to the nearest 0.5 dB write step (raw multiple of 128).
+fn nearest_step(value: librewave_core::FixedPointValue) -> librewave_core::FixedPointValue {
+    if value.fractional_bits != 8 {
+        return value;
+    }
+    librewave_core::FixedPointValue { raw: (value.raw + 64).div_euclid(128) * 128, ..value }
 }
 
 fn controls_to_restore(

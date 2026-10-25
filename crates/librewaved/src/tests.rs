@@ -996,17 +996,23 @@ fn reconnect_puts_back_the_levels_from_before_the_disconnect() {
     alsa.input_gain.raw = 4096;
     alsa.headphone_volume.raw = -6016;
     let mut before = alsa.clone();
-    before.input_gain.raw = 4726; // Set with the dial, between write steps.
+    before.input_gain.raw = 4726; // 18.46 dB, set with the dial between write steps.
     before.headphone_volume.raw = -1536;
     before.headphone_mute = true;
-    let mut restored = alsa.clone();
-    restored.headphone_volume = before.headphone_volume;
-    let mut both = restored.clone();
+    let mut gain = alsa.clone();
+    gain.input_gain.raw = 4736; // 18.5 dB, the nearest write step.
+    let mut headphone = gain.clone();
+    headphone.headphone_volume = before.headphone_volume;
+    let mut both = headphone.clone();
     both.headphone_mute = true;
     let mut h = harness(
         DesiredState::default(),
         alsa.clone(),
-        vec![ConnectionOutcome::Applied(restored), ConnectionOutcome::Applied(both.clone())],
+        vec![
+            ConnectionOutcome::Applied(gain),
+            ConnectionOutcome::Applied(headphone),
+            ConnectionOutcome::Applied(both.clone()),
+        ],
         vec![],
     );
     h.daemon.observe_controls(Instant::now());
@@ -1025,10 +1031,14 @@ fn reconnect_puts_back_the_levels_from_before_the_disconnect() {
     assert_eq!(
         *h.calls.borrow(),
         vec![
+            Wave3Control::InputGain(librewave_core::FixedPointValue {
+                raw: 4736,
+                fractional_bits: 8
+            }),
             Wave3Control::HeadphoneLevel(before.headphone_volume),
             Wave3Control::HeadphoneMute(true),
         ],
-        "the off-grid dial gain is not rounded"
+        "the dial gain rounds to the nearest write step"
     );
     assert_eq!(h.daemon.snapshot().devices[0].admission.config(), Some(&both));
     assert_eq!(*h.saves.borrow(), 0, "restored levels do not become managed state");
