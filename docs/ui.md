@@ -262,8 +262,18 @@ under `crates/librewave-ui/assets/`. No vendor application artwork is bundled.
 
 New profiles contain Microphone, System, Game, Chat, and Music. Microphone monitoring starts muted to avoid duplicate direct monitoring. Existing profiles keep their channels and levels. Channel IDs do not change when a channel is renamed or reordered. A removed ID is not reused.
 
-Open a channel’s application panel to rename a software channel or move a channel left or right. Save a rule from the active application list, or enter its exact desktop ID or executable name. The panel lists all saved rules, including applications that are closed. Use **Move here** to change a rule’s channel, or **Forget assignment** to remove it. **Close** or Escape discards unsaved text. Deleting its channel changes the saved destination to System. Forgetting a rule stops future enforcement; it does not move a current stream. WirePlumber may retain its last stream target.
+Select the application button in a channel heading to open the channel menu. The menu opens over the mixer and does not move other controls. A click outside the menu, the close button, or Escape closes it and discards unsaved text.
 
-The CLI supports `mixer rename <source> <generation> <name>`, `mixer move <source> <generation> <zero-based-position>`, and `apps assign <generation> <desktop|executable> <identity> <source|forget>`. `mixer show` lists saved rules. Assignment success confirms that the rule was saved. The application panel reports routing progress separately.
+- The menu heading renames a software channel and moves a channel left or right.
+- **Assigned here** lists the saved rules for this channel, including rules for closed applications.
+- **Active** lists playing applications that this channel does not have yet.
+- **All applications** lists the applications that have a visible desktop entry. LibreWave reads the entries from the XDG data directories and the Flatpak export directories. It reads them once, when a menu first opens.
+- Select a row to save a rule for this channel. Select a row under **Assigned here** to forget its rule. A row assigned to another channel names that channel; selecting it moves the rule here.
+- The field at the bottom filters the list. To save a rule that the list does not show, type the identity, choose **App ID** or **Executable** with the button before the field, and select the plus button.
+- The folder button opens a file picker. A `.desktop` file fills in its desktop ID. Any other file fills in its file name as an executable.
+
+Deleting its channel changes the saved destination to System. Forgetting a rule stops future enforcement; it does not move a current stream. WirePlumber may retain its last stream target. The menu shows routing progress, and it counts playing streams that name no application.
+
+The CLI supports `mixer rename <source> <generation> <name>`, `mixer move <source> <generation> <zero-based-position>`, and `apps assign <generation> <desktop|executable> <identity> <source|forget>`. `mixer show` lists saved rules. Assignment success confirms that the rule was saved. The channel menu reports routing progress separately.
 
 **Mixer ready** means that the daemon has admitted the device and activated its graph. It does not assert that a playback application is streaming or that a signal is audible. The device stage reports device access. The meters report recent signal levels. Lifecycle progress names the start or stop operation; a fader edit does not replace the mixer state label.

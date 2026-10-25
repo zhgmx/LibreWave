@@ -97,6 +97,7 @@ impl Shell {
             }))
             .child(self.titlebar(cx))
             .child(body)
+            .when(self.application_input.is_some(), |view| view.child(channel_backdrop(cx)))
             .when_some(self.settings_modal.as_ref(), |view, modal| {
                 view.child(self.settings_overlay(modal, cx))
             })
@@ -293,4 +294,21 @@ pub(super) fn error_banner(error: String, dismissible: bool, cx: &mut Context<Sh
                 },
             ))
         })
+}
+
+/// A click outside the channel pop-up closes it and does nothing else.
+fn channel_backdrop(cx: &mut Context<Shell>) -> impl IntoElement {
+    div()
+        .id("channel-menu-backdrop")
+        .absolute()
+        .inset_0()
+        .occlude()
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                this.close_channel(cx);
+                cx.stop_propagation();
+            }),
+        )
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
 }

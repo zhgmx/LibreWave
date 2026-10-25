@@ -4,7 +4,11 @@ use std::borrow::Cow;
 pub(super) struct Assets;
 
 const ICONS: &[(&str, &[u8])] = &[
+    ("app-window", include_bytes!("../assets/icons/app-window.svg")),
     ("arrow-clockwise", include_bytes!("../assets/icons/arrow-clockwise.svg")),
+    ("caret-left", include_bytes!("../assets/icons/caret-left.svg")),
+    ("caret-right", include_bytes!("../assets/icons/caret-right.svg")),
+    ("check", include_bytes!("../assets/icons/check.svg")),
     ("copy", include_bytes!("../assets/icons/copy.svg")),
     ("folder-open", include_bytes!("../assets/icons/folder-open.svg")),
     ("headphones", include_bytes!("../assets/icons/headphones.svg")),
@@ -24,6 +28,7 @@ const ICONS: &[(&str, &[u8])] = &[
     ("stop", include_bytes!("../assets/icons/stop.svg")),
     ("stream", include_bytes!("../assets/icons/stream.svg")),
     ("system", include_bytes!("../assets/icons/system.svg")),
+    ("terminal-window", include_bytes!("../assets/icons/terminal-window.svg")),
     ("warning-circle", include_bytes!("../assets/icons/warning-circle.svg")),
     ("wave-sine", include_bytes!("../assets/icons/wave-sine.svg")),
     ("wrench", include_bytes!("../assets/icons/wrench.svg")),

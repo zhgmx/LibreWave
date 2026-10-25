@@ -93,6 +93,7 @@ struct Shell {
     channel_name: Option<gpui::Entity<text_field::TextField>>,
     assignment_name: Option<gpui::Entity<text_field::TextField>>,
     assignment_kind: applications::RuleKind,
+    installed_applications: applications::Installed,
     meters: Option<librewave_core::MeterFrame>,
     meter_error: Option<String>,
     meter_request_epoch: Option<u64>,
@@ -146,6 +147,7 @@ impl Shell {
             channel_name: None,
             assignment_name: None,
             assignment_kind: applications::RuleKind::Desktop,
+            installed_applications: applications::Installed::NotRead,
             meters: None,
             meter_error: None,
             meter_request_epoch: None,
@@ -199,6 +201,9 @@ impl Shell {
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings_modal.is_some() {
             return;
+        }
+        if self.application_input.is_some() {
+            self.close_channel(cx);
         }
         let modal = SettingsModal {
             focus: cx.focus_handle(),
@@ -596,6 +601,13 @@ mod tests {
             channel_name: None,
             assignment_name: None,
             assignment_kind: applications::RuleKind::Desktop,
+            // Tests never read the host's desktop entries.
+            installed_applications: applications::Installed::Ready(vec![
+                librewave_platform_linux::desktop_entries::InstalledApplication {
+                    id: "org.test.Player".to_owned(),
+                    name: "Test Player".to_owned(),
+                },
+            ]),
             meters: None,
             meter_error: None,
             meter_request_epoch: None,

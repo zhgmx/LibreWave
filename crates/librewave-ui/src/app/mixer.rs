@@ -151,7 +151,6 @@ impl Shell {
                     .child(label("Inputs"))
                     .child(strips),
             )
-            .child(self.application_panel(snapshot, cx))
             .child(
                 div()
                     .flex_shrink_0()
@@ -192,14 +191,27 @@ impl Shell {
         generation: MixerGeneration,
         cx: &mut Context<Self>,
     ) -> Div {
+        let id = source.controls.source();
         card()
             .w(px(STRIP_WIDTH))
             .flex_shrink_0()
+            .relative()
             .p(px(SPACE_LG))
             .flex()
             .flex_col()
             .gap(px(SPACE_XL))
             .child(self.source_heading(source, generation, cx))
+            .when(self.application_input == Some(id), |view| {
+                // The pop-up opens under the heading and takes no room in the strip.
+                view.child(
+                    div().absolute().top(px(SPACE_LG + 40. + SPACE_SM)).left(px(SPACE_SM)).child(
+                        self.snapshot.as_ref().map_or_else(
+                            || div().into_any_element(),
+                            |snapshot| self.channel_menu(snapshot, id, cx),
+                        ),
+                    ),
+                )
+            })
             .child(super::meters::bar(
                 &format!("input-{}", source.controls.source()),
                 self.meters.as_ref().and_then(|frame| {
@@ -761,7 +773,9 @@ fn scale() -> Div {
                 .absolute()
                 .top(relative(1. - fraction))
                 .mt(px(-7.))
-                .w_full()
+                .left_0()
+                .w(px(SCALE_WIDTH))
+                .whitespace_nowrap()
                 .text_center()
                 .text_size(px(10.))
                 .line_height(px(14.))
@@ -771,10 +785,11 @@ fn scale() -> Div {
     }
     div()
         .w(px(SCALE_WIDTH))
+        .flex_shrink_0()
         .h_full()
         .flex()
         .flex_col()
-        .child(div().flex_1().min_h(px(FADER_MIN)).py(px(CAP / 2.)).child(marks))
+        .child(div().w_full().flex_1().min_h(px(FADER_MIN)).py(px(CAP / 2.)).child(marks))
         .child(div().h(px(LANE_FOOT)).flex_shrink_0())
 }
 

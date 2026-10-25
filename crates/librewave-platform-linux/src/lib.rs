@@ -28,6 +28,7 @@ pub mod audio_host;
 pub mod audio_lifecycle;
 pub mod audio_policy;
 pub mod desktop_defaults;
+pub mod desktop_entries;
 mod discovery;
 mod services;
 pub use services::{

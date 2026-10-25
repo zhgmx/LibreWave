@@ -1,5 +1,5 @@
 //! Single-line native text entry for channel names and application identities.
-use super::theme::{INK, MONITOR, PANEL};
+use super::theme::{FAINT, INK, MONITOR, PANEL};
 use gpui::{
     Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler, FocusHandle, Pixels,
     Point, ShapedLine, TextRun, UTF16Selection, Window, canvas, div, fill, point, prelude::*, px,
@@ -70,6 +70,7 @@ fn utf16_offset(text: &str, offset: usize) -> usize {
 pub(super) struct TextField {
     pub(super) focus: FocusHandle,
     text: TextState,
+    placeholder: &'static str,
     layout: Option<(ShapedLine, Bounds<Pixels>, Pixels)>,
 }
 impl TextField {
@@ -82,8 +83,15 @@ impl TextField {
                 cursor: value.len(),
                 marked: None,
             },
+            placeholder: "",
             layout: None,
         }
+    }
+
+    /// Text shown in a faint color while the field is empty.
+    pub(super) const fn with_placeholder(mut self, placeholder: &'static str) -> Self {
+        self.placeholder = placeholder;
+        self
     }
     pub(super) fn value(&self) -> &str {
         &self.text.value
@@ -305,6 +313,9 @@ impl Render for TextField {
                             ElementInputHandler::new(bounds, paint_input.clone()),
                             cx,
                         );
+                        if field.text.value.is_empty() {
+                            paint_placeholder(field.placeholder, bounds, window, cx);
+                        }
                         let _ = line.paint(
                             point(bounds.left() - offset, bounds.top()),
                             px(24.),
@@ -320,6 +331,36 @@ impl Render for TextField {
                 .size_full(),
             )
     }
+}
+
+/// Faint text for an empty field.
+fn paint_placeholder(
+    text: &'static str,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let style = window.text_style();
+    let run = TextRun {
+        len: text.len(),
+        font: style.font(),
+        color: rgb(FAINT).into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let hint = window.text_system().shape_line(text.into(), px(14.), &[run], None);
+    let _ = hint.paint(
+        point(bounds.left(), bounds.top()),
+        px(24.),
+        gpui::TextAlign::Left,
+        None,
+        window,
+        cx,
+    );
 }
 
 #[cfg(test)]
