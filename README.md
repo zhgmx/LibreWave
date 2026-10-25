@@ -6,6 +6,10 @@
 
 <p align="center">Device control and a software mixer for the Elgato Wave:3 on Linux.</p>
 
+<p align="center">
+  <img src="assets/screenshot.png" alt="The LibreWave window: the Wave:3 with its hardware controls on the left, input strips with Monitor and Stream faders on the right, and the two output mixes below.">
+</p>
+
 LibreWave controls the Wave:3 hardware and provides a software mixer for it, like Wave Link does on Windows and macOS. It reads and changes the microphone gain, the headphone level, mute, Clipguard, Low-cut, and Gain Lock. The mixer has separate Monitor and Stream mixes and can route each application to its own input.
 
 LibreWave is written in Rust. The device and mixer code is portable. Linux is the only supported platform.
