@@ -114,11 +114,20 @@ pub(super) fn activate(
         .cursor_pointer()
         .active(|style| style.opacity(0.8))
         .focus_visible(|style| style.border_color(rgb(FOCUS)))
-        .on_click(cx.listener(move |this, _, window, cx| click(this, window, cx)))
+        // Enter and Space act on key-down below. GPUI also turns their key-up
+        // into a click, which must not run the action a second time.
+        .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+            if !event.is_keyboard() {
+                click(this, window, cx);
+            }
+        }))
         .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
             if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                 cx.stop_propagation();
-                action(this, window, cx);
+                // A held key repeats. One press is one activation.
+                if !event.is_held {
+                    action(this, window, cx);
+                }
             }
         }))
 }

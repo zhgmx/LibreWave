@@ -1453,6 +1453,37 @@ mod tests {
     }
     #[cfg(feature = "gpui-tests")]
     #[gpui::test]
+    fn one_key_press_activates_a_button_once(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| shell_with(Snapshot::empty()));
+        let link = cx.debug_bounds("linked-faders-1").expect("link button");
+        cx.simulate_click(link.center(), gpui::Modifiers::none());
+        view.read_with(cx, |view, _| {
+            assert!(view.linked_faders.contains(&librewave_core::SourceId::new(1)));
+        });
+        let enter = gpui::Keystroke::parse("enter").expect("keystroke");
+        let linked = |cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |view, _| {
+                view.linked_faders.contains(&librewave_core::SourceId::new(1))
+            })
+        };
+        let press = |cx: &mut gpui::VisualTestContext, is_held| {
+            cx.simulate_event(gpui::KeyDownEvent {
+                keystroke: enter.clone(),
+                is_held,
+                prefer_character_input: false,
+            });
+        };
+        press(cx, false);
+        cx.simulate_event(gpui::KeyUpEvent { keystroke: enter.clone() });
+        assert!(!linked(cx), "a press and release toggles once");
+        press(cx, false);
+        press(cx, true);
+        press(cx, true);
+        assert!(linked(cx), "held repeats do not toggle again");
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
     fn modal_keyboard_focus_is_contained_and_restored(cx: &mut gpui::TestAppContext) {
         let (view, cx) = cx.add_window_view(|_, _| shell_with(Snapshot::empty()));
         let trigger =

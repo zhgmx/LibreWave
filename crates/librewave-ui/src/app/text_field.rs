@@ -285,7 +285,12 @@ impl TextField {
             (true, _, "delete") => self.text.delete_to(self.text.word_end()),
             (false, _, "backspace") => self.text.delete_to(self.text.previous()),
             (false, false, "delete") => self.text.delete_to(self.text.next()),
-            (_, _, "enter") => cx.emit(Submitted),
+            (_, _, "enter") => {
+                // A held key repeats. One press submits once.
+                if !event.is_held {
+                    cx.emit(Submitted);
+                }
+            }
             _ => return,
         }
         cx.stop_propagation();
