@@ -2263,6 +2263,20 @@ fn a_no_op_or_unsaved_commit_ends_the_preview() {
 }
 
 #[test]
+fn the_first_run_profile_is_saved_and_reloads_unchanged() {
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos();
+    let root = std::env::temp_dir().join(format!("librewave-first-run-{nonce}"));
+    fs::create_dir_all(&root).expect("profile directory");
+    let path = root.join("mixer-state.json");
+    let mut store = crate::persistence::FileMixerStateStore::new(path.clone());
+    let first = store.load().expect("first-run profile");
+    assert!(path.exists(), "the first-run profile is saved");
+    let again = store.load().expect("saved profile");
+    assert_eq!(again, first, "a restart sees the same profile");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn reset_replaces_the_layout_with_new_default_inputs_and_keeps_hardware_state() {
     let (mut daemon, retained, saves) = mixer_daemon(vec![]);
     let name = librewave_core::InputName::try_new("Extra").expect("name");

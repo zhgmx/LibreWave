@@ -277,11 +277,20 @@ impl FileMixerStateStore {
 
 impl MixerStateStore for FileMixerStateStore {
     fn load(&mut self) -> Result<MixerProfile, PersistenceError> {
-        decode_mixer_state(load_json(&self.path)?, || {
+        let value = load_json(&self.path)?;
+        let first_run = value.is_none();
+        let profile = decode_mixer_state(value, || {
             MixerProfile::first_run(
                 &librewave_platform_linux::desktop_entries::default_assignments(),
             )
-        })
+        })?;
+        // Saving the first-run profile keeps its detected assignments fixed
+        // across restarts. Without a writable profile, the daemon runs on it
+        // from memory, as it does until a later save succeeds.
+        if first_run && let Err(error) = self.save(&profile) {
+            eprintln!("librewaved: the first-run mixer profile is not saved: {error}");
+        }
+        Ok(profile)
     }
 
     fn save(&mut self, profile: &MixerProfile) -> Result<(), PersistenceError> {

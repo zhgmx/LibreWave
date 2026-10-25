@@ -182,7 +182,7 @@ Profiles live in `~/.config/librewave/profiles/`:
 - `device-state.json` holds the hardware controls that LibreWave manages, keyed by USB topology. It never contains a device serial.
 - `audio-state.json` holds the audio intent.
 
-With no saved mixer profile, the daemon creates the inputs Microphone, System, Music, Browser, Voice Chat, and Game. It assigns installed applications to them from their desktop entry categories. Setup never changes an existing profile.
+With no saved mixer profile, the daemon creates the inputs Microphone, System, Music, Browser, Voice Chat, and Game. It assigns installed applications to them from their desktop entry categories and saves this profile, so later starts keep the same assignments. Setup never changes an existing profile.
 
 For an old schema-2 mixer profile, stop audio and the daemon, then run `librewavectl convert-profile`. It backs up the original file in the LibreWave state directory. `librewavectl convert-profile --rollback` restores that backup when the profile has not been edited since.
 
