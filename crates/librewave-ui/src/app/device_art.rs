@@ -102,7 +102,6 @@ fn level_pattern(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) -> Optio
 fn mix_level_pattern(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) -> Option<[bool; 7]> {
     if api != Some(ApiVersion::new(5, 4))
         || config.volume_select != VolumeSelection::Mix
-        || config.headphone_mute
         || config.all_leds_off
         || config.leds_flip
         || config.direct_monitor.fractional_bits != 8
@@ -119,12 +118,14 @@ fn mix_level_pattern(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) -> O
 fn headphone_level_count(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) -> Option<usize> {
     if api != Some(ApiVersion::new(5, 4))
         || config.volume_select != VolumeSelection::Headphone
-        || config.headphone_mute
         || config.all_leds_off
         || config.leds_flip
         || config.headphone_volume.fractional_bits != 8
     {
         return None;
+    }
+    if config.headphone_mute {
+        return Some(0);
     }
     bracketed_count(config.headphone_volume.raw, -15360, 0, &HEADPHONE_TRANSITIONS)
 }
@@ -438,7 +439,6 @@ mod tests {
         }
         config.headphone_volume.raw = -1152;
         for mutation in [
-            |config: &mut Wave3ConfigSnapshot| config.headphone_mute = true,
             |config: &mut Wave3ConfigSnapshot| config.all_leds_off = true,
             |config: &mut Wave3ConfigSnapshot| config.leds_flip = true,
             |config: &mut Wave3ConfigSnapshot| config.headphone_volume.fractional_bits = 7,
@@ -500,7 +500,6 @@ mod tests {
         }
         config.direct_monitor.raw = 12800;
         for mutation in [
-            |config: &mut Wave3ConfigSnapshot| config.headphone_mute = true,
             |config: &mut Wave3ConfigSnapshot| config.all_leds_off = true,
             |config: &mut Wave3ConfigSnapshot| config.leds_flip = true,
             |config: &mut Wave3ConfigSnapshot| config.direct_monitor.fractional_bits = 7,
@@ -560,6 +559,28 @@ mod tests {
             assert_eq!(observation["ring"], if muted { "red" } else { "white" });
             assert_eq!(observation["positions"], serde_json::json!([1, 2, 3]));
             assert_eq!(lights(Some(&config), Some(ApiVersion::new(5, 4)), 360.).len(), 5);
+            assert!(level_hint(Some(&config), Some(ApiVersion::new(5, 4))).is_none());
+        }
+    }
+
+    #[test]
+    fn headphone_mute_darkens_only_the_headphone_level() {
+        let mut config = config();
+        config.headphone_volume.raw = -1152;
+        config.direct_monitor.raw = 12800;
+        config.input_gain.raw = 4096;
+        for target in
+            [VolumeSelection::Microphone, VolumeSelection::Headphone, VolumeSelection::Mix]
+        {
+            config.volume_select = target;
+            config.headphone_mute = false;
+            let live = Lights::observed(Some(&config), Some(ApiVersion::new(5, 4)));
+            config.headphone_mute = true;
+            let muted = Lights::observed(Some(&config), Some(ApiVersion::new(5, 4)));
+            let expected =
+                if target == VolumeSelection::Headphone { Some([false; 7]) } else { live.levels };
+            assert_eq!(muted.levels, expected);
+            assert_eq!(muted.ring(), Some(WHITE));
             assert!(level_hint(Some(&config), Some(ApiVersion::new(5, 4))).is_none());
         }
     }
