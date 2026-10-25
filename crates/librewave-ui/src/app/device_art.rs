@@ -42,7 +42,9 @@ struct Lights {
 
 impl Lights {
     fn observed(config: Option<&Wave3ConfigSnapshot>, api: Option<ApiVersion>) -> Self {
-        let Some(config) = config.filter(|config| !config.all_leds_off) else {
+        // The all-LEDs-off flag showed no visible change on the device, so
+        // the lights follow the other values. The stage hint names this.
+        let Some(config) = config else {
             return Self::default();
         };
         Self {
@@ -108,7 +110,6 @@ fn filled(count: usize) -> [bool; 7] {
 fn mix_level_pattern(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) -> Option<[bool; 7]> {
     if api != Some(ApiVersion::new(5, 4))
         || config.volume_select != VolumeSelection::Mix
-        || config.all_leds_off
         || config.direct_monitor.fractional_bits != 8
         || !(0..=25600).contains(&config.direct_monitor.raw)
         || config.direct_monitor.raw % 1280 != 0
@@ -123,7 +124,6 @@ fn mix_level_pattern(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) -> O
 fn headphone_level_count(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) -> Option<usize> {
     if api != Some(ApiVersion::new(5, 4))
         || config.volume_select != VolumeSelection::Headphone
-        || config.all_leds_off
         || config.headphone_volume.fractional_bits != 8
     {
         return None;
@@ -151,7 +151,6 @@ fn bracketed_count(
 fn microphone_level_count(config: &Wave3ConfigSnapshot, api: Option<ApiVersion>) -> Option<usize> {
     if api != Some(ApiVersion::new(5, 4))
         || config.volume_select != VolumeSelection::Microphone
-        || config.all_leds_off
         || config.input_gain.fractional_bits != 8
     {
         return None;
@@ -163,9 +162,14 @@ pub(super) fn level_hint(
     config: Option<&Wave3ConfigSnapshot>,
     api: Option<ApiVersion>,
 ) -> Option<&'static str> {
-    config
-        .filter(|config| !config.all_leds_off && level_pattern(config, api).is_none())
-        .map(|_| "Level indicator mapping is not verified for this state.")
+    let config = config?;
+    if config.all_leds_off {
+        Some("The LED off setting showed no visible change on this device.")
+    } else {
+        level_pattern(config, api)
+            .is_none()
+            .then_some("Level indicator mapping is not verified for this state.")
+    }
 }
 
 /// The illustration without lit indicators.
@@ -483,7 +487,6 @@ mod tests {
         }
         config.headphone_volume.raw = -1152;
         for mutation in [
-            |config: &mut Wave3ConfigSnapshot| config.all_leds_off = true,
             |config: &mut Wave3ConfigSnapshot| config.headphone_volume.fractional_bits = 7,
             |config: &mut Wave3ConfigSnapshot| config.headphone_volume.raw = -15361,
             |config: &mut Wave3ConfigSnapshot| config.headphone_volume.raw = 1,
@@ -543,7 +546,6 @@ mod tests {
         }
         config.direct_monitor.raw = 12800;
         for mutation in [
-            |config: &mut Wave3ConfigSnapshot| config.all_leds_off = true,
             |config: &mut Wave3ConfigSnapshot| config.direct_monitor.fractional_bits = 7,
             |config: &mut Wave3ConfigSnapshot| config.direct_monitor.raw = -1,
             |config: &mut Wave3ConfigSnapshot| config.direct_monitor.raw = 25601,
@@ -570,7 +572,6 @@ mod tests {
         }
         config.volume_select = VolumeSelection::Microphone;
         for mutation in [
-            |config: &mut Wave3ConfigSnapshot| config.all_leds_off = true,
             |config: &mut Wave3ConfigSnapshot| config.input_gain.fractional_bits = 7,
             |config: &mut Wave3ConfigSnapshot| config.input_gain.raw = -1,
             |config: &mut Wave3ConfigSnapshot| config.input_gain.raw = 10241,
@@ -709,20 +710,24 @@ mod tests {
         assert_eq!(Glow::observed(Some(&config)), Glow::Live);
         config.input_mute = true;
         assert_eq!(Glow::observed(Some(&config)), Glow::Muted);
+        // The LED off flag showed no visible change, so the glow follows the ring.
         config.all_leds_off = true;
-        assert_eq!(Glow::observed(Some(&config)), Glow::Dark);
+        assert_eq!(Glow::observed(Some(&config)), Glow::Muted);
         assert_eq!(Glow::observed(None), Glow::Dark);
     }
 
     #[test]
-    fn unavailable_state_and_leds_off_do_not_invent_lit_indicators() {
+    fn unavailable_state_lights_nothing_and_leds_off_changes_nothing_but_the_hint() {
+        let api = Some(ApiVersion::new(5, 4));
+        assert_eq!(Lights::observed(None, api), Lights::default());
+        assert!(lights(None, api, 360.).is_empty());
+        assert!(level_hint(None, api).is_none());
         let mut config = config();
         config.input_mute = true;
+        let lit = Lights::observed(Some(&config), api);
         config.all_leds_off = true;
-        for observed in [None, Some(&config)] {
-            assert_eq!(Lights::observed(observed, Some(ApiVersion::new(5, 4))), Lights::default());
-            assert!(lights(observed, Some(ApiVersion::new(5, 4)), 360.).is_empty());
-        }
+        assert_eq!(Lights::observed(Some(&config), api), lit);
+        assert!(level_hint(Some(&config), api).is_some_and(|hint| hint.contains("LED off")));
     }
 
     #[test]

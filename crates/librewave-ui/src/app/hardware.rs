@@ -488,7 +488,7 @@ fn processing(config: &Wave3ConfigSnapshot, target: Target, cx: &mut Context<She
             "Gain Lock",
             "gain-lock",
             "lock-simple",
-            "Stops other applications from changing the microphone gain. The dial and LibreWave can still change it.",
+            "Tells the device to ignore microphone gain changes from other applications. The dial and LibreWave can still change the gain.",
             config.gain_lock,
             Wave3Control::GainLock,
         ),
