@@ -164,7 +164,7 @@ fn run_setup(
     writeln!(output, "LibreWave will install the current CLI, daemon, and inactive user unit.")?;
     writeln!(
         output,
-        "Setup leaves audio inactive. Use `start` after access and live-test approval."
+        "Setup leaves audio inactive. Open LibreWave or run `librewavectl start` to start it."
     )?;
     if !options.yes && !confirm("Continue with setup? [y/N] ")? {
         writeln!(output, "Setup canceled.")?;
