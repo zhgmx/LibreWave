@@ -668,7 +668,7 @@ impl fmt::Display for MixerInactiveReason {
             Self::AudioHostEngineNotConnected => {
                 formatter.write_str("audio host and mixer engine are not connected")
             }
-            Self::Starting => formatter.write_str("experimental audio startup is pending"),
+            Self::Starting => formatter.write_str("audio startup is pending"),
             Self::NoSingleDevice => formatter.write_str("connect exactly one supported device"),
             Self::HostServicesUnavailable => {
                 formatter.write_str("PipeWire and WirePlumber must both be available")

@@ -244,7 +244,7 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
         match self.unit_inspector.inspect(UNIT_FILE_NAME) {
             Ok(state) if state.enabled => fail(
                 "systemd user unit state",
-                "Automatic daemon startup is enabled. Disable it before experimental takeover.",
+                "Automatic daemon startup is enabled. Disable it before audio takeover.",
             ),
             Ok(state) if state.active => match super::runtime::has_ownership(&self.paths) {
                 Ok(true) => pass(

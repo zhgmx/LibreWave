@@ -254,7 +254,7 @@ impl Daemon {
     /// # Errors
     ///
     /// Returns an error while a canceled attempt still owns resources.
-    pub fn enable_experimental_audio(&mut self) -> Result<(), IpcError> {
+    pub fn enable_audio(&mut self) -> Result<(), IpcError> {
         if self.snapshot().mixer.runtime
             == (MixerRuntimeState::Inactive {
                 reason: librewave_core::MixerInactiveReason::CleanupPending,
@@ -512,8 +512,8 @@ impl Daemon {
                     AudioSupervisor::meter_snapshot,
                 ),
             }),
-            Command::StartExperimentalAudio => {
-                self.enable_experimental_audio()?;
+            Command::StartAudio => {
+                self.enable_audio()?;
                 Ok(Response::AudioStarting { mixer: self.snapshot().mixer.clone() })
             }
             Command::StopAudio => {

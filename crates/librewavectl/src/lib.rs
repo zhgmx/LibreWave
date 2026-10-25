@@ -29,7 +29,7 @@ pub fn session_action(action: SessionAction) -> io::Result<String> {
     let mut arguments = vec!["librewavectl".to_owned()];
     match action {
         SessionAction::Start { suspend_config } => {
-            arguments.extend(["start".to_owned(), "--experimental".to_owned()]);
+            arguments.push("start".to_owned());
             if let Some(path) = suspend_config {
                 arguments.push("--suspend-config".to_owned());
                 arguments.push(
@@ -87,12 +87,10 @@ where
         [command] if command == "refresh" => request_refresh(socket_path, output, errors),
         [audio, options @ ..] if audio == "audio" => {
             let command = match options {
-                [start, experimental] if start == "start" && experimental == "--experimental" => {
-                    librewave_core::Command::StartExperimentalAudio
-                }
+                [start] if start == "start" => librewave_core::Command::StartAudio,
                 [stop] if stop == "stop" => librewave_core::Command::StopAudio,
                 _ => {
-                    writeln!(errors, "error: use `audio start --experimental` or `audio stop`")?;
+                    writeln!(errors, "error: use `audio start` or `audio stop`")?;
                     return Ok(2);
                 }
             };
@@ -197,14 +195,8 @@ fn request_audio(
     send: impl FnOnce(&Path, librewave_core::Command) -> Result<Response, ClientError>,
 ) -> io::Result<i32> {
     match (command, send(socket_path, command)) {
-        (
-            librewave_core::Command::StartExperimentalAudio,
-            Ok(Response::AudioStarting { mixer }),
-        ) => {
-            writeln!(
-                output,
-                "Experimental audio start accepted. Check readiness with `mixer show`."
-            )?;
+        (librewave_core::Command::StartAudio, Ok(Response::AudioStarting { mixer })) => {
+            writeln!(output, "Audio start accepted. Check readiness with `mixer show`.")?;
             write_mixer(output, &mixer)?;
             Ok(0)
         }
@@ -1033,7 +1025,7 @@ fn write_help<W: Write>(output: &mut W) -> io::Result<()> {
     writeln!(output, "  apps assign <generation> <desktop|executable> <identity> <source|forget>")?;
     writeln!(output, "  apps route <desktop|executable> <identity> <source>")?;
     writeln!(output, "  refresh         Refresh inventory and retained device state")?;
-    writeln!(output, "  audio start --experimental  Request experimental audio ownership")?;
+    writeln!(output, "  audio start                 Request audio ownership")?;
     writeln!(output, "  audio stop      Release audio resources and disable recovery")?;
     writeln!(output, "  devices list    List supported devices")?;
     writeln!(output, "  devices inspect <id>  Inspect one device")?;
@@ -1065,10 +1057,7 @@ fn write_help<W: Write>(output: &mut W) -> io::Result<()> {
     writeln!(output, "Use the device generation shown by `librewavectl devices inspect <id>`.")?;
     writeln!(output, "Use the mixer generation shown by `librewavectl mixer show`.")?;
     writeln!(output, "  setup           Install the current build")?;
-    writeln!(
-        output,
-        "  start --experimental [--suspend-config <PATH>]  Start reversible audio ownership"
-    )?;
+    writeln!(output, "  start [--suspend-config <PATH>]  Start reversible audio ownership")?;
     writeln!(output, "  stop            Restore desktop ownership and stop the launched service")?;
     writeln!(output, "  doctor          Check the installation")?;
     writeln!(output, "  uninstall       Remove manifest-owned files")
@@ -1423,11 +1412,11 @@ mod tests {
     }
 
     #[test]
-    fn audio_start_requires_explicit_experimental_selection() {
+    fn audio_start_rejects_unknown_options() {
         let mut output = Vec::new();
         let mut errors = Vec::new();
         let exit = run(
-            ["librewavectl", "audio", "start"].map(str::to_owned),
+            ["librewavectl", "audio", "start", "--now"].map(str::to_owned),
             Path::new("/does-not-exist"),
             &mut output,
             &mut errors,
@@ -1435,11 +1424,7 @@ mod tests {
         .expect("valid CLI test operation");
         assert_eq!(exit, 2);
         assert!(output.is_empty());
-        assert!(
-            String::from_utf8(errors)
-                .expect("valid CLI test operation")
-                .contains("start --experimental")
-        );
+        assert!(String::from_utf8(errors).expect("valid CLI test operation").contains("start"));
     }
 
     #[test]
@@ -1448,11 +1433,11 @@ mod tests {
         let mut errors = Vec::new();
         let exit = request_audio(
             Path::new("/unused"),
-            librewave_core::Command::StartExperimentalAudio,
+            librewave_core::Command::StartAudio,
             &mut output,
             &mut errors,
             |_, command| {
-                assert_eq!(command, librewave_core::Command::StartExperimentalAudio);
+                assert_eq!(command, librewave_core::Command::StartAudio);
                 Ok(Response::AudioStarting {
                     mixer: MixerSnapshot::inactive_for(
                         librewave_core::MixerProfile::default(),

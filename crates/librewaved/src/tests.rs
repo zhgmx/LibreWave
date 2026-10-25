@@ -1630,12 +1630,12 @@ fn audio_commands_preserve_profiles_and_repeated_start_is_idempotent() {
     let mut daemon = Daemon::from_snapshot(Snapshot::empty());
     let profile = daemon.snapshot().mixer.profile.clone();
     let response = daemon
-        .handle(Command::StartExperimentalAudio, librewave_core::Origin::Client)
+        .handle(Command::StartAudio, librewave_core::Origin::Client)
         .expect("valid fake-device operation");
     assert!(matches!(response, Response::AudioStarting { .. }));
     let generation = daemon.snapshot().generation;
     daemon
-        .handle(Command::StartExperimentalAudio, librewave_core::Origin::Client)
+        .handle(Command::StartAudio, librewave_core::Origin::Client)
         .expect("valid fake-device operation");
     assert_eq!(daemon.snapshot().generation, generation);
     // In-frame maintenance must not construct a real host.

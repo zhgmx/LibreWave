@@ -1,7 +1,7 @@
 //! The Settings dialog: audio, setup, and the daemon connection.
 use super::chrome::error_banner;
 use super::controls::{
-    Tone, action_button, activate, button_face, caption, chip, dot, icon, icon_button, label,
+    Tone, action_button, activate, button_face, caption, dot, icon, icon_button, label,
     labeled_icon_button,
 };
 use super::theme::{
@@ -415,20 +415,13 @@ fn pane_header(pane: SettingsPane, close: gpui::Stateful<Div>) -> Div {
                 .flex_col()
                 .gap(px(2.))
                 .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(SPACE_MD))
-                        .child(
-                            div()
-                                .text_size(px(TITLE))
-                                .line_height(px(TITLE_LINE))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(title),
-                        )
-                        .when(pane == SettingsPane::Audio, |view| {
-                            view.child(chip("Experimental", WARNING))
-                        }),
+                    div().flex().items_center().gap(px(SPACE_MD)).child(
+                        div()
+                            .text_size(px(TITLE))
+                            .line_height(px(TITLE_LINE))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    ),
                 )
                 .child(caption(pane.summary())),
         )

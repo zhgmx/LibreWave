@@ -565,7 +565,7 @@ mod tests {
 
     #[test]
     fn audio_lifecycle_uses_version_seven_and_rejects_previous_versions() {
-        for command in [Command::StartExperimentalAudio, Command::StopAudio] {
+        for command in [Command::StartAudio, Command::StopAudio] {
             let envelope = RequestEnvelope { version: PROTOCOL_VERSION, request_id: 10, command };
             let frame = encode_request(&envelope).expect("valid lifecycle message");
             assert_eq!(decode_request(&frame[4..]).expect("valid lifecycle message"), envelope);

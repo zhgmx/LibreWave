@@ -55,23 +55,6 @@ pub(super) fn dot(color: u32) -> Div {
     div().size(px(8.)).flex_shrink_0().rounded_full().bg(rgb(color))
 }
 
-/// A compact state marker with a tinted surface.
-pub(super) fn chip(text: &str, color: u32) -> Div {
-    div()
-        .h(px(20.))
-        .px(px(SPACE_SM))
-        .flex_shrink_0()
-        .rounded_full()
-        .bg(rgba(alpha(color, 0x24)))
-        .text_color(rgb(color))
-        .text_size(px(LABEL))
-        .line_height(px(LABEL_LINE))
-        .font_weight(FontWeight::MEDIUM)
-        .flex()
-        .items_center()
-        .child(text.to_uppercase())
-}
-
 /// A square tile that carries one icon, tinted with the icon color.
 pub(super) fn icon_tile(name: &'static str, color: u32, extent: f32) -> Div {
     div()

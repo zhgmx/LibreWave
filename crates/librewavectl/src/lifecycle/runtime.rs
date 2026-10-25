@@ -143,7 +143,7 @@ pub(super) fn run(arguments: &[String], output: &mut impl Write) -> io::Result<i
     {
         writeln!(
             output,
-            "Usage: librewavectl start --experimental [--suspend-config <PATH>]\n       librewavectl stop\n\nStart requires a current installation, exact USB access, PipeWire, and WirePlumber.\nThe selected user fragment is backed up and restored on stop or failure.\nService enablement and hardware controls are not changed."
+            "Usage: librewavectl start [--suspend-config <PATH>]\n       librewavectl stop\n\nStart requires a current installation, exact USB access, PipeWire, and WirePlumber.\nThe selected user fragment is backed up and restored on stop or failure.\nService enablement and hardware controls are not changed."
         )?;
         return Ok(0);
     }
@@ -158,10 +158,7 @@ pub(super) fn run(arguments: &[String], output: &mut impl Write) -> io::Result<i
         Some("start") => {
             let suspended = parse_start(&arguments[2..])?;
             start(&paths, suspended.as_deref(), &mut host)?;
-            writeln!(
-                output,
-                "Experimental audio is ready. LibreWave owns the Wave:3 audio graph."
-            )?;
+            writeln!(output, "Audio is ready. LibreWave owns the Wave:3 audio graph.")?;
         }
         Some("stop") if arguments.len() == 2 => {
             stop(&paths, &mut host)?;
@@ -173,7 +170,7 @@ pub(super) fn run(arguments: &[String], output: &mut impl Write) -> io::Result<i
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "use `start --experimental [--suspend-config <PATH>]` or `stop`",
+                "use `start [--suspend-config <PATH>]` or `stop`",
             ));
         }
     }
@@ -181,12 +178,10 @@ pub(super) fn run(arguments: &[String], output: &mut impl Write) -> io::Result<i
 }
 
 fn parse_start(arguments: &[String]) -> io::Result<Option<PathBuf>> {
-    let mut experimental = false;
     let mut suspended = None;
     let mut index = 0;
     while index < arguments.len() {
         match arguments[index].as_str() {
-            "--experimental" if !experimental => experimental = true,
             "--suspend-config" if suspended.is_none() => {
                 index += 1;
                 suspended =
@@ -197,9 +192,6 @@ fn parse_start(arguments: &[String]) -> io::Result<Option<PathBuf>> {
             _ => return Err(invalid("unknown or repeated start option")),
         }
         index += 1;
-    }
-    if !experimental {
-        return Err(invalid("start requires --experimental"));
     }
     Ok(suspended)
 }
@@ -237,7 +229,7 @@ pub(super) fn start(
                 request_kind(host, Command::CheckAudioAccess, |reply| {
                     matches!(reply, Response::AudioAccessChecked)
                 })?;
-                request_kind(host, Command::StartExperimentalAudio, |reply| {
+                request_kind(host, Command::StartAudio, |reply| {
                     matches!(reply, Response::AudioStarting { .. })
                 })?;
                 wait_ready(host)
@@ -265,7 +257,7 @@ pub(super) fn start(
     let unit = host.unit()?;
     if unit.enabled {
         return Err(io::Error::other(
-            "automatic daemon startup is enabled; disable it before experimental takeover",
+            "automatic daemon startup is enabled; disable it before audio takeover",
         ));
     }
     host.verify_process(&manifest, unit.active)?;
@@ -364,7 +356,7 @@ fn begin(
     )?;
     host.service(SessionOperation::RestartWirePlumber)?;
     wait_services(host)?;
-    request_kind(host, Command::StartExperimentalAudio, |reply| {
+    request_kind(host, Command::StartAudio, |reply| {
         matches!(reply, Response::AudioStarting { .. })
     })?;
     wait_ready(host)?;
@@ -784,9 +776,7 @@ pub(super) fn file_checks(paths: &InstallPaths, manifest: &Manifest) -> Vec<Chec
     let result = (|| match read_record(paths, manifest)? {
         Some(record) if record.phase == Phase::Running => {
             verify_taken_files(paths, &record)?;
-            Ok(
-                "Experimental ownership is recorded. Policy and backups match the ownership journal.",
-            )
+            Ok("Audio ownership is recorded. Policy and backups match the ownership journal.")
         }
         Some(_) => Err(io::Error::other(
             "audio restoration or an interrupted start is pending; run `librewavectl stop`",

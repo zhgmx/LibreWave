@@ -410,7 +410,6 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
             Ok(None) => {
                 checks.push(fail("installation manifest", "LibreWave is not installed."));
                 checks.extend(self.orphan_checks());
-                checks.push(blocked_audio());
                 checks.push(unavailable_graph_observation());
                 return checks;
             }
@@ -420,7 +419,6 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
                     format!("The manifest is invalid and will not be used: {error}"),
                 ));
                 checks.extend(self.orphan_checks());
-                checks.push(blocked_audio());
                 checks.push(unavailable_graph_observation());
                 return checks;
             }
@@ -479,7 +477,6 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
         checks.extend(self.backup_artifact_checks(&manifest));
         checks.push(self.unit_state_check());
         checks.extend(super::runtime::file_checks(&self.paths, &manifest));
-        checks.push(blocked_audio());
         checks.push(unavailable_graph_observation());
         checks
     }
@@ -837,17 +834,6 @@ pub(super) fn pass(name: impl Into<String>, detail: impl Into<String>) -> Check 
 
 pub(super) fn fail(name: impl Into<String>, detail: impl Into<String>) -> Check {
     Check { state: CheckState::Fail, name: name.into(), detail: detail.into() }
-}
-
-fn blocked(name: impl Into<String>, detail: impl Into<String>) -> Check {
-    Check { state: CheckState::Blocked, name: name.into(), detail: detail.into() }
-}
-
-fn blocked_audio() -> Check {
-    blocked(
-        "production audio ownership",
-        "Experimental start is available. Production support remains blocked on controlled hardware and recovery validation.",
-    )
 }
 
 fn unavailable_graph_observation() -> Check {

@@ -35,7 +35,7 @@ pub(super) fn files(
         .transpose()?
         .unwrap_or_default();
     let service = format!(
-        "[Unit]\nDescription=LibreWave desktop and mixer startup\nAfter=graphical-session.target pipewire.service wireplumber.service\nWants=pipewire.service wireplumber.service\nPartOf=graphical-session.target\n\n[Service]\nType=exec\nExecStartPre={cli} start --experimental{suspend}\nExecStart={gui}\nEnvironment={environment}\nTimeoutStartSec=90\n"
+        "[Unit]\nDescription=LibreWave desktop and mixer startup\nAfter=graphical-session.target pipewire.service wireplumber.service\nWants=pipewire.service wireplumber.service\nPartOf=graphical-session.target\n\n[Service]\nType=exec\nExecStartPre={cli} start{suspend}\nExecStart={gui}\nEnvironment={environment}\nTimeoutStartSec=90\n"
     );
     let entry = format!(
         "[Desktop Entry]\nType=Application\nName=LibreWave\nComment=Control the Wave microphone and software mixer\nExec=/usr/bin/systemctl --user start {UNIT}\nIcon=audio-card\nTerminal=false\nCategories=AudioVideo;Audio;\n"
@@ -228,7 +228,7 @@ mod tests {
         };
         let files = files(&lifecycle.paths, &config).expect("render");
         let unit = &files[0].1;
-        assert!(unit.contains("start --experimental --suspend-config"));
+        assert!(unit.contains("start --suspend-config"));
         assert!(unit.contains("legacy.conf"));
         assert!(
             files[1].1.contains("exec /usr/bin/systemctl --user start librewave-desktop.service")

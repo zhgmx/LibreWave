@@ -117,7 +117,7 @@ fn observed_claim_is_retained_through_preflight_start_and_automatic_audio_retry(
     assert_eq!(*h.connections.borrow(), 1);
     h.daemon.handle(Command::CheckAudioAccess, Origin::Client).expect("preflight through owner");
     assert_eq!(bus.reads.get(), 1);
-    h.daemon.handle(Command::StartExperimentalAudio, Origin::Client).expect("durable start intent");
+    h.daemon.handle(Command::StartAudio, Origin::Client).expect("durable start intent");
     bus.config.borrow_mut().input_gain.raw = 4726;
     h.daemon.supervise_audio(&mut audio, false);
     assert_eq!(control.creates.get(), 0, "maintenance cannot start an attempt");

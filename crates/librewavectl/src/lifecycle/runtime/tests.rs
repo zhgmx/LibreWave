@@ -113,7 +113,7 @@ impl RuntimeHost for Host {
                 Command::CheckAudioAccess => "CheckAudioAccess",
                 Command::GetDesktopDefaults => "GetDesktopDefaults",
                 Command::CaptureDesktopDefaults => "CaptureDefaults",
-                Command::StartExperimentalAudio => "StartAudio",
+                Command::StartAudio => "StartAudio",
                 Command::StopAudio => "StopAudio",
                 Command::SelectDesktopDefaults => "SelectDefaults",
                 Command::RestoreDesktopDefaults => "RestoreDefaults",
@@ -188,7 +188,7 @@ impl RuntimeHost for Host {
                 self.baseline.get_or_insert(baseline);
                 Ok(Response::DesktopDefaults { defaults: self.defaults.clone() })
             }
-            Command::StartExperimentalAudio => {
+            Command::StartAudio => {
                 self.audio = self.reason.is_none();
                 Ok(Response::AudioStarting { mixer })
             }

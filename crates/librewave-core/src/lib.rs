@@ -509,8 +509,8 @@ pub enum Command {
         application: ApplicationId,
         source: Option<SourceId>,
     },
-    /// Enable the experimental audio owner in this daemon session.
-    StartExperimentalAudio,
+    /// Enable the audio owner in this daemon session.
+    StartAudio,
     /// Cancel audio recovery and release the daemon-owned audio resources.
     StopAudio,
     /// Check exact device access and schema without restoring managed controls.

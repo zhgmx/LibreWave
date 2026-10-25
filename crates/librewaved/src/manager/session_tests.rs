@@ -87,7 +87,7 @@ use librewave_core::Command;
 fn start_intent_survives_daemon_restart_and_stop_cancels_it_before_cleanup() {
     let fixture = Fixture::new();
     let mut first = fixture.daemon();
-    Fixture::request(&mut first, Command::StartExperimentalAudio).expect("start intent");
+    Fixture::request(&mut first, Command::StartAudio).expect("start intent");
     assert!(fixture.store().load().expect("durable intent").enabled);
     let mut restarted = fixture.daemon();
     assert!(restarted.audio.as_ref().is_some_and(AudioSupervisor::needs_tick));
@@ -105,7 +105,7 @@ fn start_intent_survives_daemon_restart_and_stop_cancels_it_before_cleanup() {
 fn process_shutdown_releases_owner_without_cancelling_durable_restart_intent() {
     let fixture = Fixture::new();
     let mut daemon = fixture.daemon();
-    Fixture::request(&mut daemon, Command::StartExperimentalAudio).expect("start intent");
+    Fixture::request(&mut daemon, Command::StartAudio).expect("start intent");
     daemon.quiesce_for_shutdown().expect("release process owner");
     assert!(!daemon.audio.as_ref().is_some_and(AudioSupervisor::needs_tick));
     assert!(fixture.store().load().expect("retained intent").enabled);
@@ -193,7 +193,7 @@ fn an_active_or_incompletely_restored_session_cannot_discard_the_baseline() {
     let fixture = Fixture::new();
     let mut daemon = fixture.daemon();
     Fixture::request(&mut daemon, Command::CaptureDesktopDefaults).expect("capture");
-    Fixture::request(&mut daemon, Command::StartExperimentalAudio).expect("start");
+    Fixture::request(&mut daemon, Command::StartAudio).expect("start");
     assert!(Fixture::request(&mut daemon, Command::RestoreDesktopDefaults).is_err());
     assert!(Fixture::request(&mut daemon, Command::CompleteDesktopRestore).is_err());
     Fixture::request(&mut daemon, Command::StopAudio).expect("stop");
@@ -223,7 +223,7 @@ fn failed_start_persistence_never_opens_an_audio_owner_or_forgets_ambiguity() {
     for after in [false, true] {
         let mut daemon = Daemon::from_snapshot(Snapshot::empty());
         daemon.audio_session_store = Box::new(FailStore { after });
-        assert!(Fixture::request(&mut daemon, Command::StartExperimentalAudio).is_err());
+        assert!(Fixture::request(&mut daemon, Command::StartAudio).is_err());
         assert!(daemon.audio.is_none());
         assert_eq!(daemon.audio_session.enabled, after);
     }
