@@ -630,11 +630,18 @@ impl Daemon {
     /// Restores the saved levels after a preview that no commit followed.
     fn expire_preview(&mut self, now: Instant) {
         if self.preview_since.is_some_and(|since| now.duration_since(since) >= PREVIEW_TIMEOUT) {
-            self.preview_since = None;
-            let saved = self.snapshot().mixer.profile.clone();
-            if let Err(error) = self.apply_to_engine(&saved) {
-                eprintln!("librewaved: saved levels await audio recovery: {}", error.message);
-            }
+            self.end_preview();
+        }
+    }
+
+    /// Puts the saved levels back in the running mixer after a preview.
+    fn end_preview(&mut self) {
+        if self.preview_since.take().is_none() {
+            return;
+        }
+        let saved = self.snapshot().mixer.profile.clone();
+        if let Err(error) = self.apply_to_engine(&saved) {
+            eprintln!("librewaved: saved levels await audio recovery: {}", error.message);
         }
     }
 
@@ -657,6 +664,8 @@ impl Daemon {
             .controls;
         let mixer = if controls.monitor().fader() == monitor && controls.stream().fader() == stream
         {
+            // A drag that ended on the saved level commits nothing new.
+            self.end_preview();
             self.snapshot().mixer.clone()
         } else {
             let next = current.with_faders(source, monitor, stream).map_err(mixer_profile_error)?;
@@ -674,6 +683,7 @@ impl Daemon {
         self.check_mixer_generation(expected_generation)?;
         let current = &self.snapshot().mixer.profile;
         let mixer = if current.outputs.route(target) == route {
+            self.end_preview();
             self.snapshot().mixer.clone()
         } else {
             let next = current.with_output(target, route).map_err(mixer_profile_error)?;
@@ -708,6 +718,7 @@ impl Daemon {
             message: format!("mixer source {source} is not configured"),
         })?;
         if source_snapshot.controls.route(target) == route {
+            self.end_preview();
             return Ok(self.snapshot().mixer.clone());
         }
         let next = current.with_route(source, target, route).map_err(|error| match error {
@@ -753,9 +764,15 @@ impl Daemon {
         next: MixerProfile,
         origin: librewave_core::Origin,
     ) -> Result<MixerSnapshot, IpcError> {
-        // A commit replaces any preview in the running mixer.
+        // A commit replaces any preview in the running mixer. A commit that
+        // is not saved puts the saved levels back instead.
+        if let Err(error) =
+            persist_mixer_profile(self.audio.as_mut(), &mut *self.mixer_store, &next)
+        {
+            self.end_preview();
+            return Err(error);
+        }
         self.preview_since = None;
-        persist_mixer_profile(self.audio.as_mut(), &mut *self.mixer_store, &next)?;
         let mut snapshot = self.snapshot().clone();
         snapshot.mixer = match self.audio.as_ref().map(AudioSupervisor::runtime) {
             Some(MixerRuntimeState::Active) => MixerSnapshot::active(next),

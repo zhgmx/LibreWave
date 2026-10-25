@@ -2209,6 +2209,60 @@ fn previews_change_no_saved_state_and_a_commit_ends_them() {
 }
 
 #[test]
+fn a_no_op_or_unsaved_commit_ends_the_preview() {
+    let level = librewave_core::MixerLevel::Route {
+        source: SourceId::new(2),
+        target: librewave_core::MixTarget::Monitor,
+        fader: librewave_core::FaderGain::MIN,
+    };
+    let preview = |daemon: &mut Daemon| {
+        daemon
+            .handle(
+                Command::PreviewMixer { expected_generation: MixerGeneration(0), level },
+                librewave_core::Origin::Client,
+            )
+            .expect("preview");
+        assert!(daemon.preview_since.is_some());
+    };
+    let saved_route = |daemon: &Daemon| {
+        daemon.snapshot().mixer.profile.source(SourceId::new(2)).expect("System").controls.monitor()
+    };
+    // The drag ended on the saved level: the commit changes nothing.
+    let (mut daemon, _, saves) = mixer_daemon(vec![]);
+    preview(&mut daemon);
+    let route = saved_route(&daemon);
+    daemon
+        .handle(
+            Command::SetMixerRoute {
+                expected_generation: MixerGeneration(0),
+                source: SourceId::new(2),
+                target: librewave_core::MixTarget::Monitor,
+                route,
+            },
+            librewave_core::Origin::Client,
+        )
+        .expect("unchanged commit");
+    assert!(daemon.preview_since.is_none(), "the saved level replaces the preview");
+    assert_eq!(*saves.borrow(), 0);
+
+    // The commit is not saved: the saved level replaces the preview too.
+    let (mut daemon, _, _) = mixer_daemon(vec![SaveAction::Before]);
+    preview(&mut daemon);
+    daemon
+        .handle(
+            Command::SetMixerRoute {
+                expected_generation: MixerGeneration(0),
+                source: SourceId::new(2),
+                target: librewave_core::MixTarget::Monitor,
+                route: librewave_core::MixRoute::new(true, librewave_core::FaderGain::MIN),
+            },
+            librewave_core::Origin::Client,
+        )
+        .expect_err("unsaved commit");
+    assert!(daemon.preview_since.is_none());
+}
+
+#[test]
 fn reset_replaces_the_layout_with_new_default_inputs_and_keeps_hardware_state() {
     let (mut daemon, retained, saves) = mixer_daemon(vec![]);
     let name = librewave_core::InputName::try_new("Extra").expect("name");
