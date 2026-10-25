@@ -4,9 +4,7 @@
 //! above it, with the opaque knob face in front of the ring. A state change
 //! never redraws the illustration.
 use super::theme::DANGER;
-use gpui::{
-    AnyElement, BoxShadow, Image, ImageFormat, RenderImage, div, img, point, prelude::*, px, rgb,
-};
+use gpui::{AnyElement, BoxShadow, Image, ImageFormat, RenderImage, div, img, prelude::*, px, rgb};
 use librewave_core::{ApiVersion, VolumeSelection, Wave3ConfigSnapshot};
 use std::sync::{Arc, LazyLock};
 
@@ -215,13 +213,10 @@ pub(super) fn lights(
             .top(px((y - VIEW_TOP - radius) * scale))
             .size(px(2. * radius * scale))
             .rounded_full()
-            .shadow(vec![BoxShadow {
-                inset: false,
-                color: gpui::Hsla::from(rgb(color)).opacity(0.55),
-                offset: point(px(0.), px(0.)),
-                blur_radius: px(10. * scale),
-                spread_radius: px(0.),
-            }])
+            .shadow(vec![
+                BoxShadow::new(px(0.), px(0.), gpui::Hsla::from(rgb(color)).opacity(0.55))
+                    .blur_radius(px(10. * scale)),
+            ])
     };
     let mut lit = Vec::new();
     if let Some(mode) = lights.mode {
@@ -289,8 +284,13 @@ impl Glow {
         )
     }
 
+    /// The glow image. Each state is built once and reused by every frame.
     pub(super) fn image(self) -> Arc<Image> {
-        Arc::new(Image::from_bytes(ImageFormat::Svg, self.svg().into_bytes()))
+        static IMAGES: LazyLock<[Arc<Image>; 3]> = LazyLock::new(|| {
+            [Glow::Dark, Glow::Live, Glow::Muted]
+                .map(|glow| Arc::new(Image::from_bytes(ImageFormat::Svg, glow.svg().into_bytes())))
+        });
+        Arc::clone(&IMAGES[self as usize])
     }
 }
 

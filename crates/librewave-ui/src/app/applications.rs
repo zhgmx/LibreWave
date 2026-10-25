@@ -14,7 +14,7 @@ use super::{
 };
 use gpui::{
     Anchor, AnyElement, BoxShadow, Context, Div, FontWeight, Stateful, anchored, deferred, div,
-    point, prelude::*, px, rgb,
+    prelude::*, px, rgb,
 };
 use librewave_core::{
     ApplicationId, ApplicationMovement, ApplicationRoute, ApplicationSnapshot, Command, InputName,
@@ -330,13 +330,9 @@ impl Shell {
             .rounded(px(RADIUS_CARD))
             // Lighter than the fields, so they read as inset entries.
             .bg(rgb(GROUP))
-            .shadow(vec![BoxShadow {
-                inset: false,
-                color: gpui::black().opacity(0.55),
-                offset: point(px(0.), px(16.)),
-                blur_radius: px(48.),
-                spread_radius: px(0.),
-            }])
+            .shadow(vec![
+                BoxShadow::new(px(0.), px(16.), gpui::black().opacity(0.55)).blur_radius(px(48.)),
+            ])
             .flex()
             .flex_col()
             .child(self.menu_heading(snapshot, source, cx))

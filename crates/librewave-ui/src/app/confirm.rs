@@ -2,7 +2,7 @@
 use super::Shell;
 use super::controls::{Tone, action_button, caption};
 use super::theme::{PANEL, RADIUS_CARD, SPACE_LG, SPACE_SM, SPACE_XL, TITLE, TITLE_LINE};
-use gpui::{BoxShadow, Context, FontWeight, IntoElement, div, point, prelude::*, px, rgb, rgba};
+use gpui::{BoxShadow, Context, FontWeight, IntoElement, div, prelude::*, px, rgb, rgba};
 use librewave_core::Command;
 
 /// A daemon request that waits for the person to confirm it.
@@ -83,13 +83,10 @@ impl Shell {
                     .p(px(SPACE_XL))
                     .rounded(px(RADIUS_CARD))
                     .bg(rgb(PANEL))
-                    .shadow(vec![BoxShadow {
-                        inset: false,
-                        color: gpui::black().opacity(0.6),
-                        offset: point(px(0.), px(24.)),
-                        blur_radius: px(64.),
-                        spread_radius: px(0.),
-                    }])
+                    .shadow(vec![
+                        BoxShadow::new(px(0.), px(24.), gpui::black().opacity(0.6))
+                            .blur_radius(px(64.)),
+                    ])
                     .flex()
                     .flex_col()
                     .gap(px(SPACE_LG))

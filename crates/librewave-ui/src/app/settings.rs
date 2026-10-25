@@ -11,8 +11,7 @@ use super::theme::{
 };
 use super::{SettingsModal, Shell, configured_socket_path};
 use gpui::{
-    AnyElement, BoxShadow, Context, Div, FontWeight, IntoElement, div, point, prelude::*, px, rgb,
-    rgba,
+    AnyElement, BoxShadow, Context, Div, FontWeight, IntoElement, div, prelude::*, px, rgb, rgba,
 };
 use librewave_core::{Command, MixerRuntimeState, ServiceState};
 
@@ -99,13 +98,10 @@ impl Shell {
                     .rounded(px(RADIUS_CARD))
                     .overflow_hidden()
                     .bg(rgb(PANEL))
-                    .shadow(vec![BoxShadow {
-                        inset: false,
-                        color: gpui::black().opacity(0.6),
-                        offset: point(px(0.), px(24.)),
-                        blur_radius: px(64.),
-                        spread_radius: px(0.),
-                    }])
+                    .shadow(vec![
+                        BoxShadow::new(px(0.), px(24.), gpui::black().opacity(0.6))
+                            .blur_radius(px(64.)),
+                    ])
                     .flex()
                     .child(self.settings_navigation(cx))
                     .child(
