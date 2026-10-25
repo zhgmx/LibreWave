@@ -641,8 +641,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "gpui-tests")]
-    fn snapshot_with_controls(write_access: DeviceWriteAccess) -> Snapshot {
+    pub(super) fn snapshot_with_controls(write_access: DeviceWriteAccess) -> Snapshot {
         use librewave_core::{
             ApiVersion, DeviceAdmissionSnapshot, DeviceConnection, DeviceModel, DeviceSnapshot,
             VolumeSelection, Wave3ConfigSnapshot,

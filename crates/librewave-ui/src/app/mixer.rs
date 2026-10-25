@@ -26,11 +26,20 @@ pub(super) struct FaderEdit {
     pub(super) fader: FaderGain,
 }
 
-/// One latest pointer intent across all channel and output faders.
+/// One latest pointer intent across all faders and hardware level sliders.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum MixerEdit {
     Input(FaderEdit),
-    Output { target: MixTarget, fader: FaderGain },
+    Output {
+        target: MixTarget,
+        fader: FaderGain,
+    },
+    /// A Wave:3 level. The command uses the device generation that is
+    /// current when it is sent, so a queued value follows earlier writes.
+    Hardware {
+        device: librewave_core::DeviceId,
+        control: librewave_core::Wave3Control,
+    },
 }
 impl From<FaderEdit> for MixerEdit {
     fn from(edit: FaderEdit) -> Self {
@@ -49,12 +58,15 @@ impl MixerEdit {
                     route: MixRoute::new(route.enabled(), fader),
                 })
             }
+            Self::Hardware { device, control } => {
+                super::hardware::level_command(snapshot, device, control)
+            }
         }
     }
     fn input(self) -> Option<FaderEdit> {
         match self {
             Self::Input(edit) => Some(edit),
-            Self::Output { .. } => None,
+            Self::Output { .. } | Self::Hardware { .. } => None,
         }
     }
 }
