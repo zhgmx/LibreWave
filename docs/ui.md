@@ -31,7 +31,7 @@ The stage shows the Wave:3 illustration, its connection state, and the admitted 
 - On API 5.4, the level dots follow the measured brackets for microphone gain, headphone level, and the Mix position. Values outside the measured brackets stay dark. Hover over the illustration to see when the mapping is unverified. [Protocol evidence](protocol-evidence.md) has the measurements.
 - All lights are dark when controls are unavailable, the device is disconnected, or the device LEDs are off.
 
-The daemon reads the device configuration every 500 ms while it is connected. Polling never changes hardware values. **Read controls** retries admission. It can restore the managed Clipguard, Low-cut, LED, and Gain Lock settings. After the first read, the same action is the circular arrow beside the device name.
+The daemon reads the device configuration every 500 ms while it is connected. Polling does not change hardware values, except that the first read after a replug or a boot writes back the saved levels that ALSA overwrote. **Read controls** retries admission. It can restore the managed Clipguard, Low-cut, LED, and Gain Lock settings. After the first read, the same action is the circular arrow beside the device name.
 
 The hardware controls sit under the illustration:
 

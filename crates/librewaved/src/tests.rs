@@ -2,9 +2,10 @@ use super::*;
 const FIRST_GENERATION: DeviceGeneration = DeviceGeneration::new([0; 16], 1);
 const SECOND_GENERATION: DeviceGeneration = DeviceGeneration::new([0; 16], 2);
 use crate::PersistenceError;
+use crate::levels::{DeviceLevels, LevelHost, LevelLock, LevelStore, SavedLevels};
 use librewave_core::{AudioSnapshot, FaderGain, Origin, ServiceFailureReason, ServiceState};
 use librewave_platform_linux::ServiceAvailability;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -190,7 +191,50 @@ impl ManagedWave3Connection for SharedConnection {
     }
 }
 
+/// The USB connection name, ALSA lock, and saved levels of a test daemon.
+#[derive(Clone)]
+struct FakeLevels {
+    connection: Rc<RefCell<Option<String>>>,
+    lockable: Rc<Cell<bool>>,
+    held: Rc<Cell<usize>>,
+    saved: Rc<RefCell<SavedLevels>>,
+}
+
+struct HeldLock(Rc<Cell<usize>>);
+
+impl Drop for HeldLock {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() - 1);
+    }
+}
+
+impl LevelHost for FakeLevels {
+    fn connection_id(&mut self, _: &UsbDeviceCandidate) -> Option<String> {
+        self.connection.borrow().clone()
+    }
+
+    fn lock_levels(&mut self, _: &UsbDeviceCandidate) -> Result<LevelLock, String> {
+        if !self.lockable.get() {
+            return Err("the device has no ALSA card yet".to_owned());
+        }
+        self.held.set(self.held.get() + 1);
+        Ok(Box::new(HeldLock(Rc::clone(&self.held))))
+    }
+}
+
+impl LevelStore for FakeLevels {
+    fn load(&mut self) -> Result<SavedLevels, PersistenceError> {
+        Ok(self.saved.borrow().clone())
+    }
+
+    fn save(&mut self, levels: &SavedLevels) -> Result<(), PersistenceError> {
+        *self.saved.borrow_mut() = levels.clone();
+        Ok(())
+    }
+}
+
 struct Harness {
+    levels: FakeLevels,
     daemon: Daemon,
     calls: Rc<RefCell<Vec<Wave3Control>>>,
     connections: Rc<RefCell<usize>>,
@@ -260,7 +304,15 @@ fn harness(
     );
     daemon.paths = fixture.paths.clone();
     daemon.allocator.ids_by_topology.insert(topology, DeviceId(1));
-    Harness { daemon, calls, connections, refreshes, store_state, saves, _fixture: fixture }
+    let levels = FakeLevels {
+        connection: Rc::new(RefCell::new(Some(FIRST_CONNECTION.to_owned()))),
+        lockable: Rc::new(Cell::new(true)),
+        held: Rc::new(Cell::new(0)),
+        saved: Rc::new(RefCell::new(SavedLevels::default())),
+    };
+    daemon.level_host = Box::new(levels.clone());
+    daemon.level_store = Box::new(levels.clone());
+    Harness { levels, daemon, calls, connections, refreshes, store_state, saves, _fixture: fixture }
 }
 
 fn inspect(daemon: &mut Daemon) -> DeviceSnapshot {
@@ -989,8 +1041,15 @@ fn reconnect_keeps_physical_controls_instead_of_replaying_saved_levels() {
     assert!(harness.calls.borrow().is_empty());
 }
 
+const FIRST_CONNECTION: &str = "0f3a6c1e-2b4d-4e5f-8a9b-0c1d2e3f4a5b/001/009";
+const SECOND_CONNECTION: &str = "0f3a6c1e-2b4d-4e5f-8a9b-0c1d2e3f4a5b/001/019";
+
+fn saved_levels(h: &Harness) -> Option<DeviceLevels> {
+    h.levels.saved.borrow().get("1-8.3").cloned()
+}
+
 #[test]
-fn reconnect_puts_back_the_levels_from_before_the_disconnect() {
+fn a_new_connection_puts_back_the_saved_levels() {
     // ALSA writes its saved card volumes when the card reappears.
     let mut alsa = wave3_config();
     alsa.input_gain.raw = 4096;
@@ -1005,29 +1064,17 @@ fn reconnect_puts_back_the_levels_from_before_the_disconnect() {
     headphone.headphone_volume = before.headphone_volume;
     let mut both = headphone.clone();
     both.headphone_mute = true;
-    let mut h = harness(
-        DesiredState::default(),
-        alsa.clone(),
+    let mut h = unplug_after(
+        &alsa,
+        &before,
         vec![
             ConnectionOutcome::Applied(gain),
             ConnectionOutcome::Applied(headphone),
             ConnectionOutcome::Applied(both.clone()),
         ],
-        vec![],
     );
-    h.daemon.observe_controls(Instant::now());
-    let due = h.daemon.control_reads[&DeviceId(1)];
-    h.refreshes.borrow_mut().push_back(ConnectionRefreshOutcome::Changed(before.clone()));
-    h.daemon.observe_controls(due);
-    assert_eq!(h.daemon.snapshot().devices[0].admission.config(), Some(&before));
-    let due = h.daemon.control_reads[&DeviceId(1)];
-    h.refreshes
-        .borrow_mut()
-        .push_back(ConnectionRefreshOutcome::Failed(AdmissionError::Disconnected));
-    h.daemon.observe_controls(due);
-    assert!(h.daemon.connections.is_empty());
-    let retry = h.daemon.control_reads[&DeviceId(1)];
-    h.daemon.observe_controls(retry);
+    assert_eq!(h.levels.held.get(), 0, "a disconnect releases the ALSA lock");
+    replug(&mut h);
     assert_eq!(
         *h.calls.borrow(),
         vec![
@@ -1041,12 +1088,185 @@ fn reconnect_puts_back_the_levels_from_before_the_disconnect() {
         "the dial gain rounds to the nearest write step"
     );
     assert_eq!(h.daemon.snapshot().devices[0].admission.config(), Some(&both));
+    assert_eq!(h.levels.held.get(), 1, "the lock stays while the device is connected");
     assert_eq!(*h.saves.borrow(), 0, "restored levels do not become managed state");
+    assert_eq!(
+        saved_levels(&h),
+        Some(DeviceLevels::read(Some(SECOND_CONNECTION.to_owned()), &both)),
+        "the restored levels are saved for the new connection"
+    );
 
-    // A first connection in this daemon has nothing to put back.
+    // A first connection has nothing to put back.
     let mut fresh = harness(DesiredState::default(), alsa, vec![], vec![]);
     fresh.daemon.observe_controls(Instant::now());
     assert!(fresh.calls.borrow().is_empty());
+}
+
+/// Connects with `connected`, observes `before`, then sees the device
+/// disconnect. The next observation reconnects with `connected` again.
+fn unplug_after(
+    connected: &Wave3ConfigSnapshot,
+    before: &Wave3ConfigSnapshot,
+    outcomes: Vec<ConnectionOutcome>,
+) -> Harness {
+    let mut h = harness(DesiredState::default(), connected.clone(), outcomes, vec![]);
+    h.daemon.observe_controls(Instant::now());
+    let due = h.daemon.control_reads[&DeviceId(1)];
+    h.refreshes.borrow_mut().push_back(ConnectionRefreshOutcome::Changed(before.clone()));
+    h.daemon.observe_controls(due);
+    let due = h.daemon.control_reads[&DeviceId(1)];
+    h.refreshes
+        .borrow_mut()
+        .push_back(ConnectionRefreshOutcome::Failed(AdmissionError::Disconnected));
+    h.daemon.observe_controls(due);
+    assert!(h.daemon.connections.is_empty());
+    h
+}
+
+/// Reconnects on a new USB connection, as after a replug or a reboot.
+fn replug(h: &mut Harness) {
+    *h.levels.connection.borrow_mut() = Some(SECOND_CONNECTION.to_owned());
+    observe_again(h);
+}
+
+fn observe_again(h: &mut Harness) {
+    let retry = h.daemon.control_reads[&DeviceId(1)];
+    h.daemon.observe_controls(retry);
+}
+
+#[test]
+fn a_new_connection_unmutes_and_leaves_an_unchanged_dial_level() {
+    // ALSA muted the microphone; the dial gain between steps is unchanged.
+    let mut alsa = wave3_config();
+    alsa.input_gain.raw = 4726;
+    let before = alsa.clone();
+    alsa.input_mute = true;
+    let mut h = unplug_after(&alsa, &before, vec![ConnectionOutcome::Applied(before.clone())]);
+    replug(&mut h);
+    assert_eq!(*h.calls.borrow(), vec![Wave3Control::MicrophoneMute(false)]);
+}
+
+#[test]
+fn a_daemon_restart_on_the_same_connection_keeps_the_device_levels() {
+    let mut device = wave3_config();
+    device.headphone_volume.raw = -2048; // Changed with the dial while stopped.
+    let mut h = harness(DesiredState::default(), device.clone(), vec![], vec![]);
+    let mut saved = SavedLevels::default();
+    saved.set(
+        "1-8.3".to_owned(),
+        DeviceLevels::read(Some(FIRST_CONNECTION.into()), &wave3_config()),
+    );
+    h.daemon.levels = saved;
+    h.daemon.observe_controls(Instant::now());
+    assert!(h.calls.borrow().is_empty(), "the same connection writes nothing");
+    assert_eq!(saved_levels(&h), Some(DeviceLevels::read(Some(FIRST_CONNECTION.into()), &device)));
+
+    // After a reboot or replug, the saved levels come back.
+    let mut h = harness(DesiredState::default(), device, vec![], vec![]);
+    let mut saved = SavedLevels::default();
+    saved.set(
+        "1-8.3".to_owned(),
+        DeviceLevels::read(Some(FIRST_CONNECTION.into()), &wave3_config()),
+    );
+    h.daemon.levels = saved;
+    *h.levels.connection.borrow_mut() = Some(SECOND_CONNECTION.to_owned());
+    h.daemon.observe_controls(Instant::now());
+    assert_eq!(
+        *h.calls.borrow(),
+        vec![Wave3Control::HeadphoneLevel(wave3_config().headphone_volume)]
+    );
+}
+
+#[test]
+fn saved_levels_wait_for_the_alsa_lock() {
+    let alsa = wave3_config();
+    let mut before = alsa.clone();
+    before.headphone_volume.raw = -1536;
+    let mut h = unplug_after(&alsa, &before, vec![ConnectionOutcome::Applied(before.clone())]);
+    h.levels.lockable.set(false);
+    replug(&mut h);
+    assert!(h.calls.borrow().is_empty(), "ALSA could still overwrite a write now");
+    assert_eq!(
+        saved_levels(&h).map(|saved| saved.headphone_level),
+        Some(before.headphone_volume),
+        "ALSA's values do not replace the saved levels"
+    );
+    assert_eq!(
+        h.daemon.snapshot().devices[0].admission.control_access(),
+        librewave_core::ControlAccessState::Writable
+    );
+
+    h.levels.lockable.set(true);
+    observe_again(&mut h);
+    assert_eq!(*h.calls.borrow(), vec![Wave3Control::HeadphoneLevel(before.headphone_volume)]);
+    assert_eq!(h.daemon.snapshot().devices[0].admission.config(), Some(&before));
+    assert_eq!(h.levels.held.get(), 1);
+}
+
+#[test]
+fn a_level_written_while_the_restore_waits_replaces_the_saved_one() {
+    let alsa = wave3_config();
+    let mut before = alsa.clone();
+    before.headphone_volume.raw = -1536;
+    let mut chosen = alsa.clone();
+    chosen.headphone_volume.raw = -3072;
+    let mut h = unplug_after(&alsa, &before, vec![ConnectionOutcome::Applied(chosen.clone())]);
+    h.levels.lockable.set(false);
+    replug(&mut h);
+    let generation = h.daemon.snapshot().devices[0].admission.generation().expect("admitted");
+    h.daemon
+        .handle(
+            Command::SetWave3Control {
+                id: DeviceId(1),
+                expected_generation: generation,
+                control: Wave3Control::HeadphoneLevel(chosen.headphone_volume),
+            },
+            librewave_core::Origin::Client,
+        )
+        .expect("write the headphone level");
+    h.levels.lockable.set(true);
+    observe_again(&mut h);
+    assert_eq!(
+        *h.calls.borrow(),
+        vec![Wave3Control::HeadphoneLevel(chosen.headphone_volume)],
+        "the restore does not put back the older level"
+    );
+    assert_eq!(saved_levels(&h).map(|saved| saved.headphone_level), Some(chosen.headphone_volume));
+}
+
+#[test]
+fn a_dial_change_during_the_restore_keeps_the_device_writable() {
+    let alsa = wave3_config();
+    let mut before = alsa.clone();
+    before.input_gain.raw = 4096;
+    before.headphone_volume.raw = -1536;
+    let mut changed = alsa.clone();
+    changed.headphone_volume.raw = -2048;
+    let mut h =
+        unplug_after(&alsa, &before, vec![ConnectionOutcome::StaleBaseline(changed.clone())]);
+    replug(&mut h);
+    assert_eq!(h.calls.borrow().len(), 1, "the restore stops at the stale baseline");
+    let device = &h.daemon.snapshot().devices[0];
+    assert_eq!(device.admission.config(), Some(&changed));
+    assert_eq!(device.admission.control_access(), librewave_core::ControlAccessState::Writable);
+    assert_eq!(
+        saved_levels(&h).map(|saved| saved.headphone_level),
+        Some(changed.headphone_volume),
+        "the dial's value is saved"
+    );
+}
+
+#[test]
+fn a_locked_connection_saves_no_levels() {
+    let mut desired = DesiredState::default();
+    desired.stage("1-8.3".to_owned(), Wave3Control::GainLock(true)).expect("pending control");
+    let mut h = harness(desired, wave3_config(), vec![], vec![]);
+    h.daemon.observe_controls(Instant::now());
+    assert!(matches!(
+        h.daemon.snapshot().devices[0].admission,
+        DeviceAdmissionSnapshot::Admitted { write_access: DeviceWriteAccess::Locked { .. }, .. }
+    ));
+    assert_eq!(saved_levels(&h), None);
 }
 
 #[test]

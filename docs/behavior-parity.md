@@ -125,4 +125,4 @@ These ranges match the Wave:3 microphone gain and headphone level ranges. LibreW
 
 On the reference system, the saved values are 32 (16 dB) and 73 (−23.5 dB). Before a reconnect, the device reported a headphone level of −6 dB. About 1.6 s after the device returned, the first daemon read reported −23.5 dB. An earlier reconnect changed a microphone gain of 18.4609375 dB to 16 dB. ALSA restoration is the writer.
 
-LibreWave does not change ALSA persistence. The daemon writes back the levels it read before the disconnect, as [Hardware safety](hardware-safety.md) describes. If ALSA writes after the daemon, the ALSA value stays.
+LibreWave does not change ALSA persistence. Before it writes back the saved levels, the daemon locks the four level controls on the card, so a later ALSA write fails. [Hardware safety](hardware-safety.md) describes the restore.

@@ -322,7 +322,8 @@ pub(crate) fn check_profiles(root: &Path) -> Result<(), PersistenceError> {
     let device = root.join("device-state.json");
     let mixer = root.join("mixer-state.json");
     let audio = root.join("audio-state.json");
-    for path in [&device, &mixer, &audio] {
+    let levels = root.join("device-levels.json");
+    for path in [&device, &mixer, &audio, &levels] {
         match fs::symlink_metadata(pending_path(path)) {
             Ok(metadata) => validate_metadata(&pending_path(path), &metadata)
                 .map_err(|e| profile_error(path, &PersistenceError::Io(e)))?,
@@ -343,7 +344,10 @@ pub(crate) fn check_profiles(root: &Path) -> Result<(), PersistenceError> {
     .map_err(|e| profile_error(&mixer, &e))?;
     let state: crate::audio_session::AudioSession =
         read_json(&audio).map_err(|e| profile_error(&audio, &e))?.unwrap_or_default();
-    state.validate().map_err(|e| profile_error(&audio, &e))
+    state.validate().map_err(|e| profile_error(&audio, &e))?;
+    let saved: crate::levels::SavedLevels =
+        read_json(&levels).map_err(|e| profile_error(&levels, &e))?.unwrap_or_default();
+    saved.validate().map_err(|e| profile_error(&levels, &e))
 }
 
 fn profile_error(path: &Path, error: &PersistenceError) -> PersistenceError {

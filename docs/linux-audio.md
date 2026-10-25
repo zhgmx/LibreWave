@@ -32,7 +32,7 @@ device.vendor.id = "0x0fd9"
 device.product.id = "0x0070"
 ```
 
-The rule sets only `device.disabled = true`, which disables the exact card in the WirePlumber ALSA monitor. The fragment does not set `node.disabled`, create a node, load a component, or run a Lua script. WirePlumber documents `device.disabled` as the property that removes a matched card or device. See the [WirePlumber ALSA configuration reference](https://pipewire.pages.freedesktop.org/wireplumber/daemon/configuration/alsa.html).
+The rule sets only `device.disabled = true`, which disables the exact card in the WirePlumber ALSA monitor. The fragment does not set `node.disabled`, create a node, load a component, or run a Lua script. WirePlumber documents `device.disabled` as the property that removes a matched card or device. PipeWire therefore does not use the card's level controls. While the daemon holds a Wave:3 connection, it locks those controls against other ALSA clients, as [Hardware safety](hardware-safety.md) describes. See the [WirePlumber ALSA configuration reference](https://pipewire.pages.freedesktop.org/wireplumber/daemon/configuration/alsa.html).
 
 The rule has no serial, name, family, class, or regular-expression match. A different vendor ID or an adjacent product ID does not match it.
 

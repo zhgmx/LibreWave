@@ -1,4 +1,5 @@
-//! Read-only USB observation on the serialized daemon control loop.
+//! USB observation on the serialized daemon control loop. Reads never write,
+//! except the saved-level restore on a new USB connection.
 use super::{
     AdmissionPurpose, Daemon, DeviceAdmissionSnapshot, DeviceId, DeviceWriteLockReason, Duration,
     Instant, ignore_reconciliation_event,

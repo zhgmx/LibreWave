@@ -3,6 +3,7 @@
 mod audio;
 mod audio_session;
 mod control;
+mod levels;
 mod persistence;
 
 pub use persistence::PersistenceError;

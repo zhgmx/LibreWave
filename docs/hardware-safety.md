@@ -100,8 +100,17 @@ Logs and fixtures must not contain USB serial numbers, user names, application t
 
 ## Control ownership
 
-The physical device owns microphone gain and mute, headphone level and mute, direct monitor balance, and knob target. Admission reads these controls and does not restore saved values, so adjustments made while the daemon was stopped stay in place. An explicit client command still uses the generation check and complete readback verification.
+The physical device owns microphone gain and mute, headphone level and mute, direct monitor balance, and knob target. A daemon restart reads these controls and keeps them, so adjustments made while the daemon was stopped stay in place. An explicit client command still uses the generation check and complete readback verification.
 
-The ALSA restore service writes its saved card volumes when the Wave:3 reconnects. When the daemon sees the device disconnect, it keeps the last microphone gain and mute and headphone level and mute that it read. After the device reconnects, the daemon writes back each of these values that changed, through the normal transaction with readback. A level between 0.5 dB write steps, such as a gain set with the dial, is written as the nearest step. These restored values do not become managed state. A reconnect while the daemon is stopped keeps the values that ALSA wrote.
+ALSA writes its saved card volumes when a Wave:3 card appears after a replug or a boot. ALSA does not see a change made with the dial, so these values are often stale. The daemon therefore saves the last microphone gain and mute and headphone level and mute that it read from a writable connection. It stores them in `device-levels.json` under the profile directory, with a name for the USB connection: the boot ID and the USB bus and device numbers. On the first admission of a new connection, the daemon writes back each saved value that differs, through the normal transaction with readback:
 
-On reconnect, LibreWave restores only the non-level settings that a client changed through LibreWave: Clipguard, Low-cut, the LED settings, and Gain Lock. A pending or ambiguous write blocks new hardware writes until recovery resolves it.
+- First, the daemon locks the ALSA controls `Mic Capture Volume`, `Mic Capture Switch`, `PCM Playback Volume`, and `PCM Playback Switch` on the card of the device. Then it reads the device again. A later ALSA write to these controls fails, so the daemon's restore is the last write. Until the lock succeeds, the saved values wait, and the daemon tries again on each read.
+- A level is written as the nearest 0.5 dB step, because a gain set with the dial can lie between steps.
+- Both mutes are restored in both directions.
+- If the dial changes the device during the restore, the restore stops, the dial's value stays, and the device stays writable.
+
+A daemon restart keeps the USB connection, so it writes nothing. The restored values do not become managed state.
+
+The daemon holds the lock for as long as it holds the connection. During that time, `alsamixer`, `amixer`, and other ALSA clients cannot change these four controls. LibreWave and the device controls can. The daemon never writes these controls through ALSA.
+
+Explicit inspection restores the other settings that a client changed through LibreWave: Clipguard, Low-cut, the LED settings, and Gain Lock. A pending or ambiguous write blocks new hardware writes until recovery resolves it.

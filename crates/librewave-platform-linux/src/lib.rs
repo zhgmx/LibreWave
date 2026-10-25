@@ -3,8 +3,9 @@
 //! This crate can inspect the reviewed Wave:3 normal-mode USB device or open one
 //! exclusive vendor-control connection. The connection admits reads and typed,
 //! reversible writes through one handle. It does not claim audio interfaces,
-//! detach kernel drivers, change ALSA controls, or modify `WirePlumber`, udev,
-//! or systemd state. The audio host opens only a revalidated physical PCM. Its
+//! detach kernel drivers, write ALSA controls, or modify `WirePlumber`, udev,
+//! or systemd state. It can lock the Wave:3 ALSA level controls against other
+//! ALSA writers. The audio host opens only a revalidated physical PCM. Its
 //! production adapter does not publish product endpoints until it can create
 //! frame-carrying `PipeWire` streams.
 
@@ -24,6 +25,7 @@ pub fn new_daemon_epoch() -> io::Result<[u8; 16]> {
 
 pub use librewave_device::{DeviceIdentity, DeviceModel, UsbIdentity};
 
+pub mod alsa_levels;
 pub mod audio_host;
 pub mod audio_lifecycle;
 pub mod audio_policy;

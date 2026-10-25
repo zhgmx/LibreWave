@@ -4,6 +4,10 @@ use crate::audio_session::{
     AudioSession, AudioSessionStore, FileAudioSessionStore, MemoryAudioSessionStore,
 };
 use crate::control::{ConnectionOutcome, ConnectionRefreshOutcome, ManagedWave3Connection};
+use crate::levels::{
+    DeviceLevels, FileLevelStore, LevelHost, LevelLock, LevelStore, LinuxLevelHost,
+    MemoryLevelStore, NoLevelHost, SavedLevels,
+};
 use crate::persistence::{
     DesiredState, DesiredStateStore, DesiredWave3Controls, FileDesiredStateStore,
     FileMixerStateStore, MixerStateStore,
@@ -60,10 +64,10 @@ pub struct Daemon {
     next_defaults_recovery: Instant,
     next_control_inventory: Instant,
     control_reads: BTreeMap<DeviceId, Instant>,
-    /// The last configuration read from each connected topology.
-    last_observed: BTreeMap<String, Wave3ConfigSnapshot>,
-    /// The configuration of each topology when this daemon saw it disconnect.
-    before_disconnect: BTreeMap<String, Wave3ConfigSnapshot>,
+    /// The last levels read from each device, for a replug or a reboot.
+    levels: SavedLevels,
+    level_store: Box<dyn LevelStore>,
+    level_host: Box<dyn LevelHost>,
 }
 
 type ConnectionFactory =
@@ -74,6 +78,14 @@ struct OwnedConnection {
     connection: Box<dyn ManagedWave3Connection>,
     locked: Option<DeviceWriteLockReason>,
     observed_only: bool,
+    /// The USB connection name, from [`LevelHost::connection_id`].
+    connection_id: Option<String>,
+    /// Keeps other ALSA writers away from the levels while connected.
+    level_lock: Option<LevelLock>,
+    /// Saved levels that wait for `level_lock` before they are written back.
+    levels_due: Option<DeviceLevels>,
+    /// The last lock failure, so that it is logged once.
+    lock_error: Option<String>,
 }
 
 enum RestoreResult {
@@ -115,6 +127,10 @@ impl Daemon {
         daemon.audio_session_store =
             Box::new(FileAudioSessionStore(profile_state_path("audio-state.json")?));
         daemon.load_audio_session()?;
+        daemon.level_store = Box::new(FileLevelStore(profile_state_path("device-levels.json")?));
+        daemon.levels = daemon.level_store.load()?;
+        daemon.level_host =
+            Box::new(LinuxLevelHost(librewave_platform_linux::DiscoveryPaths::default()));
         Ok(daemon)
     }
 
@@ -172,8 +188,9 @@ impl Daemon {
             next_defaults_recovery: Instant::now(),
             next_control_inventory: Instant::now(),
             control_reads: BTreeMap::new(),
-            last_observed: BTreeMap::new(),
-            before_disconnect: BTreeMap::new(),
+            levels: SavedLevels::default(),
+            level_store: Box::new(MemoryLevelStore::default()),
+            level_host: Box::new(NoLevelHost),
             audio_endpoints: Box::new(librewave_platform_linux::desktop_defaults::audio_endpoints),
         })
     }
@@ -213,8 +230,9 @@ impl Daemon {
             next_defaults_recovery: Instant::now(),
             next_control_inventory: Instant::now(),
             control_reads: BTreeMap::new(),
-            last_observed: BTreeMap::new(),
-            before_disconnect: BTreeMap::new(),
+            levels: SavedLevels::default(),
+            level_store: Box::new(MemoryLevelStore::default()),
+            level_host: Box::new(NoLevelHost),
         }
     }
 
@@ -807,14 +825,27 @@ impl Daemon {
             }
             Some(_) | None => RestoreResult::Ready(observed),
         };
-        // ALSA restores its saved card volumes when the card reappears. Put
-        // back the levels that the device had when this daemon saw it go.
-        let restore = match (restore, self.before_disconnect.remove(&topology)) {
-            (RestoreResult::Ready(observed), Some(before)) => {
-                let controls = levels_to_restore(&observed, &before);
-                Self::apply_controls(connection.as_mut(), observed, controls)
+        let connection_id = self.level_host.connection_id(&candidate);
+        let levels_due = self
+            .levels
+            .get(&topology)
+            .filter(|saved| saved.due_on(connection_id.as_ref()))
+            .cloned();
+        let mut owned = OwnedConnection {
+            topology,
+            connection,
+            locked: None,
+            observed_only: matches!(purpose, AdmissionPurpose::Observe),
+            connection_id,
+            level_lock: None,
+            levels_due,
+            lock_error: None,
+        };
+        let restore = match restore {
+            RestoreResult::Ready(observed) => {
+                Self::settle_levels(self.level_host.as_mut(), &mut owned, &candidate, observed)
             }
-            (restore, _) => restore,
+            restore => restore,
         };
         if matches!(restore, RestoreResult::Disconnected) {
             self.update_admission(
@@ -830,32 +861,65 @@ impl Daemon {
             RestoreResult::Locked { config, reason } => (config, Some(reason)),
             RestoreResult::Disconnected => unreachable!("handled above"),
         };
-        if let (Some(config), None) = (&config, locked) {
-            self.last_observed.insert(topology.clone(), config.clone());
-        }
-        let generation = self.next_device_generation(&topology)?;
+        owned.locked = locked;
+        let generation = self.next_device_generation(&owned.topology)?;
         let write_access =
             locked.map_or(DeviceWriteAccess::Ready, |reason| DeviceWriteAccess::Locked { reason });
+        // The connection is in place first, so the admission saves its levels.
+        self.connections.insert(id, owned);
         self.update_admission(
             id,
             DeviceConnection::Connected,
             DeviceAdmissionSnapshot::Admitted { api, generation, write_access, config },
             origin,
-        )?;
-        self.connections.insert(
-            id,
-            OwnedConnection {
-                topology,
-                connection,
-                locked,
-                observed_only: matches!(purpose, AdmissionPurpose::Observe),
-            },
-        );
-        Ok(())
+        )
+    }
+
+    /// Locks the ALSA level controls, then writes back saved levels that are
+    /// due. Without the lock, due levels wait, because ALSA could still
+    /// overwrite them. The daemon tries again on its next read.
+    fn settle_levels(
+        host: &mut dyn LevelHost,
+        owned: &mut OwnedConnection,
+        candidate: &UsbDeviceCandidate,
+        mut observed: Wave3ConfigSnapshot,
+    ) -> RestoreResult {
+        if owned.level_lock.is_none() {
+            match host.lock_levels(candidate) {
+                Ok(lock) => {
+                    owned.level_lock = Some(lock);
+                    owned.lock_error = None;
+                }
+                Err(error) => {
+                    if owned.levels_due.is_some() && owned.lock_error.as_ref() != Some(&error) {
+                        eprintln!("librewaved: saved levels wait for the ALSA lock: {error}");
+                    }
+                    owned.lock_error = Some(error);
+                    return RestoreResult::Ready(observed);
+                }
+            }
+            if owned.levels_due.is_none() {
+                return RestoreResult::Ready(observed);
+            }
+            // ALSA may have written the card before the lock.
+            match owned.connection.refresh() {
+                ConnectionRefreshOutcome::Changed(config)
+                | ConnectionRefreshOutcome::Unchanged(config) => observed = config,
+                ConnectionRefreshOutcome::Failed(AdmissionError::Disconnected) => {
+                    return RestoreResult::Disconnected;
+                }
+                ConnectionRefreshOutcome::Failed(_) => return RestoreResult::Ready(observed),
+            }
+        }
+        let Some(due) = owned.levels_due.take() else {
+            return RestoreResult::Ready(observed);
+        };
+        let controls = due.controls_for(&observed);
+        Self::restore_levels(owned.connection.as_mut(), observed, controls)
     }
 
     fn refresh_connection(&mut self, id: DeviceId) -> Result<(), IpcError> {
-        let (api, topology, locked, outcome) = {
+        let (api, topology, locked, mut outcome) = {
             let owned = self
                 .connections
                 .get_mut(&id)
@@ -867,17 +931,39 @@ impl Daemon {
                 owned.connection.refresh(),
             )
         };
-        match &outcome {
+        let current = match &outcome {
             ConnectionRefreshOutcome::Changed(config)
             | ConnectionRefreshOutcome::Unchanged(config)
                 if locked.is_none() =>
             {
-                self.last_observed.insert(topology.clone(), config.clone());
+                Some(config.clone())
             }
-            ConnectionRefreshOutcome::Failed(AdmissionError::Disconnected) => {
-                self.forget_connection(&topology);
+            _ => None,
+        };
+        // A connection without the ALSA lock tries again here.
+        if let Some(current) = current
+            && let Some(candidate) = self.candidates.get(&id)
+            && let Some(owned) = self.connections.get_mut(&id)
+            && owned.level_lock.is_none()
+        {
+            match Self::settle_levels(self.level_host.as_mut(), owned, candidate, current.clone()) {
+                RestoreResult::Ready(settled) if settled != current => {
+                    outcome = ConnectionRefreshOutcome::Changed(settled);
+                }
+                RestoreResult::Ready(_) => {}
+                RestoreResult::Disconnected => {
+                    outcome = ConnectionRefreshOutcome::Failed(AdmissionError::Disconnected);
+                }
+                RestoreResult::Locked { config, reason } => {
+                    return self.lock_connection(
+                        id,
+                        &topology,
+                        config,
+                        reason,
+                        librewave_core::Origin::Recovery,
+                    );
+                }
             }
-            _ => {}
         }
         match outcome {
             ConnectionRefreshOutcome::Changed(config) => {
@@ -965,6 +1051,12 @@ impl Daemon {
             .expect("connection checked during control preparation")
             .connection
             .apply(control);
+        // A level written now replaces the saved one that waits for the lock.
+        if matches!(outcome, ConnectionOutcome::Applied(_) | ConnectionOutcome::Unchanged(_))
+            && let Some(due) = self.connections.get_mut(&id).and_then(|o| o.levels_due.as_mut())
+        {
+            due.update(control);
+        }
         self.settle_pending(id, &topology, &outcome, current, origin)?;
         self.finish_control(id, &topology, outcome, origin)?;
         self.device(id)
@@ -1223,7 +1315,23 @@ impl Daemon {
         config: Option<Wave3ConfigSnapshot>,
         origin: librewave_core::Origin,
     ) -> Result<(), IpcError> {
-        let reason = DeviceWriteLockReason::PersistenceAmbiguous;
+        self.lock_connection(
+            id,
+            topology,
+            config,
+            DeviceWriteLockReason::PersistenceAmbiguous,
+            origin,
+        )
+    }
+
+    fn lock_connection(
+        &mut self,
+        id: DeviceId,
+        topology: &str,
+        config: Option<Wave3ConfigSnapshot>,
+        reason: DeviceWriteLockReason,
+        origin: librewave_core::Origin,
+    ) -> Result<(), IpcError> {
         let api = self.connections.get(&id).map(|owned| owned.connection.api());
         if let Some(owned) = self.connections.get_mut(&id) {
             owned.locked = Some(reason);
@@ -1245,11 +1353,30 @@ impl Daemon {
         )
     }
 
-    /// Keeps the last levels of a topology that this daemon saw disconnect.
-    fn forget_connection(&mut self, topology: &str) {
-        if let Some(config) = self.last_observed.remove(topology) {
-            self.before_disconnect.insert(topology.to_owned(), config);
+    /// Writes back saved levels. A dial change during the restore makes the
+    /// baseline stale: the restore stops there, keeps the dial's value, and
+    /// keeps the device writable instead of locking it.
+    fn restore_levels(
+        connection: &mut dyn ManagedWave3Connection,
+        observed: Wave3ConfigSnapshot,
+        controls: Vec<Wave3Control>,
+    ) -> RestoreResult {
+        let mut current = observed;
+        for control in controls {
+            match connection.apply(control) {
+                ConnectionOutcome::Applied(config) | ConnectionOutcome::Unchanged(config) => {
+                    current = config;
+                }
+                ConnectionOutcome::StaleBaseline(config) => {
+                    eprintln!("librewaved: the level restore stopped: the device changed");
+                    return RestoreResult::Ready(config);
+                }
+                outcome => {
+                    return Self::apply_controls_outcome(outcome, current);
+                }
+            }
         }
+        RestoreResult::Ready(current)
     }
 
     fn restore_desired(
@@ -1271,32 +1398,41 @@ impl Daemon {
                 ConnectionOutcome::Applied(config) | ConnectionOutcome::Unchanged(config) => {
                     observed = config;
                 }
-                ConnectionOutcome::Failed { observed: current, restoration_unverified, .. } => {
-                    return RestoreResult::Locked {
-                        config: current,
-                        reason: if restoration_unverified {
-                            DeviceWriteLockReason::RestorationUnverified
-                        } else {
-                            DeviceWriteLockReason::RestoreFailed
-                        },
-                    };
-                }
-                ConnectionOutcome::StaleBaseline(current) => {
-                    return RestoreResult::Locked {
-                        config: Some(current),
-                        reason: DeviceWriteLockReason::RestoreFailed,
-                    };
-                }
-                ConnectionOutcome::Disconnected => return RestoreResult::Disconnected,
-                ConnectionOutcome::Invalid(_) => {
-                    return RestoreResult::Locked {
-                        config: Some(observed),
-                        reason: DeviceWriteLockReason::RestoreFailed,
-                    };
-                }
+                outcome => return Self::apply_controls_outcome(outcome, observed),
             }
         }
         RestoreResult::Ready(observed)
+    }
+
+    /// The locked or disconnected result of a restore write that did not apply.
+    fn apply_controls_outcome(
+        outcome: ConnectionOutcome,
+        observed: Wave3ConfigSnapshot,
+    ) -> RestoreResult {
+        match outcome {
+            ConnectionOutcome::Applied(config) | ConnectionOutcome::Unchanged(config) => {
+                RestoreResult::Ready(config)
+            }
+            ConnectionOutcome::Failed { observed: current, restoration_unverified, .. } => {
+                RestoreResult::Locked {
+                    config: current,
+                    reason: if restoration_unverified {
+                        DeviceWriteLockReason::RestorationUnverified
+                    } else {
+                        DeviceWriteLockReason::RestoreFailed
+                    },
+                }
+            }
+            ConnectionOutcome::StaleBaseline(current) => RestoreResult::Locked {
+                config: Some(current),
+                reason: DeviceWriteLockReason::RestoreFailed,
+            },
+            ConnectionOutcome::Disconnected => RestoreResult::Disconnected,
+            ConnectionOutcome::Invalid(_) => RestoreResult::Locked {
+                config: Some(observed),
+                reason: DeviceWriteLockReason::RestoreFailed,
+            },
+        }
     }
 
     fn update_admission(
@@ -1311,7 +1447,43 @@ impl Daemon {
                 .update_device_inspection(id, connection, admission, origin)
                 .map_err(|_| IpcError::device_not_found(id))?,
         );
+        self.remember_levels(id);
         Ok(())
+    }
+
+    /// Saves the levels of a writable connection when they change. Levels
+    /// that are still due stay saved as they are, because the device may show
+    /// ALSA's stale values until the restore.
+    fn remember_levels(&mut self, id: DeviceId) {
+        let Some(owned) = self.connections.get(&id) else {
+            return;
+        };
+        if owned.locked.is_some() || owned.levels_due.is_some() {
+            return;
+        }
+        let Ok(DeviceSnapshot {
+            admission:
+                DeviceAdmissionSnapshot::Admitted {
+                    write_access: DeviceWriteAccess::Ready,
+                    config: Some(config),
+                    ..
+                },
+            ..
+        }) = self.device(id)
+        else {
+            return;
+        };
+        let levels = DeviceLevels::read(owned.connection_id.clone(), &config);
+        if self.levels.get(&owned.topology) == Some(&levels) {
+            return;
+        }
+        let mut next = self.levels.clone();
+        next.set(owned.topology.clone(), levels);
+        // Without a writable file, the levels still apply until a restart.
+        if let Err(error) = self.level_store.save(&next) {
+            eprintln!("librewaved: the device levels are not saved: {error}");
+        }
+        self.levels = next;
     }
 
     fn device(&self, id: DeviceId) -> Result<DeviceSnapshot, IpcError> {
@@ -1344,15 +1516,6 @@ impl Daemon {
             }
         }
         self.candidates = candidates;
-        let removed: Vec<String> = self
-            .connections
-            .iter()
-            .filter(|(id, _)| !self.candidates.contains_key(id))
-            .map(|(_, owned)| owned.topology.clone())
-            .collect();
-        for topology in &removed {
-            self.forget_connection(topology);
-        }
         self.connections.retain(|id, _| self.candidates.contains_key(id));
         self.state.replace(snapshot, origin)
     }
@@ -1500,37 +1663,6 @@ pub(crate) fn persist_mixer_profile<H: crate::audio::SupervisedAudioHost>(
         eprintln!("librewaved: saved profile awaits audio recovery: {error}");
     }
     Ok(())
-}
-
-/// The level controls that ALSA can overwrite on reconnect, where they
-/// differ from the levels before the disconnect. A level between write steps,
-/// such as a gain set with the dial, is rounded to the nearest 0.5 dB step.
-fn levels_to_restore(
-    observed: &Wave3ConfigSnapshot,
-    before: &Wave3ConfigSnapshot,
-) -> Vec<Wave3Control> {
-    let gain = nearest_step(before.input_gain);
-    let headphone = nearest_step(before.headphone_volume);
-    [
-        (observed.input_gain != gain).then_some(Wave3Control::InputGain(gain)),
-        (observed.input_mute != before.input_mute)
-            .then_some(Wave3Control::MicrophoneMute(before.input_mute)),
-        (observed.headphone_volume != headphone).then_some(Wave3Control::HeadphoneLevel(headphone)),
-        (observed.headphone_mute != before.headphone_mute)
-            .then_some(Wave3Control::HeadphoneMute(before.headphone_mute)),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|control| control::validate_control(*control).is_ok())
-    .collect()
-}
-
-/// Rounds a Q8.8 level to the nearest 0.5 dB write step (raw multiple of 128).
-fn nearest_step(value: librewave_core::FixedPointValue) -> librewave_core::FixedPointValue {
-    if value.fractional_bits != 8 {
-        return value;
-    }
-    librewave_core::FixedPointValue { raw: (value.raw + 64).div_euclid(128) * 128, ..value }
 }
 
 fn controls_to_restore(
