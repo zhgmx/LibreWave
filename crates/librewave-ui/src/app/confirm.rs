@@ -44,9 +44,14 @@ impl Shell {
         }
     }
 
+    /// Sends the confirmed request. The dialog stays open if the request
+    /// cannot be sent yet.
     pub(super) fn accept_confirmation(&mut self, cx: &mut Context<Self>) {
-        if let Some(confirmation) = self.confirmation.take() {
-            self.send(confirmation.command, cx);
+        if let Some(confirmation) = self.confirmation.take()
+            && !self.try_send(confirmation.command, cx)
+        {
+            self.confirmation = Some(confirmation);
+            cx.notify();
         }
     }
 
@@ -122,7 +127,7 @@ impl Shell {
                                 "confirmation-accept",
                                 confirmation.action,
                                 Tone::Danger,
-                                !self.busy(),
+                                !self.busy() && !self.pending,
                                 cx,
                                 |this, _, cx| this.accept_confirmation(cx),
                             )),
@@ -133,6 +138,28 @@ impl Shell {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
+    fn enter_does_not_confirm_and_a_busy_window_keeps_the_dialog(cx: &mut gpui::TestAppContext) {
+        use crate::app::tests::shell_with;
+        let (view, cx) = cx.add_window_view(|_, _| shell_with(librewave_core::Snapshot::empty()));
+        cx.update(|window, cx| view.update(cx, |view, cx| view.open_settings(window, cx)));
+        let reset = cx.debug_bounds("reset-configuration").expect("reset button");
+        cx.simulate_click(reset.center(), gpui::Modifiers::none());
+        // Enter right after the dialog opens confirms nothing.
+        cx.simulate_keystrokes("enter");
+        view.read_with(cx, |view, _| {
+            assert!(view.confirmation.is_some());
+            assert!(!view.pending);
+        });
+        // While another request runs, accepting keeps the dialog open.
+        view.update(cx, |view, cx| {
+            view.pending = true;
+            view.accept_confirmation(cx);
+            assert!(view.confirmation.is_some(), "the request waits");
+        });
+    }
+
     #[cfg(feature = "gpui-tests")]
     #[gpui::test]
     fn reset_asks_first_and_cancel_keeps_settings_open_without_a_request(

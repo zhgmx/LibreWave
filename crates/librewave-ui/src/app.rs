@@ -725,8 +725,30 @@ impl Shell {
     }
 }
 
+impl Shell {
+    /// Closes the Edit input pop-up and drops a removal confirmation when
+    /// their input is gone, for example after a removal elsewhere or a stop.
+    fn drop_stale_input_state(&mut self) {
+        let exists = |shell: &Self, source| {
+            shell.snapshot.as_ref().is_some_and(|s| s.mixer.profile.source(source).is_some())
+        };
+        if self.application_input.is_some_and(|source| !exists(self, source)) {
+            self.application_input = None;
+            self.channel_name = None;
+            self.assignment_name = None;
+        }
+        if let Some(Command::RemoveMixerInput { source, .. }) =
+            self.confirmation.as_ref().map(|confirmation| confirmation.command)
+            && !exists(self, source)
+        {
+            self.confirmation = None;
+        }
+    }
+}
+
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.drop_stale_input_state();
         if self.settings_trigger_focus.is_none() {
             let focus = cx.focus_handle();
             if window.focused(cx).is_none() {

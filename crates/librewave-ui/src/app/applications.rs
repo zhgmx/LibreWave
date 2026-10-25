@@ -893,6 +893,34 @@ mod tests {
 
     #[cfg(feature = "gpui-tests")]
     #[gpui::test]
+    fn the_pop_up_closes_when_its_input_is_removed_elsewhere(cx: &mut gpui::TestAppContext) {
+        let mut snapshot = Snapshot::empty();
+        let without = snapshot.clone();
+        snapshot.mixer.profile = snapshot
+            .mixer
+            .profile
+            .with_input(InputName::try_new("Music").expect("valid name"))
+            .expect("available input");
+        let (view, cx) = cx.add_window_view(|_, _| shell_with(snapshot));
+        let music = cx.debug_bounds("edit-input-3").expect("music edit button");
+        cx.simulate_click(music.center(), gpui::Modifiers::none());
+        assert!(cx.debug_bounds("channel-menu").is_some());
+        // Another client removed the input.
+        view.update(cx, |view, cx| {
+            view.snapshot = Some(without);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.application_input.is_none()));
+        assert!(cx.debug_bounds("channel-menu").is_none());
+        // Nothing invisible blocks the next click.
+        let system = cx.debug_bounds("edit-input-2").expect("system edit button");
+        cx.simulate_click(system.center(), gpui::Modifiers::none());
+        view.read_with(cx, |view, _| assert_eq!(view.application_input, Some(SourceId::new(2))));
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
     fn the_file_picker_fills_the_rule_with_its_kind(cx: &mut gpui::TestAppContext) {
         let (view, cx) = cx.add_window_view(|_, _| shell_with(Snapshot::empty()));
         let system = cx.debug_bounds("edit-input-2").expect("system edit button");

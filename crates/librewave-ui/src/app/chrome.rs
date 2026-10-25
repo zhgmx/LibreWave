@@ -57,8 +57,7 @@ impl Shell {
             .flex()
             .flex_col()
             .capture_key_down(cx.listener(Self::frame_key))
-            // A drag ends wherever the pointer is released.
-            // A fallback for a release that the dragged control did not see.
+            // A fallback for a level drag release that its control did not see.
             .capture_any_mouse_up(cx.listener(|this, event: &gpui::MouseUpEvent, _, cx| {
                 if event.button == gpui::MouseButton::Left {
                     this.end_level_gesture(cx);
@@ -84,12 +83,9 @@ impl Shell {
         window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(confirmation) = &this.confirmation {
+        if this.confirmation.is_some() {
             match event.keystroke.key.as_str() {
                 "escape" => this.cancel_confirmation(cx),
-                "enter" if confirmation.focus.is_focused(window) => {
-                    this.accept_confirmation(cx);
-                }
                 "tab" => {
                     if event.keystroke.modifiers.shift {
                         window.focus_prev(cx);
