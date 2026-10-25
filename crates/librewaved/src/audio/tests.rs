@@ -413,7 +413,7 @@ fn profile_persistence_commits_only_after_save_and_cancels_on_failure() {
         let result = crate::manager::persist_mixer_profile(
             Some(&mut audio),
             &mut store,
-            &MixerProfile::first_run(),
+            &MixerProfile::first_run(&[]),
         );
         assert_eq!(result.is_ok(), failure == 0);
         let expected: &[&str] = match failure {

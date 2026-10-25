@@ -609,6 +609,7 @@ mod tests {
                     name: "Test Player".to_owned(),
                     executable: Some("player".to_owned()),
                     icon: None,
+                    categories: Vec::new(),
                 },
             ]),
             meters: None,

@@ -14,10 +14,10 @@ pub use device_generation::{DeviceGeneration, DeviceGenerationError};
 pub use meters::{MAX_MIXER_SOURCES, MeterFrame, MeterSnapshot, SourceLevels, StereoLevels};
 
 pub use mixer::{
-    FaderGain, FaderGainError, MICROPHONE_SOURCE_ID, MeterAvailability, MixRoute, MixTarget,
-    MixerGeneration, MixerInactiveReason, MixerProfile, MixerProfileError, MixerRuntimeState,
-    MixerSnapshot, MixerSourceSnapshot, OutputControls, SYSTEM_SOURCE_ID, SourceControls, SourceId,
-    SourceRole,
+    DefaultInput, FaderGain, FaderGainError, MAX_ASSIGNMENTS, MICROPHONE_SOURCE_ID,
+    MeterAvailability, MixRoute, MixTarget, MixerGeneration, MixerInactiveReason, MixerProfile,
+    MixerProfileError, MixerRuntimeState, MixerSnapshot, MixerSourceSnapshot, OutputControls,
+    SYSTEM_SOURCE_ID, SourceControls, SourceId, SourceRole,
 };
 
 pub use librewave_protocol::ApiVersion;

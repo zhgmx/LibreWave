@@ -2,6 +2,7 @@
 //!
 //! The client lists these so a person can choose an application before it
 //! plays. Reading entries changes nothing and uses no audio service.
+use librewave_core::{ApplicationId, DefaultInput, InputName};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -20,6 +21,51 @@ pub struct InstalledApplication {
     pub executable: Option<String>,
     /// The icon file that the entry names, from the icon theme.
     pub icon: Option<PathBuf>,
+    /// The `Categories` values, such as `Game` or `WebBrowser`.
+    pub categories: Vec<String>,
+}
+
+impl InstalledApplication {
+    /// The identity that this application's playback streams report. A
+    /// native program reports its executable. A Flatpak reports its app ID.
+    #[must_use]
+    pub fn stream_identity(&self) -> Option<ApplicationId> {
+        match &self.executable {
+            Some(executable) => InputName::try_new(executable).ok().map(ApplicationId::Executable),
+            None => InputName::try_new(&self.id).ok().map(ApplicationId::Desktop),
+        }
+    }
+
+    /// The first-run input for this application, from its desktop entry
+    /// categories. Video players and audio tools get none.
+    #[must_use]
+    pub fn default_input(&self) -> Option<DefaultInput> {
+        let has = |name: &str| self.categories.iter().any(|category| category == name);
+        if has("Game") {
+            Some(DefaultInput::Game)
+        } else if ["InstantMessaging", "Chat", "Telephony", "VideoConference"]
+            .iter()
+            .any(|name| has(name))
+        {
+            Some(DefaultInput::VoiceChat)
+        } else if has("WebBrowser") {
+            Some(DefaultInput::Browser)
+        } else if (has("Music") || (has("Audio") && has("Player"))) && !has("Video") {
+            Some(DefaultInput::Music)
+        } else {
+            None
+        }
+    }
+}
+
+/// The detected applications that the first-run profile assigns, with the
+/// input each one joins.
+#[must_use]
+pub fn default_assignments() -> Vec<(ApplicationId, DefaultInput)> {
+    installed_applications()
+        .iter()
+        .filter_map(|app| Some((app.stream_identity()?, app.default_input()?)))
+        .collect()
 }
 
 /// Lists visible applications from the XDG data directories in precedence
@@ -46,6 +92,7 @@ pub fn installed_applications() -> Vec<InstalledApplication> {
                     name: entry.name,
                     executable: entry.exec.as_deref().and_then(executable),
                     icon: entry.icon.as_deref().and_then(|icon| icons.find(icon)),
+                    categories: entry.categories,
                 });
                 if applications.len() >= MAX_ENTRIES {
                     break;
@@ -225,13 +272,14 @@ struct Entry {
     name: String,
     exec: Option<String>,
     icon: Option<String>,
+    categories: Vec<String>,
 }
 
 /// The fields of a visible application entry.
 fn visible_entry(text: &str) -> Option<Entry> {
     let mut in_entry = false;
     let (mut name, mut application, mut hidden) = (None, false, false);
-    let (mut exec, mut icon) = (None, None);
+    let (mut exec, mut icon, mut categories) = (None, None, Vec::new());
     for line in text.lines().map(str::trim) {
         if line.starts_with('[') {
             in_entry = line == "[Desktop Entry]";
@@ -247,12 +295,16 @@ fn visible_entry(text: &str) -> Option<Entry> {
             ("Name", value) if !value.is_empty() => name = Some(value.to_owned()),
             ("Exec", value) if !value.is_empty() => exec = Some(value.to_owned()),
             ("Icon", value) if !value.is_empty() => icon = Some(value.to_owned()),
+            ("Categories", value) => {
+                categories =
+                    value.split(';').filter(|v| !v.is_empty()).map(str::to_owned).collect();
+            }
             ("Type", value) => application = value == "Application",
             ("NoDisplay" | "Hidden", "true") => hidden = true,
             _ => {}
         }
     }
-    name.filter(|_| application && !hidden).map(|name| Entry { name, exec, icon })
+    name.filter(|_| application && !hidden).map(|name| Entry { name, exec, icon, categories })
 }
 
 #[cfg(test)]
@@ -272,6 +324,37 @@ mod tests {
         let fields = visible_entry(entry).expect("entry");
         assert_eq!(fields.icon, None);
         assert_eq!(fields.exec.as_deref(), Some("flatpak run com.spotify.Client"));
+    }
+
+    #[test]
+    fn categories_choose_a_default_input_and_identity_follows_the_launcher() {
+        let app = |categories: &str, executable: Option<&str>| InstalledApplication {
+            id: "com.example.App".to_owned(),
+            name: "App".to_owned(),
+            executable: executable.map(str::to_owned),
+            icon: None,
+            categories: categories.split(';').map(str::to_owned).collect(),
+        };
+        let input = |categories| app(categories, None).default_input();
+        assert_eq!(input("Audio;Music;Player;AudioVideo"), Some(DefaultInput::Music));
+        assert_eq!(input("AudioVideo;Audio;Video;Player;TV"), None);
+        assert_eq!(input("AudioVideo;Audio;Mixer"), None);
+        assert_eq!(input("Network;InstantMessaging"), Some(DefaultInput::VoiceChat));
+        assert_eq!(input("Network;WebBrowser"), Some(DefaultInput::Browser));
+        assert_eq!(input("Network;FileTransfer;Game"), Some(DefaultInput::Game));
+        assert_eq!(input("Utility"), None);
+        let name = |value| InputName::try_new(value).expect("name");
+        assert_eq!(
+            app("", Some("firefox")).stream_identity(),
+            Some(ApplicationId::Executable(name("firefox")))
+        );
+        assert_eq!(
+            app("", None).stream_identity(),
+            Some(ApplicationId::Desktop(name("com.example.App")))
+        );
+        let fields = visible_entry("[Desktop Entry]\nType=Application\nName=X\nCategories=Game;")
+            .expect("entry");
+        assert_eq!(fields.categories, ["Game"]);
     }
 
     #[test]

@@ -21,6 +21,34 @@ const PRODUCT_SOURCES: [ProductSource; 2] = [
     ProductSource { id: SYSTEM_SOURCE_ID, role: SourceRole::System, name: "System" },
 ];
 
+/// The most remembered application assignments in one profile.
+pub const MAX_ASSIGNMENTS: usize = 128;
+
+/// A software input that the first-run profile creates. Detected
+/// applications of the matching kind are assigned to it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DefaultInput {
+    Music,
+    Browser,
+    VoiceChat,
+    Game,
+}
+
+impl DefaultInput {
+    /// The default inputs in display order, after Microphone and System.
+    pub const ALL: [Self; 4] = [Self::Music, Self::Browser, Self::VoiceChat, Self::Game];
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Music => "Music",
+            Self::Browser => "Browser",
+            Self::VoiceChat => "Voice Chat",
+            Self::Game => "Game",
+        }
+    }
+}
+
 /// A stable portable identifier for one logical mixer source.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
@@ -430,7 +458,7 @@ impl MixerProfile {
                 return Err(MixerProfileError::SourceIdentity { id });
             }
         }
-        if self.assignments.len() > 128
+        if self.assignments.len() > MAX_ASSIGNMENTS
             || self.assignments.iter().enumerate().any(|(index, rule)| {
                 self.source(rule.source).is_none_or(|source| source.role == SourceRole::Microphone)
                     || self.assignments[..index]
@@ -482,21 +510,67 @@ impl MixerProfile {
         Ok(next)
     }
 
-    /// Creates a first-run profile. Existing saved profiles are never replaced.
-    /// # Panics
-    /// Panics if a built-in preset name or input count is invalid.
+    /// Creates the first-run profile: the built-in inputs, one input for each
+    /// [`DefaultInput`], and a rule for each detected application. Existing
+    /// saved profiles are never replaced.
     #[must_use]
-    pub fn first_run() -> Self {
-        let mut profile = Self::default();
-        for name in ["Game", "Chat", "Music"] {
-            profile = profile
-                .with_input(crate::InputName::try_new(name).expect("preset name"))
-                .expect("preset capacity");
+    pub fn first_run(applications: &[(crate::ApplicationId, DefaultInput)]) -> Self {
+        Self::defaults(3, applications)
+    }
+
+    /// Replaces this profile with the first-run defaults. The default
+    /// software inputs get new identities, so no endpoint changes its meaning.
+    /// # Errors
+    /// Returns an error when source identities or the generation are exhausted.
+    pub fn reset(
+        &self,
+        applications: &[(crate::ApplicationId, DefaultInput)],
+    ) -> Result<Self, MixerProfileError> {
+        let count = u16::try_from(DefaultInput::ALL.len()).unwrap_or(u16::MAX);
+        if self.next_source_id.checked_add(count).is_none() {
+            return Err(MixerProfileError::SourceIdExhausted);
         }
+        let mut next = Self::defaults(self.next_source_id, applications);
+        next.generation = self.generation;
+        next.advance_generation()?;
+        Ok(next)
+    }
+
+    fn defaults(first_id: u16, applications: &[(crate::ApplicationId, DefaultInput)]) -> Self {
+        let mut profile = Self::default();
+        let unity = MixRoute::new(true, FaderGain::UNITY);
+        // The microphone is not monitored by default, so a person does not
+        // hear their own voice before they choose to.
         profile.sources[0].controls = profile.sources[0]
             .controls
             .with_route(MixTarget::Monitor, MixRoute::new(false, FaderGain::UNITY));
-        profile.generation = MixerGeneration(0);
+        let mut id = first_id;
+        let mut inputs = Vec::new();
+        for input in DefaultInput::ALL {
+            let source = SourceId::new(id);
+            id += 1;
+            inputs.push((input, source));
+            profile.sources.push(MixerSourceSnapshot {
+                role: SourceRole::Software,
+                name: input.name().to_owned(),
+                controls: SourceControls::new(source, unity, unity),
+            });
+        }
+        profile.next_source_id = id;
+        for (application, input) in applications {
+            if profile.assignments.len() == MAX_ASSIGNMENTS {
+                break;
+            }
+            if profile.assignments.iter().any(|rule| rule.application == *application) {
+                continue;
+            }
+            if let Some((_, source)) = inputs.iter().find(|(candidate, _)| candidate == input) {
+                profile.assignments.push(crate::ApplicationAssignment {
+                    application: *application,
+                    source: *source,
+                });
+            }
+        }
         profile
     }
 
@@ -828,7 +902,7 @@ mod input_tests {
 
     #[test]
     fn assignments_follow_identity_and_deleted_inputs_fall_back_to_system() {
-        let profile = MixerProfile::first_run();
+        let profile = MixerProfile::first_run(&[]);
         let app = crate::ApplicationId::Desktop(
             InputName::try_new("example.player").expect("valid fixture"),
         );
@@ -856,8 +930,60 @@ mod input_tests {
         );
         assert_eq!(
             profile.sources.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
-            ["Microphone", "System", "Game", "Chat", "Music"]
+            ["Microphone", "System", "Music", "Browser", "Voice Chat", "Game"]
         );
+    }
+
+    #[test]
+    fn first_run_assigns_detected_applications_once_to_their_default_input() {
+        let id = |name| crate::ApplicationId::Executable(InputName::try_new(name).expect("name"));
+        let profile = MixerProfile::first_run(&[
+            (id("spotify"), DefaultInput::Music),
+            (id("discord"), DefaultInput::VoiceChat),
+            (id("spotify"), DefaultInput::Game),
+        ]);
+        profile.validate().expect("first-run profile");
+        assert_eq!(profile.generation, MixerGeneration(0));
+        let source = |name| {
+            profile
+                .sources
+                .iter()
+                .find(|s| s.name == name)
+                .expect("default input")
+                .controls
+                .source()
+        };
+        assert_eq!(
+            profile.assignments,
+            [
+                crate::ApplicationAssignment {
+                    application: id("spotify"),
+                    source: source("Music")
+                },
+                crate::ApplicationAssignment {
+                    application: id("discord"),
+                    source: source("Voice Chat"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn reset_restores_defaults_with_new_identities_and_the_next_generation() {
+        let edited = MixerProfile::first_run(&[])
+            .with_input(InputName::try_new("Extra").expect("name"))
+            .expect("add");
+        let reset = edited.reset(&[]).expect("reset");
+        reset.validate().expect("reset profile");
+        assert_eq!(reset.generation, MixerGeneration(edited.generation.0 + 1));
+        assert_eq!(
+            reset.sources.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["Microphone", "System", "Music", "Browser", "Voice Chat", "Game"]
+        );
+        let software: Vec<u16> =
+            reset.sources[2..].iter().map(|s| s.controls.source().get()).collect();
+        assert!(software.iter().all(|id| *id >= edited.next_source_id));
+        assert_eq!(reset.next_source_id, edited.next_source_id + 4);
     }
 
     #[test]

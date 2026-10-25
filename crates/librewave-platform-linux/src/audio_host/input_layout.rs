@@ -88,13 +88,13 @@ mod tests {
     use super::*;
     #[test]
     fn edits_preserve_unaffected_slots_and_mute_vacant_slots() {
-        let original = MixerProfile::first_run();
+        let original = MixerProfile::first_run(&[]);
         let layout = InputLayout::new(&original);
         let removed = original.without_input(SourceId::new(3)).expect("remove");
-        let next = removed.with_input(InputName::try_new("Browser").expect("name")).expect("add");
+        let next = removed.with_input(InputName::try_new("Extra").expect("name")).expect("add");
         let updated = layout.updated(&next);
         assert_eq!(updated.slot(SourceId::new(4)), layout.slot(SourceId::new(4)));
-        assert_eq!(updated.slot(SourceId::new(6)), Some(SourceId::new(3)));
+        assert_eq!(updated.slot(SourceId::new(7)), Some(SourceId::new(3)));
         let dsp = layout.updated(&removed).profile(&removed);
         assert_eq!(dsp.sources.len(), 12);
         assert!(!dsp.source(SourceId::new(3)).expect("reserved").controls.monitor().enabled());

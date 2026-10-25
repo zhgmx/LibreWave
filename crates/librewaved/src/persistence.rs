@@ -277,7 +277,11 @@ impl FileMixerStateStore {
 
 impl MixerStateStore for FileMixerStateStore {
     fn load(&mut self) -> Result<MixerProfile, PersistenceError> {
-        decode_mixer_state(load_json(&self.path)?)
+        decode_mixer_state(load_json(&self.path)?, || {
+            MixerProfile::first_run(
+                &librewave_platform_linux::desktop_entries::default_assignments(),
+            )
+        })
     }
 
     fn save(&mut self, profile: &MixerProfile) -> Result<(), PersistenceError> {
@@ -288,9 +292,14 @@ impl MixerStateStore for FileMixerStateStore {
     }
 }
 
-fn decode_mixer_state(value: Option<serde_json::Value>) -> Result<MixerProfile, PersistenceError> {
+/// Decodes the saved profile. With no saved profile, `first_run` creates the
+/// defaults.
+fn decode_mixer_state(
+    value: Option<serde_json::Value>,
+    first_run: impl FnOnce() -> MixerProfile,
+) -> Result<MixerProfile, PersistenceError> {
     let Some(value): Option<serde_json::Value> = value else {
-        return Ok(MixerProfile::first_run());
+        return Ok(first_run());
     };
     let schema = value
         .get("schema")
@@ -327,8 +336,11 @@ pub(crate) fn check_profiles(root: &Path) -> Result<(), PersistenceError> {
         return Err(profile_error(&device, &PersistenceError::UnsupportedSchema(state.schema)));
     }
     crate::manager::validate_desired_state(&state).map_err(|e| profile_error(&device, &e))?;
-    decode_mixer_state(read_json(&mixer).map_err(|e| profile_error(&mixer, &e))?)
-        .map_err(|e| profile_error(&mixer, &e))?;
+    decode_mixer_state(
+        read_json(&mixer).map_err(|e| profile_error(&mixer, &e))?,
+        MixerProfile::default,
+    )
+    .map_err(|e| profile_error(&mixer, &e))?;
     let state: crate::audio_session::AudioSession =
         read_json(&audio).map_err(|e| profile_error(&audio, &e))?.unwrap_or_default();
     state.validate().map_err(|e| profile_error(&audio, &e))
@@ -615,11 +627,16 @@ mod tests {
 
     #[test]
     fn first_run_presets_do_not_replace_an_existing_profile() {
-        assert_eq!(decode_mixer_state(None).expect("valid fixture"), MixerProfile::first_run());
+        let first_run = || MixerProfile::first_run(&[]);
+        assert_eq!(decode_mixer_state(None, first_run).expect("valid fixture"), first_run());
         let existing = MixerProfile::default();
         let saved =
             serde_json::to_value(MixerStateFile::from(existing.clone())).expect("valid fixture");
-        assert_eq!(decode_mixer_state(Some(saved)).expect("valid fixture"), existing);
+        assert_eq!(
+            decode_mixer_state(Some(saved), || panic!("an existing profile is kept"))
+                .expect("valid fixture"),
+            existing
+        );
     }
 
     #[test]
