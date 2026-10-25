@@ -3,18 +3,24 @@
 //! Both are painted after the row has its layout, so they always match the
 //! current scroll position. Neither one takes layout space.
 use super::Shell;
+use super::device_art::Glow;
 use super::theme::{BACKGROUND, FAINT, LINE, MUTED, alpha};
 use gpui::{
     Bounds, Canvas, DispatchPhase, Hitbox, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, ScrollHandle, ScrollWheelEvent, WeakEntity, canvas, fill,
     linear_color_stop, linear_gradient, point, px, rgb, rgba, size,
 };
+use std::cell::Cell;
+use std::rc::Rc;
 
 /// The visible bar height. The hit area is the full canvas height.
 const BAR: f32 = 6.;
 const MIN_THUMB: f32 = 40.;
-/// The width of the fade at an edge where strips are hidden.
+/// The width of the fade at an edge where strips are hidden, and the scroll
+/// distance over which it grows in.
 const FADE: f32 = 72.;
+/// The height of one fade band. The glow changes little over it.
+const BAND: f32 = 8.;
 
 /// The track and thumb of a horizontal scroll position.
 #[derive(Clone, Copy)]
@@ -151,9 +157,17 @@ pub(super) fn input_scrollbar(
     )
 }
 
-/// Black fades over the edges of the strip row where strips are hidden.
-/// They paint over the row and never take pointer input.
-pub(super) fn input_fades(handle: ScrollHandle) -> Canvas<()> {
+/// Fades over the edges of the strip row where strips are hidden.
+///
+/// Each fade ends in the backdrop color beside the row, including the stage
+/// glow that reaches behind it, so no edge shows. A fade grows in over the
+/// first [`FADE`] pixels that the row scrolls past, instead of appearing at
+/// full strength.
+pub(super) fn input_fades(
+    handle: ScrollHandle,
+    glow: Glow,
+    glow_area: Rc<Cell<Option<Bounds<Pixels>>>>,
+) -> Canvas<()> {
     canvas(
         |_, _, _| {},
         move |area, (), window, _| {
@@ -161,42 +175,61 @@ pub(super) fn input_fades(handle: ScrollHandle) -> Canvas<()> {
             if max <= px(0.) {
                 return;
             }
-            let offset = -handle.offset().x;
-            let opaque = rgb(BACKGROUND);
-            let clear = rgba(alpha(BACKGROUND, 0));
+            let hidden_left = -handle.offset().x;
+            let hidden_right = max - hidden_left;
             let width = px(FADE).min(area.size.width / 2.);
-            if offset > px(0.5) {
-                let left = Bounds::new(area.origin, size(width, area.size.height));
-                window.paint_quad(fill(
-                    left,
-                    linear_gradient(
-                        90.,
-                        linear_color_stop(opaque, 0.),
-                        linear_color_stop(clear, 1.),
-                    ),
-                ));
-            }
-            if offset < max - px(0.5) {
-                let right = Bounds::new(
-                    point(area.right() - width, area.top()),
-                    size(width, area.size.height),
-                );
-                window.paint_quad(fill(
-                    right,
-                    linear_gradient(
-                        90.,
-                        linear_color_stop(clear, 0.),
-                        linear_color_stop(opaque, 1.),
-                    ),
-                ));
+            let glow_area = glow_area.get();
+            for (hidden, edge, angle) in
+                [(hidden_left, area.left(), 270.), (hidden_right, area.right() - width, 90.)]
+            {
+                let strength = ease((hidden / px(FADE)).clamp(0., 1.));
+                if strength <= 0. {
+                    continue;
+                }
+                let outer = if angle > 180. { area.left() } else { area.right() };
+                // Bands follow the glow as it changes down the edge.
+                let mut top = area.top();
+                while top < area.bottom() {
+                    let height = px(BAND).min(area.bottom() - top);
+                    let sample = point(outer, top + height / 2.);
+                    let backdrop = glow_area.map_or_else(
+                        || rgb(BACKGROUND),
+                        |lit| glow.backdrop(lit, sample, BACKGROUND),
+                    );
+                    let solid = gpui::Rgba { a: strength, ..backdrop };
+                    let clear = gpui::Rgba { a: 0., ..backdrop };
+                    window.paint_quad(fill(
+                        Bounds::new(point(edge, top), size(width, height)),
+                        linear_gradient(
+                            angle,
+                            linear_color_stop(clear, 0.),
+                            linear_color_stop(solid, 1.),
+                        ),
+                    ));
+                    top += height;
+                }
             }
         },
     )
 }
 
+/// Smooth start and end for the fade strength.
+fn ease(t: f32) -> f32 {
+    t * t * (3. - 2. * t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fade_grows_in_smoothly_from_nothing() {
+        assert!(ease(0.).abs() < f32::EPSILON);
+        assert!((ease(1.) - 1.).abs() < f32::EPSILON);
+        assert!((ease(0.5) - 0.5).abs() < f32::EPSILON);
+        // Slow at both ends: the first pixels of scroll add almost nothing.
+        assert!(ease(0.1) < 0.1 && ease(0.9) > 0.9);
+    }
 
     #[test]
     fn the_thumb_travel_maps_to_the_whole_scroll_range() {

@@ -243,9 +243,13 @@ impl Shell {
                             .relative()
                             .child(strips)
                             .child(
-                                scrollbar::input_fades(self.input_scroll.clone())
-                                    .absolute()
-                                    .inset_0(),
+                                scrollbar::input_fades(
+                                    self.input_scroll.clone(),
+                                    self.stage_glow(),
+                                    std::rc::Rc::clone(&self.glow_area),
+                                )
+                                .absolute()
+                                .inset_0(),
                             )
                             .child(
                                 // The bar sits in the gap above Outputs.

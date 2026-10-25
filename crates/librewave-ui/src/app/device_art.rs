@@ -269,19 +269,57 @@ impl Glow {
         }
     }
 
+    /// The light color and its opacity at the center.
+    const fn light(self) -> (u32, f32) {
+        match self {
+            Self::Dark => (0x008F_A3BF, 0.05),
+            Self::Live => (0x00A9_C4EE, 0.13),
+            Self::Muted => (0x00FF_4D5E, 0.16),
+        }
+    }
+
+    /// The radial opacity stops: the center, the shoulder, and the rim.
+    const SHOULDER: f32 = 0.35;
+    const SHOULDER_OPACITY: f32 = 0.04;
+
     fn svg(self) -> String {
-        let (color, strength) = match self {
-            Self::Dark => ("#8fa3bf", ".05"),
-            Self::Live => ("#a9c4ee", ".13"),
-            Self::Muted => ("#ff4d5e", ".16"),
-        };
+        let (color, strength) = self.light();
+        let (shoulder, shoulder_opacity) = (Self::SHOULDER, Self::SHOULDER_OPACITY);
         format!(
             "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 200 200\"><defs>\
-             <radialGradient id=\"glow\"><stop stop-color=\"{color}\" stop-opacity=\"{strength}\"/>\
-             <stop offset=\".35\" stop-color=\"{color}\" stop-opacity=\".04\"/>\
-             <stop offset=\"1\" stop-color=\"{color}\" stop-opacity=\"0\"/></radialGradient></defs>\
+             <radialGradient id=\"glow\"><stop stop-color=\"#{color:06x}\" stop-opacity=\"{strength}\"/>\
+             <stop offset=\"{shoulder}\" stop-color=\"#{color:06x}\" stop-opacity=\"{shoulder_opacity}\"/>\
+             <stop offset=\"1\" stop-color=\"#{color:06x}\" stop-opacity=\"0\"/></radialGradient></defs>\
              <circle cx=\"100\" cy=\"100\" r=\"100\" fill=\"url(#glow)\"/></svg>"
         )
+    }
+
+    /// The color that the glow, drawn in `area`, leaves over `background` at
+    /// `at`. Edge fades end in this color, so they meet the lit backdrop.
+    pub(super) fn backdrop(
+        self,
+        area: gpui::Bounds<gpui::Pixels>,
+        at: gpui::Point<gpui::Pixels>,
+        background: u32,
+    ) -> gpui::Rgba {
+        let (color, strength) = self.light();
+        let radius = f32::from(area.size.width) / 2.;
+        let center = area.center();
+        let (dx, dy) = (f32::from(at.x - center.x), f32::from(at.y - center.y));
+        let distance = if radius > 0. { dx.hypot(dy) / radius } else { f32::INFINITY };
+        let opacity = if distance < Self::SHOULDER {
+            strength + (Self::SHOULDER_OPACITY - strength) * distance / Self::SHOULDER
+        } else if distance < 1. {
+            Self::SHOULDER_OPACITY * (1. - distance) / (1. - Self::SHOULDER)
+        } else {
+            0.
+        };
+        let channel = |value: u32, shift: u32| {
+            f32::from(u8::try_from((value >> shift) & 0xFF).unwrap_or(0)) / 255.
+        };
+        let mix =
+            |shift| channel(background, shift) * (1. - opacity) + channel(color, shift) * opacity;
+        gpui::Rgba { r: mix(16), g: mix(8), b: mix(0), a: 1. }
     }
 
     /// The glow image. Each state is built once and reused by every frame.
@@ -640,6 +678,29 @@ mod tests {
             Lights::observed(Some(&config), Some(ApiVersion::new(5, 4))).ring(),
             Some(DANGER)
         );
+    }
+
+    #[test]
+    fn the_glow_backdrop_matches_the_drawn_light_and_ends_at_the_rim() {
+        let area = gpui::Bounds::new(gpui::point(px(0.), px(0.)), gpui::size(px(200.), px(200.)));
+        let background = 0x0007_080A;
+        let plain = rgb(background);
+        for glow in [Glow::Dark, Glow::Live, Glow::Muted] {
+            let (color, strength) = glow.light();
+            let center = glow.backdrop(area, gpui::point(px(100.), px(100.)), background);
+            let expected = f32::from(u8::try_from(color >> 16).expect("red")) / 255. * strength
+                + plain.r * (1. - strength);
+            assert!((center.r - expected).abs() < 1e-4);
+            // At and beyond the rim the backdrop is the plain background.
+            for at in [gpui::point(px(200.), px(100.)), gpui::point(px(400.), px(400.))] {
+                let rim = glow.backdrop(area, at, background);
+                assert!((rim.r - plain.r).abs() < 1e-4 && (rim.b - plain.b).abs() < 1e-4);
+            }
+            // The light only fades outward.
+            let near = glow.backdrop(area, gpui::point(px(130.), px(100.)), background);
+            let far = glow.backdrop(area, gpui::point(px(170.), px(100.)), background);
+            assert!(near.r >= far.r && far.r >= plain.r);
+        }
     }
 
     #[test]

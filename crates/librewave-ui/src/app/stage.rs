@@ -6,8 +6,12 @@ use super::theme::{
     SPACE_XL, SPACE_XS,
 };
 use super::{Shell, TITLEBAR};
-use gpui::{Context, Div, FontWeight, IntoElement, div, img, prelude::*, px, rgb};
+use gpui::{
+    Bounds, Context, Div, FontWeight, IntoElement, Pixels, canvas, div, img, prelude::*, px, rgb,
+};
 use librewave_core::{ApiVersion, Command, DeviceConnection, DeviceSnapshot, Wave3ConfigSnapshot};
+use std::cell::Cell;
+use std::rc::Rc;
 
 pub(super) const STAGE_WIDTH: f32 = 420.;
 /// The stage and the mixer share this inset, so their edges line up.
@@ -20,6 +24,17 @@ const ART_COMPACT: f32 = 240.;
 const STAGE_FIXED: f32 = TITLEBAR + 2. * INSET + 64. + 220. + 2. * SPACE_XL;
 
 impl Shell {
+    /// The glow state, from the connected device's observed configuration.
+    pub(super) fn stage_glow(&self) -> Glow {
+        let config = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.devices.first())
+            .filter(|device| device.connection == DeviceConnection::Connected)
+            .and_then(|device| device.admission.config());
+        Glow::observed(config)
+    }
+
     pub(super) fn stage(
         &self,
         compact: bool,
@@ -33,7 +48,7 @@ impl Shell {
         let art_height =
             if compact { ART_COMPACT } else { art_height_for_viewport(viewport_height) };
         let api = device.and_then(|device| device.admission.admitted_api());
-        let art = artwork(config, api, connected, art_height);
+        let art = artwork(config, api, connected, art_height, self.stage_glow(), &self.glow_area);
         let heading = self.stage_heading(device, config.is_some(), cx);
         let controls = self.hardware_controls(device, cx);
         let stage = div()
@@ -134,7 +149,10 @@ fn artwork(
     api: Option<ApiVersion>,
     connected: bool,
     height: f32,
+    light: Glow,
+    glow_area: &Rc<Cell<Option<Bounds<Pixels>>>>,
 ) -> impl IntoElement {
+    let glow_area = Rc::clone(glow_area);
     let width = height * 2. / 3.;
     // The light is centered on the capsule. Nothing clips it, so it fades out
     // over the stage and the mixer behind their panels.
@@ -146,7 +164,15 @@ fn artwork(
         .flex_shrink_0()
         .relative()
         .child(
-            img(Glow::observed(config).image())
+            img(light.image())
+                .absolute()
+                .left(px((width - glow) / 2.))
+                .top(px(height * 0.38 - glow / 2.))
+                .size(px(glow)),
+        )
+        .child(
+            // Records where the glow is drawn for the strip edge fades.
+            canvas(move |area, _, _| glow_area.set(Some(area)), |_, (), _, _| {})
                 .absolute()
                 .left(px((width - glow) / 2.))
                 .top(px(height * 0.38 - glow / 2.))

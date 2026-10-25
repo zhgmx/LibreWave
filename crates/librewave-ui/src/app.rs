@@ -144,6 +144,9 @@ struct Shell {
     input_scroll: gpui::ScrollHandle,
     /// Where the pointer holds the strip scrollbar thumb, during a drag.
     scrollbar_grab: Option<gpui::Pixels>,
+    /// Where the stage glow is drawn in the last frame. The strip edge fades
+    /// match the backdrop that it lights.
+    glow_area: std::rc::Rc<std::cell::Cell<Option<Bounds<gpui::Pixels>>>>,
     /// Whether the compositor shows any part of the window. Meter reads
     /// pause while it does not.
     window_visibility: gpui::WindowVisibility,
@@ -212,6 +215,7 @@ impl Shell {
             wheel_travel: 0.,
             input_scroll: gpui::ScrollHandle::new(),
             scrollbar_grab: None,
+            glow_area: std::rc::Rc::default(),
             window_visibility: gpui::WindowVisibility::Visible,
             visibility_subscription: None,
             wake_subscription: None,
@@ -830,6 +834,7 @@ mod tests {
             wheel_travel: 0.,
             input_scroll: gpui::ScrollHandle::new(),
             scrollbar_grab: None,
+            glow_area: std::rc::Rc::default(),
             window_visibility: gpui::WindowVisibility::Visible,
             visibility_subscription: None,
             wake_subscription: None,
