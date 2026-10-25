@@ -587,7 +587,7 @@ impl<P: GraphProcessor> InactiveGraph<P> {
         }
         let mut first_error = self.filter.set_active(false).err().map(GraphError::PipeWire);
         if !self.peer_disconnected.get()
-            && let Err(error) = roundtrip(&self.main_loop, &self.core)
+            && let Err(error) = teardown_roundtrip(&self.main_loop, &self.core)
             && !self.peer_disconnected.get()
         {
             first_error.get_or_insert(error);
@@ -617,7 +617,7 @@ impl<P: GraphProcessor> InactiveGraph<P> {
         // Local filter destruction and callback quiescence remain mandatory.
         // A timeout on a connected peer still blocks replacement.
         if !self.peer_disconnected.get()
-            && let Err(error) = roundtrip(&self.main_loop, &self.core)
+            && let Err(error) = teardown_roundtrip(&self.main_loop, &self.core)
             && !self.peer_disconnected.get()
         {
             first_error.get_or_insert(error);
@@ -926,6 +926,25 @@ fn validate_drivers(
 }
 
 fn roundtrip(main_loop: &pw::main_loop::MainLoop, core: &pw::core::Core) -> Result<(), GraphError> {
+    sync_core(main_loop, core, false)
+}
+
+/// Waits for the server to process every earlier request during teardown.
+/// An error for an object that no longer exists (`ENOENT`) means the object
+/// is already gone, which is the state teardown wants.
+fn teardown_roundtrip(
+    main_loop: &pw::main_loop::MainLoop,
+    core: &pw::core::Core,
+) -> Result<(), GraphError> {
+    sync_core(main_loop, core, true)
+}
+
+fn sync_core(
+    main_loop: &pw::main_loop::MainLoop,
+    core: &pw::core::Core,
+    allow_missing: bool,
+) -> Result<(), GraphError> {
+    const ENOENT: i32 = 2;
     let done = Rc::new(Cell::new(false));
     let completed = Rc::clone(&done);
     let error = Rc::new(RefCell::new(None));
@@ -939,7 +958,9 @@ fn roundtrip(main_loop: &pw::main_loop::MainLoop, core: &pw::core::Core) -> Resu
             }
         })
         .error(move |_id, _sequence, result, message| {
-            *failed.borrow_mut() = Some(format!("{message} ({result})"));
+            if !(allow_missing && result == -ENOENT) {
+                *failed.borrow_mut() = Some(format!("{message} ({result})"));
+            }
         })
         .register();
     let deadline = Instant::now() + ROUNDTRIP_TIMEOUT;
