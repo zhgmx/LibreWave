@@ -147,6 +147,32 @@ pub(super) const MIXER_MIN_HEIGHT: f32 = INPUTS_MIN + SPACE_XL + OUTPUTS_HEIGHT;
 // Levels named on the scale between the two faders of a strip.
 const SCALE: [i16; 5] = [12, 0, -20, -40, -60];
 
+/// The icon for an input: its role, a kind that its name states, or one of
+/// the remaining glyphs, chosen by identity so neighbors differ.
+pub(super) fn input_glyph(source: &MixerSourceSnapshot) -> &'static str {
+    const NAMED: [(&[&str], &str); 8] = [
+        (&["music", "song", "spotify"], "music-notes"),
+        (&["browser", "web", "firefox", "chrome"], "globe-simple"),
+        (&["chat", "voice", "discord", "call", "talk"], "chats-circle"),
+        (&["game", "steam"], "game-controller"),
+        (&["video", "movie", "film", "youtube", "twitch"], "film-strip"),
+        (&["sfx", "effect", "sound", "alert", "notification"], "bell-simple"),
+        (&["stream", "broadcast", "obs"], "broadcast"),
+        (&["podcast", "radio"], "radio"),
+    ];
+    const SPARE: [&str; 4] = ["waveform", "sparkle", "megaphone-simple", "user-sound"];
+    match source.role {
+        SourceRole::Microphone => return "mic",
+        SourceRole::System => return "system",
+        SourceRole::Software => {}
+    }
+    let name = source.name.to_lowercase();
+    NAMED.iter().find(|(words, _)| words.iter().any(|word| name.contains(word))).map_or_else(
+        || SPARE[usize::from(source.controls.source().get()) % SPARE.len()],
+        |(_, glyph)| glyph,
+    )
+}
+
 /// The narrowest mixer beside the stage. Narrower strips scroll sideways.
 pub(super) fn mixer_min_width() -> f32 {
     2. * STRIP_WIDTH + SPACE_MD
@@ -313,7 +339,7 @@ impl Shell {
             .flex()
             .items_center()
             .gap(px(SPACE_SM))
-            .child(icon_tile(if microphone { "mic" } else { "system" }, INK, 36.))
+            .child(icon_tile(input_glyph(source), INK, 36.))
             .child(
                 div()
                     .flex_1()
@@ -1172,6 +1198,27 @@ mod tests {
         ] {
             assert!(fader_at_pixel(y, top, height).is_none());
         }
+    }
+
+    #[test]
+    fn inputs_show_their_role_or_named_kind_and_unnamed_inputs_differ() {
+        let profile = librewave_core::MixerProfile::first_run(&[]);
+        let glyphs: Vec<_> = profile.sources.iter().map(input_glyph).collect();
+        assert_eq!(
+            glyphs,
+            ["mic", "system", "music-notes", "globe-simple", "chats-circle", "game-controller"]
+        );
+        let mut generic = profile.clone();
+        for name in ["Input A", "Input B"] {
+            generic = generic
+                .with_input(librewave_core::InputName::try_new(name).expect("name"))
+                .expect("add");
+        }
+        let count = generic.sources.len();
+        assert_ne!(
+            input_glyph(&generic.sources[count - 1]),
+            input_glyph(&generic.sources[count - 2])
+        );
     }
 
     #[test]
