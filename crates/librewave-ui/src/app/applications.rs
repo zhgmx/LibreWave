@@ -5,7 +5,7 @@
 use super::{
     Shell,
     controls::{Tone, activate, caption, icon, icon_button, identified, label, tip},
-    text_field::TextField,
+    text_field::{Submitted, TextField},
     theme::{
         BODY, BODY_LINE, CAPTION, CAPTION_LINE, FAINT, GROUP, HEADING, HEADING_LINE, ICON_SMALL,
         INK, LINE, MONITOR, MUTED, RADIUS, RADIUS_CARD, RAISED, SPACE_LG, SPACE_MD, SPACE_SM,
@@ -105,17 +105,26 @@ impl Shell {
             && input.role == SourceRole::Software
         {
             let name = input.name.as_str().to_owned();
-            self.channel_name = Some(cx.new(|cx| TextField::new(&name, cx)));
+            let field = cx.new(|cx| TextField::new(&name, cx));
+            cx.subscribe(&field, |this, _, _: &Submitted, cx| this.save_channel_text(false, cx))
+                .detach();
+            self.channel_name = Some(field);
         }
         self.set_assignment_text("", cx);
         self.load_installed_applications(cx);
     }
 
-    /// Replaces the custom entry. It also filters the list, so the pop-up
-    /// redraws whenever its text changes.
+    /// Sets the custom entry, creating it when the pop-up opens. It also
+    /// filters the list, so the pop-up redraws whenever its text changes.
     fn set_assignment_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if let Some(field) = &self.assignment_name {
+            field.update(cx, |field, cx| field.set_value(text, cx));
+            return;
+        }
         let field = cx.new(|cx| TextField::new(text, cx).with_placeholder("Search or type an ID"));
         cx.observe(&field, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(&field, |this, _, _: &Submitted, cx| this.save_channel_text(true, cx))
+            .detach();
         self.assignment_name = Some(field);
     }
 
@@ -741,7 +750,11 @@ mod tests {
                     let field = view.channel_name.as_ref().expect("name editor").clone();
                     field.update(cx, |field, cx| {
                         gpui::EntityInputHandler::replace_text_in_range(
-                            field, None, "Unsaved", window, cx,
+                            field,
+                            Some(0..5),
+                            "Unsaved",
+                            window,
+                            cx,
                         );
                     });
                     assert_eq!(field.read(cx).value(), "Unsaved");

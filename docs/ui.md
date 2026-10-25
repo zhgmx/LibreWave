@@ -39,6 +39,13 @@ place they appear. Red marks a muted state or an error. Amber marks an
 experimental or read-only state. Icon-only buttons show their name when the
 pointer rests on them. Commands, paths, and command output use Geist Mono.
 
+Every text field uses the same control. It has the button height and corner
+radius. It supports Ctrl+A, Ctrl+C, Ctrl+X, Ctrl+V, Shift+Insert, Ctrl+Insert,
+Ctrl+Z, and Ctrl+Shift+Z or Ctrl+Y. Ctrl+Left and Ctrl+Right move by word, and
+Shift extends the selection. Ctrl+Backspace and Ctrl+Delete delete a word.
+Drag to select text, double-click to select a word, and triple-click to select
+all. Enter saves the field where saving applies.
+
 When the daemon is unavailable, the stage dims the illustration and the mixer
 area shows one notice with **Start mixer** and **Open Settings**. The main
 view does not expose socket diagnostics or invent device or channel state.
