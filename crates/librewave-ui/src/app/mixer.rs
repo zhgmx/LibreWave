@@ -5,8 +5,9 @@ use super::controls::{
     tabular, tip,
 };
 use super::theme::{
-    CAPTION, DANGER, FAINT, HEADING, HEADING_LINE, ICON_SMALL, INK, LINE, MONITOR, MUTED, PANEL,
-    RADIUS, RADIUS_CARD, RAISED, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, STREAM, alpha,
+    CAPTION, DANGER, FAINT, FOCUS, HEADING, HEADING_LINE, ICON_SMALL, INK, LINE, MONITOR, MUTED,
+    PANEL, RADIUS, RADIUS_CARD, RAISED, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, STREAM,
+    alpha,
 };
 use gpui::{
     Bounds, Context, Div, DragMoveEvent, FontWeight, MouseButton, Stateful, canvas, div,
@@ -77,6 +78,50 @@ impl FaderEdit {
     }
 }
 
+/// A channel that is being dragged to a new position.
+#[derive(Clone)]
+pub(super) struct ChannelDrag {
+    source: SourceId,
+    name: gpui::SharedString,
+}
+
+/// The request that moves a channel to a strip position. A drop on the
+/// channel's own strip, or a move past either end, changes nothing.
+fn channel_move(snapshot: &Snapshot, source: SourceId, target: usize) -> Option<Command> {
+    let sources = &snapshot.mixer.profile.sources;
+    let current = sources.iter().position(|s| s.controls.source() == source)?;
+    let target = target.min(sources.len().checked_sub(1)?);
+    (target != current).then_some(Command::MoveMixerInput {
+        expected_generation: snapshot.mixer.generation(),
+        source,
+        position: u16::try_from(target).ok()?,
+    })
+}
+
+/// The card that follows the pointer while a channel is dragged.
+struct ChannelGhost {
+    name: gpui::SharedString,
+}
+
+impl gpui::Render for ChannelGhost {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(SPACE_MD))
+            .h(px(36.))
+            .rounded(px(RADIUS))
+            .bg(rgb(RAISED))
+            .opacity(0.9)
+            .flex()
+            .items_center()
+            .gap(px(SPACE_SM))
+            .font_family("Geist")
+            .text_size(px(14.))
+            .text_color(rgb(INK))
+            .child(icon("dots-six", MUTED, ICON_SMALL))
+            .child(self.name.clone())
+    }
+}
+
 #[derive(Clone)]
 struct FaderDrag {
     source: SourceId,
@@ -129,8 +174,9 @@ impl Shell {
             .flex()
             .gap(px(SPACE_MD))
             .overflow_x_scroll();
-        for source in &snapshot.mixer.profile.sources {
-            strips = strips.child(self.channel_strip(source, snapshot.mixer.generation(), cx));
+        for (position, source) in snapshot.mixer.profile.sources.iter().enumerate() {
+            strips =
+                strips.child(self.channel_strip(source, position, snapshot.mixer.generation(), cx));
         }
         let strips = strips.child(self.add_input(snapshot, cx));
         div()
@@ -188,11 +234,17 @@ impl Shell {
     fn channel_strip(
         &self,
         source: &MixerSourceSnapshot,
+        position: usize,
         generation: MixerGeneration,
         cx: &mut Context<Self>,
     ) -> Div {
         let id = source.controls.source();
         card()
+            .drag_over::<ChannelDrag>(|style, _, _, _| style.bg(rgb(RAISED)))
+            .on_drop(cx.listener(move |this, drag: &ChannelDrag, _, cx| {
+                this.move_channel(drag.source, position, cx);
+            }))
+            .child(self.drag_handle(source, position, cx))
             .w(px(STRIP_WIDTH))
             .flex_shrink_0()
             .relative()
@@ -333,6 +385,64 @@ impl Shell {
                     .size(px(28.)),
                 )
             })
+    }
+
+    /// The dots at the top of a strip. Dragging them moves the channel, and
+    /// the arrow keys move it by one place when they have focus.
+    fn drag_handle(
+        &self,
+        source: &MixerSourceSnapshot,
+        position: usize,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let id = source.controls.source();
+        let enabled = !self.pending && self.settings_modal.is_none();
+        let drag = ChannelDrag { source: id, name: source.name.as_str().to_owned().into() };
+        let handle = identified(&format!("drag-channel-{}", id.get()))
+            .absolute()
+            .top(px(2.))
+            .left(px(STRIP_WIDTH / 2. - 24.))
+            .w(px(48.))
+            .h(px(12.))
+            .rounded(px(4.))
+            .border_1()
+            .border_color(rgba(0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .focusable()
+            .tab_index(0)
+            .tab_stop(enabled)
+            .focus_visible(|style| style.border_color(rgb(FOCUS)))
+            .child(icon("dots-six", FAINT, ICON_SMALL))
+            .tooltip(tip("Drag to move this channel"));
+        if !enabled {
+            return handle;
+        }
+        handle
+            .cursor_grab()
+            .hover(|style| style.bg(rgb(RAISED)))
+            .on_drag(drag, |drag, _, _, cx| cx.new(|_| ChannelGhost { name: drag.name.clone() }))
+            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                let target = match event.keystroke.key.as_str() {
+                    "left" => position.checked_sub(1),
+                    "right" => Some(position + 1),
+                    _ => return,
+                };
+                cx.stop_propagation();
+                if let Some(target) = target {
+                    this.move_channel(id, target, cx);
+                }
+            }))
+    }
+
+    /// Moves a channel to a strip position in one daemon request.
+    pub(super) fn move_channel(&mut self, source: SourceId, target: usize, cx: &mut Context<Self>) {
+        if let Some(command) =
+            self.snapshot.as_ref().and_then(|snapshot| channel_move(snapshot, source, target))
+        {
+            self.send(command, cx);
+        }
     }
 
     /// The two mix icons over their faders, with the link control between them.
@@ -1062,6 +1172,26 @@ mod tests {
         ] {
             assert!(fader_at_pixel(y, top, height).is_none());
         }
+    }
+
+    #[test]
+    fn dropping_a_channel_moves_it_once_and_ignores_its_own_place() {
+        let snapshot = Snapshot::empty();
+        let sources = &snapshot.mixer.profile.sources;
+        let first = sources[0].controls.source();
+        let last = sources.last().expect("built-in channels").controls.source();
+        assert_eq!(
+            channel_move(&snapshot, first, 1),
+            Some(Command::MoveMixerInput {
+                expected_generation: snapshot.mixer.generation(),
+                source: first,
+                position: 1,
+            })
+        );
+        assert!(channel_move(&snapshot, first, 0).is_none());
+        // A move past the end stops at the last place.
+        assert!(channel_move(&snapshot, last, 99).is_none());
+        assert!(channel_move(&snapshot, SourceId::new(999), 0).is_none());
     }
 
     #[test]

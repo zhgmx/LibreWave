@@ -1287,6 +1287,11 @@ mod tests {
         assert!(cx.debug_bounds("device-panel").is_some());
         // The stage and the mixer never overlap in either layout.
         assert!(mixer.left() >= stage.right() || mixer.top() >= stage.bottom());
+        // Only a small handle at the top of a strip starts a channel drag.
+        let handle = cx.debug_bounds("drag-channel-1").expect("drag handle");
+        let fader = cx.debug_bounds("fader-1-monitor").expect("fader");
+        assert!(handle.size.height <= px(16.) && handle.size.width <= px(48.));
+        assert!(handle.bottom() < fader.top());
         // Each input has a fader for each mix.
         assert!(cx.debug_bounds("add-input").is_some());
         for fader in ["fader-1-monitor", "fader-1-stream", "fader-2-monitor", "fader-2-stream"] {

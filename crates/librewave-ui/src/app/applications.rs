@@ -354,42 +354,6 @@ impl Shell {
 
     fn menu_heading(&self, snapshot: &Snapshot, source: SourceId, cx: &mut Context<Self>) -> Div {
         let input = snapshot.mixer.profile.source(source);
-        let position =
-            snapshot.mixer.profile.sources.iter().position(|s| s.controls.source() == source);
-        let count = snapshot.mixer.profile.sources.len();
-        let generation = snapshot.mixer.generation();
-        let mut order = div().flex().items_center().gap(px(2.));
-        for (id, glyph, hint, target) in [
-            ("channel-earlier", "caret-left", "Move left", position.and_then(|p| p.checked_sub(1))),
-            (
-                "channel-later",
-                "caret-right",
-                "Move right",
-                position.filter(|p| p + 1 < count).map(|p| p + 1),
-            ),
-        ] {
-            order = order.child(icon_button(
-                id,
-                glyph,
-                hint,
-                Tone::Quiet,
-                MUTED,
-                !self.pending && target.is_some(),
-                cx,
-                move |this, _, cx| {
-                    if let Some(position) = target.and_then(|p| u16::try_from(p).ok()) {
-                        this.send(
-                            Command::MoveMixerInput {
-                                expected_generation: generation,
-                                source,
-                                position,
-                            },
-                            cx,
-                        );
-                    }
-                },
-            ));
-        }
         let title = match &self.channel_name {
             Some(field) => div()
                 .flex_1()
@@ -424,7 +388,6 @@ impl Shell {
             .items_center()
             .gap(px(SPACE_SM))
             .child(title)
-            .child(order)
             .child(icon_button(
                 "close-channel",
                 "x",

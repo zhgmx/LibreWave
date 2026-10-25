@@ -269,9 +269,11 @@ under `crates/librewave-ui/assets/`. No vendor application artwork is bundled.
 
 New profiles contain Microphone, System, Game, Chat, and Music. Microphone monitoring starts muted to avoid duplicate direct monitoring. Existing profiles keep their channels and levels. Channel IDs do not change when a channel is renamed or reordered. A removed ID is not reused.
 
+To move a channel, drag the dots at the top of its strip onto another strip. Only the dots start a drag. The channel takes the position of the strip where you drop it. With the dots focused, the Left and Right arrow keys move the channel by one place.
+
 Select the application button in a channel heading to open the channel menu. The menu opens over the mixer and does not move other controls. A click outside the menu, the close button, or Escape closes it and discards unsaved text.
 
-- The menu heading renames a software channel and moves a channel left or right.
+- The menu heading renames a software channel.
 - **Assigned here** lists the saved rules for this channel, including rules for closed applications.
 - **Active** lists playing applications that this channel does not have yet.
 - **All applications** lists the applications that have a visible desktop entry. LibreWave reads the entries from the XDG data directories and the Flatpak export directories. It reads them once, when a menu first opens. Each row shows the icon that the desktop entry names. LibreWave looks for it in the icon theme set in `~/.config/kdeglobals` or the GTK 3 settings, then in Breeze, Adwaita, `hicolor`, and the pixmap directories. A playing application uses the icon of the entry with the same desktop ID, or of the entry that starts the same executable. A row without an icon shows a generic glyph.
