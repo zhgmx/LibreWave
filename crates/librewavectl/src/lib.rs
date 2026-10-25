@@ -864,7 +864,12 @@ fn write_mixer<W: Write>(output: &mut W, mixer: &MixerSnapshot) -> io::Result<()
     }
     writeln!(output, "Saved assignments:")?;
     for rule in &mixer.profile.assignments {
-        writeln!(output, "  {:?} -> {}", rule.application, rule.source)?;
+        // The same form that `apps assign` accepts.
+        let (kind, identity) = match rule.application {
+            librewave_core::ApplicationId::Desktop(name) => ("desktop", name),
+            librewave_core::ApplicationId::Executable(name) => ("executable", name),
+        };
+        writeln!(output, "  {kind} {} -> {}", identity.as_str(), rule.source)?;
     }
     writeln!(output, "Software outputs:")?;
     write_mix_route(output, "Monitor", mixer.profile.outputs.route(MixTarget::Monitor))?;
@@ -1421,6 +1426,26 @@ mod tests {
         ] {
             assert!(parse_control(name, value).is_err(), "{name} {value}");
         }
+    }
+
+    #[test]
+    fn saved_assignments_print_in_the_form_that_apps_assign_accepts() {
+        let name = |value| librewave_core::InputName::try_new(value).expect("name");
+        let profile = librewave_core::MixerProfile::first_run(&[
+            (
+                librewave_core::ApplicationId::Desktop(name("com.spotify.Client")),
+                librewave_core::DefaultInput::Music,
+            ),
+            (
+                librewave_core::ApplicationId::Executable(name("firefox")),
+                librewave_core::DefaultInput::Browser,
+            ),
+        ]);
+        let mut output = Vec::new();
+        write_mixer(&mut output, &MixerSnapshot::inactive(profile)).expect("write");
+        let text = String::from_utf8(output).expect("UTF-8");
+        assert!(text.contains("\n  desktop com.spotify.Client -> 3\n"), "{text}");
+        assert!(text.contains("\n  executable firefox -> 4\n"), "{text}");
     }
 
     #[test]
