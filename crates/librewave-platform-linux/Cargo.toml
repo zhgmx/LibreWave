@@ -15,7 +15,7 @@ librewave-device = { path = "../librewave-device" }
 librewave-engine = { path = "../librewave-engine" }
 librewave-ipc = { path = "../librewave-ipc" }
 librewave-protocol = { path = "../librewave-protocol" }
-pipewire = "=0.9.2"
+pipewire = "=0.10.1"
 rusb = "0.9.4"
 serde_json.workspace = true
 serde.workspace = true

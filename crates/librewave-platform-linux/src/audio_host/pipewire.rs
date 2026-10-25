@@ -3,6 +3,7 @@
 use super::{LinuxAudioError, PipeWireFacade};
 use crate::{UsbDeviceCandidate, WAVE3_USB};
 use pipewire as pw;
+use pw::loop_::Timeout;
 use pw::types::ObjectType;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -287,7 +288,7 @@ impl PipeWireClient {
 
         let deadline = Instant::now() + PIPEWIRE_ROUNDTRIP_TIMEOUT;
         while !done.get() && fatal_error.borrow().is_none() && Instant::now() < deadline {
-            self.main_loop.loop_().iterate(PIPEWIRE_ITERATION);
+            self.main_loop.loop_().iterate(Timeout::Finite(PIPEWIRE_ITERATION));
         }
         drop(core_listener);
         if let Some(error) = fatal_error.take() {

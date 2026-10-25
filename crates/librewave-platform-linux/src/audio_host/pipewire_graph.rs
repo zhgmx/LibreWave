@@ -8,6 +8,7 @@ use super::pipewire_filter_ffi::{
 use super::{EndpointPlan, PipeWireEndpointDirection};
 use librewave_core::DELIBERATE_ENDPOINTS;
 use pipewire as pw;
+use pw::loop_::Timeout;
 use pw::types::ObjectType;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -388,7 +389,7 @@ impl<P: GraphProcessor> InactiveGraph<P> {
             {
                 settled = Some((generation, Instant::now()));
             }
-            main_loop.loop_().iterate(Duration::from_millis(10));
+            main_loop.loop_().iterate(Timeout::Finite(Duration::from_millis(10)));
         }
 
         let system_id = registry_state.borrow().node_id(&endpoints[0].node_name)?;
@@ -530,7 +531,7 @@ impl<P: GraphProcessor> InactiveGraph<P> {
             if Instant::now() >= deadline {
                 return Err(GraphError::RoundtripTimeout);
             }
-            self.main_loop.loop_().iterate(LOOP_ITERATION);
+            self.main_loop.loop_().iterate(Timeout::Finite(LOOP_ITERATION));
         }
         let ids = {
             let state = self.registry_state.borrow();
@@ -557,7 +558,7 @@ impl<P: GraphProcessor> InactiveGraph<P> {
                     if Instant::now() >= driver_deadline {
                         return Err(error);
                     }
-                    self.main_loop.loop_().iterate(LOOP_ITERATION);
+                    self.main_loop.loop_().iterate(Timeout::Finite(LOOP_ITERATION));
                 }
                 Err(error) => return Err(error),
             }
@@ -598,7 +599,7 @@ impl<P: GraphProcessor> InactiveGraph<P> {
                 first_error.get_or_insert(GraphError::CallbackDidNotQuiesce);
                 break;
             }
-            self.main_loop.loop_().iterate(LOOP_ITERATION);
+            self.main_loop.loop_().iterate(Timeout::Finite(LOOP_ITERATION));
         }
         self.links.clear();
         self.additional_links.clear();
@@ -629,7 +630,7 @@ impl<P: GraphProcessor> InactiveGraph<P> {
 
 impl<P: GraphProcessor> ActiveGraph<P> {
     pub(super) fn iterate(&mut self, timeout: Duration) {
-        self.inner.main_loop.loop_().iterate(timeout);
+        self.inner.main_loop.loop_().iterate(Timeout::Finite(timeout));
         self.observe_applications();
         let writes = {
             let mut state = self.inner.registry_state.borrow_mut();
@@ -969,7 +970,7 @@ fn sync_core(
             drop(listener);
             return Err(GraphError::RoundtripTimeout);
         }
-        main_loop.loop_().iterate(LOOP_ITERATION);
+        main_loop.loop_().iterate(Timeout::Finite(LOOP_ITERATION));
     }
     drop(listener);
     if let Some(error) = error.take() { Err(GraphError::PipeWire(error)) } else { Ok(()) }

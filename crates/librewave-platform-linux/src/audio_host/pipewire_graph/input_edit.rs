@@ -6,6 +6,7 @@ use super::{
 };
 use librewave_core::{EndpointId, SourceId};
 use pipewire as pw;
+use pw::loop_::Timeout;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -72,7 +73,7 @@ impl<P: GraphProcessor> ActiveGraph<P> {
         let deadline = Instant::now() + ROUNDTRIP_TIMEOUT;
         let mut settled = (u64::MAX, Instant::now());
         loop {
-            self.inner.main_loop.loop_().iterate(LOOP_ITERATION);
+            self.inner.main_loop.loop_().iterate(Timeout::Finite(LOOP_ITERATION));
             let state = self.inner.registry_state.borrow();
             if state.port_generation != settled.0 {
                 settled = (state.port_generation, Instant::now());
@@ -142,7 +143,7 @@ impl<P: GraphProcessor> ActiveGraph<P> {
         self.inner.activation.requested.store(requested, Ordering::Release);
         let deadline = Instant::now() + ROUNDTRIP_TIMEOUT;
         while self.inner.activation.applied.load(Ordering::Acquire) != requested {
-            self.inner.main_loop.loop_().iterate(LOOP_ITERATION);
+            self.inner.main_loop.loop_().iterate(Timeout::Finite(LOOP_ITERATION));
             if self.diagnostics().failed {
                 return Err(GraphError::AttemptFault(ProcessFault::Processor));
             }

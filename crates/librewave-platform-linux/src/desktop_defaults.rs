@@ -2,6 +2,7 @@
 
 use librewave_core::DesktopDefaults;
 use pipewire as pw;
+use pw::loop_::Timeout;
 use pw::types::ObjectType;
 use std::cell::{Cell, RefCell};
 use std::io;
@@ -167,7 +168,7 @@ impl MetadataClient {
         // waiting for that exact object; do not substitute empty defaults.
         let deadline = Instant::now() + Duration::from_secs(2);
         while found.borrow().is_empty() && Instant::now() < deadline {
-            loop_.loop_().iterate(Duration::from_millis(5));
+            loop_.loop_().iterate(Timeout::Finite(Duration::from_millis(5)));
         }
         roundtrip(&core, &loop_)?;
         let objects = found.borrow();
@@ -248,7 +249,7 @@ impl MetadataClient {
                     format!("desktop default {action} was not acknowledged within its deadline"),
                 ));
             }
-            self.loop_.loop_().iterate(Duration::from_millis(5));
+            self.loop_.loop_().iterate(Timeout::Finite(Duration::from_millis(5)));
         }
     }
     fn set(&self, index: usize, name: Option<&str>) {
@@ -311,7 +312,7 @@ fn roundtrip(core: &pw::core::CoreRc, loop_: &pw::main_loop::MainLoopRc) -> io::
         .register();
     let deadline = Instant::now() + Duration::from_secs(2);
     while !done.get() && fatal.borrow().is_none() && Instant::now() < deadline {
-        loop_.loop_().iterate(Duration::from_millis(5));
+        loop_.loop_().iterate(Timeout::Finite(Duration::from_millis(5)));
     }
     drop(listener);
     if let Some(result) = *fatal.borrow() {
