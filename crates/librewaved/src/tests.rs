@@ -2209,6 +2209,27 @@ fn previews_change_no_saved_state_and_a_commit_ends_them() {
 }
 
 #[test]
+fn a_preview_without_a_follow_up_expires() {
+    let (mut daemon, _, saves) = mixer_daemon(vec![]);
+    let level = librewave_core::MixerLevel::Output {
+        target: librewave_core::MixTarget::Monitor,
+        fader: librewave_core::FaderGain::MIN,
+    };
+    daemon
+        .handle(
+            Command::PreviewMixer { expected_generation: MixerGeneration(0), level },
+            librewave_core::Origin::Client,
+        )
+        .expect("preview");
+    let since = daemon.preview_since.expect("preview runs");
+    daemon.expire_preview(since + PREVIEW_TIMEOUT.saturating_sub(Duration::from_millis(1)));
+    assert!(daemon.preview_since.is_some(), "a renewed drag keeps its preview");
+    daemon.expire_preview(since + PREVIEW_TIMEOUT);
+    assert!(daemon.preview_since.is_none(), "the saved level returns");
+    assert_eq!(*saves.borrow(), 0);
+}
+
+#[test]
 fn a_no_op_or_unsaved_commit_ends_the_preview() {
     let level = librewave_core::MixerLevel::Route {
         source: SourceId::new(2),
