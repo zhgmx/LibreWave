@@ -3,8 +3,7 @@
 use super::engine::{CheckState, InstallRequest, Lifecycle, UninstallOutcome, test_paths};
 use super::hash;
 use super::model::{
-    AudioOwnership, BuildIdentity, Journal, MANIFEST_SCHEMA, Operation, OwnedKind, OwnedPath,
-    Phase, Snapshot,
+    BuildIdentity, Journal, MANIFEST_SCHEMA, Operation, OwnedKind, OwnedPath, Phase, Snapshot,
 };
 use super::system::{DaemonProcess, TestProcessInspector, TestUdev, TestUnitInspector, UdevSystem};
 use super::{CommandKind, Options, run};
@@ -98,7 +97,6 @@ fn first_install_records_exact_build_and_preserves_profiles() {
         b"cli-v1"
     );
     assert_eq!(fs::read_link(&manifest.active_link).unwrap(), manifest.active_build_directory);
-    assert_eq!(manifest.audio_ownership, AudioOwnership::ExperimentalOptIn);
     assert!(!manifest.wireplumber_policy_path.exists());
     assert_eq!(lifecycle.uninstall(false).unwrap(), UninstallOutcome::Removed);
     assert_eq!(fs::read(profiles).unwrap(), b"profile");

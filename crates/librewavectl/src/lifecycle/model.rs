@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub const MANIFEST_SCHEMA: u32 = 5;
+pub const MANIFEST_SCHEMA: u32 = 6;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -84,17 +84,10 @@ pub struct Manifest {
     pub udev_policy_path: PathBuf,
     pub wireplumber_policy_path: PathBuf,
     pub profiles_path: PathBuf,
-    pub audio_ownership: AudioOwnership,
     pub device_access: DeviceAccess,
     pub desktop: Option<DesktopConfig>,
     pub owned_paths: Vec<OwnedPath>,
     pub usb_access: Vec<librewave_platform_linux::usb_access::AccessSnapshot>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AudioOwnership {
-    ExperimentalOptIn,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

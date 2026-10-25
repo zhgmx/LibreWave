@@ -1,9 +1,7 @@
 use super::engine::{InstallRequest, Lifecycle, find_owned};
 use super::fs_ops::{atomic_copy, atomic_symlink, atomic_write, matches_snapshot_destination};
 use super::hash;
-use super::model::{
-    AudioOwnership, DeviceAccess, MANIFEST_SCHEMA, Manifest, OwnedKind, OwnedPath, Snapshot,
-};
+use super::model::{DeviceAccess, MANIFEST_SCHEMA, Manifest, OwnedKind, OwnedPath, Snapshot};
 use super::system::{ProcessInspector, UdevSystem, UnitInspector};
 use super::validation::validate_systemd_path;
 use librewave_platform_linux::audio_policy::Wave3AudioPolicy;
@@ -74,7 +72,6 @@ impl<U: UdevSystem, S: UnitInspector, P: ProcessInspector> Lifecycle<U, S, P> {
             udev_policy_path: self.paths.udev_rule.clone(),
             wireplumber_policy_path: self.paths.wireplumber(),
             profiles_path: self.paths.profiles(),
-            audio_ownership: AudioOwnership::ExperimentalOptIn,
             device_access: request.device_access,
             desktop: request.desktop.as_ref().map(|desktop| desktop.config.clone()),
             owned_paths,
