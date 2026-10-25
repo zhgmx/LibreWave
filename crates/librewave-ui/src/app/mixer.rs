@@ -137,6 +137,8 @@ const CAP: f32 = 16.;
 const FADER_MIN: f32 = 80.;
 // The level readout and mute button under each fader, with their gaps.
 const LANE_FOOT: f32 = SPACE_MD + 24. + SPACE_MD + 32.;
+/// The top padding of a strip, which holds the drag handle above the heading.
+const STRIP_TOP: f32 = SPACE_SM + 12. + SPACE_MD;
 // The inputs keep this height when the window scrolls instead of filling it.
 const INPUTS_MIN: f32 = 360.;
 const INPUTS_COMPACT: f32 = 440.;
@@ -275,14 +277,15 @@ impl Shell {
             .flex_shrink_0()
             .relative()
             .p(px(SPACE_LG))
+            .pt(px(STRIP_TOP))
             .flex()
             .flex_col()
             .gap(px(SPACE_XL))
-            .child(self.source_heading(source, generation, cx))
+            .child(self.source_heading(source, cx))
             .when(self.application_input == Some(id), |view| {
                 // The pop-up opens under the heading and takes no room in the strip.
                 view.child(
-                    div().absolute().top(px(SPACE_LG + 40. + SPACE_SM)).left(px(SPACE_SM)).child(
+                    div().absolute().top(px(STRIP_TOP + 40. + SPACE_SM)).left(px(SPACE_SM)).child(
                         self.snapshot.as_ref().map_or_else(
                             || div().into_any_element(),
                             |snapshot| self.channel_menu(snapshot, id, cx),
@@ -324,17 +327,9 @@ impl Shell {
             )
     }
 
-    fn source_heading(
-        &self,
-        source: &MixerSourceSnapshot,
-        generation: MixerGeneration,
-        cx: &mut Context<Self>,
-    ) -> Div {
+    fn source_heading(&self, source: &MixerSourceSnapshot, cx: &mut Context<Self>) -> Div {
         let microphone = source.role == SourceRole::Microphone;
         let id = source.controls.source();
-        let removable = !self.pending
-            && self.settings_modal.is_none()
-            && self.snapshot.as_ref().is_some_and(|s| input_layout_available(s.mixer.runtime));
         div()
             .flex()
             .items_center()
@@ -368,9 +363,9 @@ impl Shell {
             .when(!microphone, |view| {
                 view.child(
                     icon_button(
-                        &format!("applications-{id}"),
-                        "system",
-                        "Manage application assignments",
+                        &format!("edit-input-{id}"),
+                        "pencil-simple",
+                        "Edit input",
                         Tone::Quiet,
                         FAINT,
                         !self.pending,
@@ -379,33 +374,6 @@ impl Shell {
                             this.open_channel(id, cx);
                             this.poll_applications(cx);
                             cx.notify();
-                        },
-                    )
-                    .size(px(28.)),
-                )
-            })
-            .when(source.role == SourceRole::Software, |view| {
-                view.child(
-                    icon_button(
-                        &format!("remove-input-{id}"),
-                        "x",
-                        if removable {
-                            "Remove input"
-                        } else {
-                            "Wait for mixer readiness before removing an input"
-                        },
-                        Tone::Quiet,
-                        FAINT,
-                        removable,
-                        cx,
-                        move |this, _, cx| {
-                            this.send(
-                                Command::RemoveMixerInput {
-                                    expected_generation: generation,
-                                    source: id,
-                                },
-                                cx,
-                            );
                         },
                     )
                     .size(px(28.)),
@@ -426,7 +394,7 @@ impl Shell {
         let drag = ChannelDrag { source: id, name: source.name.as_str().to_owned().into() };
         let handle = identified(&format!("drag-channel-{}", id.get()))
             .absolute()
-            .top(px(2.))
+            .top(px(SPACE_SM))
             .left(px(STRIP_WIDTH / 2. - 24.))
             .w(px(48.))
             .h(px(12.))

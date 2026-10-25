@@ -4,12 +4,12 @@
 //! installed applications comes from desktop entries and changes nothing.
 use super::{
     Shell,
-    controls::{Tone, activate, caption, icon, icon_button, identified, label, tip},
+    controls::{Tone, activate, button_face, caption, icon, icon_button, identified, label, tip},
     text_field::{Submitted, TextField},
     theme::{
-        BODY, BODY_LINE, CAPTION, CAPTION_LINE, FAINT, GROUP, HEADING, HEADING_LINE, ICON_SMALL,
-        INK, LINE, MONITOR, MUTED, RADIUS, RADIUS_CARD, RAISED, SPACE_LG, SPACE_MD, SPACE_SM,
-        SPACE_XS, WARNING,
+        BODY, BODY_LINE, CAPTION, CAPTION_LINE, DANGER, FAINT, GROUP, HEADING, HEADING_LINE,
+        ICON_SMALL, INK, LINE, MONITOR, MUTED, RADIUS, RADIUS_CARD, RAISED, SPACE_LG, SPACE_MD,
+        SPACE_SM, SPACE_XS, WARNING,
     },
 };
 use gpui::{
@@ -344,7 +344,8 @@ impl Shell {
             .child(div().h(px(1.)).bg(rgb(LINE)))
             .child(self.custom_entry(cx))
             // The note keeps its line when empty, so the menu never changes height.
-            .child(div().h(px(NOTE_HEIGHT)).flex().flex_col().children(self.routing_note()));
+            .child(div().h(px(NOTE_HEIGHT)).flex().flex_col().children(self.routing_note()))
+            .children(self.removal_footer(snapshot, source, cx));
         deferred(
             anchored().anchor(Corner::TopLeft).snap_to_window_with_margin(px(SPACE_MD)).child(menu),
         )
@@ -688,6 +689,51 @@ impl Shell {
         ))
     }
 
+    /// Removes a software input after a confirmation. Built-in inputs have none.
+    fn removal_footer(
+        &self,
+        snapshot: &Snapshot,
+        source: SourceId,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let input = snapshot.mixer.profile.source(source)?;
+        if input.role != SourceRole::Software {
+            return None;
+        }
+        let name = input.name.clone();
+        let generation = snapshot.mixer.generation();
+        let enabled = !self.pending && super::mixer::input_layout_available(snapshot.mixer.runtime);
+        let button = activate(
+            button_face("remove-input", Tone::Quiet)
+                .px(px(SPACE_SM))
+                .text_color(rgb(DANGER))
+                .child(icon("trash", DANGER, ICON_SMALL))
+                .child("Remove input"),
+            enabled,
+            cx,
+            move |this, window, cx| {
+                this.close_channel(cx);
+                this.ask(
+                    format!("Remove {name}?"),
+                    "Its levels are deleted. Applications assigned to it move to System.",
+                    "Remove",
+                    Command::RemoveMixerInput { expected_generation: generation, source },
+                    window,
+                    cx,
+                );
+            },
+        );
+        Some(
+            div().border_t_1().border_color(rgb(LINE)).p(px(SPACE_SM)).flex().items_center().child(
+                if enabled {
+                    button
+                } else {
+                    button.tooltip(tip("Wait for the mixer to be ready before removing an input"))
+                },
+            ),
+        )
+    }
+
     /// Routing progress and conditions that limit assignment.
     fn routing_note(&self) -> Option<Div> {
         let text = match &self.applications {
@@ -814,7 +860,7 @@ mod tests {
     ) {
         let (view, cx) = cx.add_window_view(|_, _| shell_with(Snapshot::empty()));
         let before = cx.debug_bounds("fader-2-monitor").expect("system fader");
-        let opener = cx.debug_bounds("applications-2").expect("channel button");
+        let opener = cx.debug_bounds("edit-input-2").expect("edit button");
         cx.simulate_click(opener.center(), gpui::Modifiers::none());
         let menu = cx.debug_bounds("channel-menu").expect("open menu");
         assert_eq!(cx.debug_bounds("fader-2-monitor"), Some(before), "the strip moved");
@@ -847,6 +893,37 @@ mod tests {
             assert!(view.in_flight_fader.is_none() && view.queued_fader.is_none());
         });
         assert!(cx.debug_bounds("channel-menu").is_none());
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
+    fn removing_an_input_closes_the_menu_and_asks_first(cx: &mut gpui::TestAppContext) {
+        let mut snapshot = Snapshot::empty();
+        snapshot.mixer.profile = snapshot
+            .mixer
+            .profile
+            .with_input(InputName::try_new("Music").expect("valid name"))
+            .expect("available input");
+        let (view, cx) = cx.add_window_view(|_, _| shell_with(snapshot));
+        let system = cx.debug_bounds("edit-input-2").expect("system edit button");
+        cx.simulate_click(system.center(), gpui::Modifiers::none());
+        assert!(cx.debug_bounds("channel-menu").is_some());
+        assert!(cx.debug_bounds("remove-input").is_none(), "System cannot be removed");
+        cx.update(|_, cx| view.update(cx, Shell::close_channel));
+        let music = cx.debug_bounds("edit-input-3").expect("music edit button");
+        cx.simulate_click(music.center(), gpui::Modifiers::none());
+        let remove = cx.debug_bounds("remove-input").expect("remove button");
+        cx.simulate_click(remove.center(), gpui::Modifiers::none());
+        view.read_with(cx, |view, _| {
+            assert!(view.application_input.is_none());
+            assert!(!view.pending, "asking sends nothing");
+            assert!(matches!(
+                view.confirmation.as_ref().map(|c| c.command),
+                Some(Command::RemoveMixerInput { source, .. }) if source == SourceId::new(3)
+            ));
+        });
+        assert!(cx.debug_bounds("channel-menu").is_none());
+        assert!(cx.debug_bounds("confirmation").is_some());
     }
 
     #[cfg(feature = "gpui-tests")]
