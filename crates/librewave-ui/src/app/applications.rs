@@ -60,6 +60,7 @@ impl Installed {
     }
 }
 const LIST_HEIGHT: f32 = 300.;
+const NOTE_HEIGHT: f32 = CAPTION_LINE + SPACE_MD;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum RuleKind {
@@ -137,7 +138,9 @@ impl Shell {
             field.update(cx, |field, cx| field.set_value(text, cx));
             return;
         }
-        let field = cx.new(|cx| TextField::new(text, cx).with_placeholder("Search or type an ID"));
+        let field = cx.new(|cx| {
+            TextField::new(text, cx).with_placeholder("Search, or type an app ID or executable")
+        });
         cx.observe(&field, |_, _, cx| cx.notify()).detach();
         cx.subscribe(&field, |this, _, _: &Submitted, cx| this.save_channel_text(true, cx))
             .detach();
@@ -179,10 +182,9 @@ impl Shell {
         let command = if assignment {
             Command::SetApplicationAssignment {
                 expected_generation,
-                application: if self.assignment_kind == RuleKind::Desktop {
-                    ApplicationId::Desktop(name)
-                } else {
-                    ApplicationId::Executable(name)
+                application: match self.rule_kind(name.as_str()) {
+                    RuleKind::Desktop => ApplicationId::Desktop(name),
+                    RuleKind::Executable => ApplicationId::Executable(name),
                 },
                 source: Some(source),
             }
@@ -190,6 +192,34 @@ impl Shell {
             Command::RenameMixerInput { expected_generation, source, name }
         };
         self.send(command, cx);
+    }
+
+    /// Decides whether typed text names an app ID or an executable.
+    ///
+    /// A file chosen with the picker keeps the kind it was chosen as. Text
+    /// that names an installed or playing application takes that kind. Other
+    /// text with a dot reads as a reverse-domain app ID, such as
+    /// `com.spotify.Client`, and anything else as an executable name.
+    pub(super) fn rule_kind(&self, text: &str) -> RuleKind {
+        let text = text.trim();
+        if let Some((picked, kind)) = &self.picked_rule
+            && picked == text
+        {
+            return *kind;
+        }
+        let installed = self.installed_applications.list();
+        if installed.iter().any(|app| app.id == text) {
+            return RuleKind::Desktop;
+        }
+        if installed.iter().any(|app| app.executable.as_deref() == Some(text)) {
+            return RuleKind::Executable;
+        }
+        if let Some(ApplicationSnapshot::Ready { applications, .. }) = &self.applications
+            && let Some(app) = applications.iter().find(|app| kind_of(app.id).1.as_str() == text)
+        {
+            return kind_of(app.id).0;
+        }
+        if text.contains('.') { RuleKind::Desktop } else { RuleKind::Executable }
     }
 
     /// Fills the custom entry from a chosen file. A desktop entry gives its
@@ -216,8 +246,8 @@ impl Shell {
                                         .unwrap_or_default(),
                                 ),
                             };
-                            this.assignment_kind = kind;
                             this.set_assignment_text(&text, cx);
+                            this.picked_rule = Some((text, kind));
                         }
                     }
                     Ok(Ok(None)) => {}
@@ -313,7 +343,8 @@ impl Shell {
             .child(self.application_list(snapshot, source, cx))
             .child(div().h(px(1.)).bg(rgb(LINE)))
             .child(self.custom_entry(cx))
-            .children(self.routing_note());
+            // The note keeps its line when empty, so the menu never changes height.
+            .child(div().h(px(NOTE_HEIGHT)).flex().flex_col().children(self.routing_note()));
         deferred(
             anchored().anchor(Corner::TopLeft).snap_to_window_with_margin(px(SPACE_MD)).child(menu),
         )
@@ -435,12 +466,13 @@ impl Shell {
         };
         let mut list = div()
             .id("application-list")
-            .max_h(px(LIST_HEIGHT))
+            .h(px(LIST_HEIGHT))
             .overflow_y_scroll()
             .p(px(SPACE_SM))
             .flex()
             .flex_col();
 
+        let mut empty = true;
         let here: Vec<Choice> = rules
             .iter()
             .filter(|rule| rule.source == source)
@@ -461,9 +493,11 @@ impl Shell {
                 })
             })
             .collect();
+        empty &= here.is_empty();
         list = Self::list_section(list, "Assigned here", here, source, snapshot, cx);
 
         let active = self.active_choices(snapshot, source, &matches, &assigned_elsewhere);
+        empty &= active.is_empty();
         list = Self::list_section(list, "Active", active, source, snapshot, cx);
 
         let installed: Vec<Choice> = self
@@ -474,7 +508,9 @@ impl Shell {
             .filter_map(|(index, app): (usize, &InstalledApplication)| {
                 let id = InputName::try_new(&app.id).ok()?;
                 let application = ApplicationId::Desktop(id);
-                if rules.iter().any(|r| r.application == application && r.source == source) {
+                if rules.iter().any(|r| r.application == application && r.source == source)
+                    || self.is_playing(application, app)
+                {
                     return None;
                 }
                 let detail = assigned_elsewhere(application).unwrap_or_else(|| app.id.clone());
@@ -490,11 +526,26 @@ impl Shell {
             })
             .collect();
         let loading = self.installed_applications == Installed::Reading;
+        empty &= installed.is_empty();
         list = Self::list_section(list, "All applications", installed, source, snapshot, cx);
         if loading {
             list = list.child(note("Reading installed applications…"));
+        } else if empty {
+            list = list.child(note("No applications match."));
         }
         list
+    }
+
+    /// Whether an installed entry is already listed as a playing application.
+    fn is_playing(&self, application: ApplicationId, entry: &InstalledApplication) -> bool {
+        let Some(ApplicationSnapshot::Ready { applications, .. }) = &self.applications else {
+            return false;
+        };
+        applications.iter().any(|playing| {
+            playing.id == application
+                || matches!(playing.id, ApplicationId::Executable(name)
+                    if entry.executable.as_deref() == Some(name.as_str()))
+        })
     }
 
     /// Playing applications that are not assigned to this channel yet.
@@ -626,28 +677,25 @@ impl Shell {
 
     /// A custom rule: its kind, its identity, and a file picker that fills it.
     fn custom_entry(&self, cx: &mut Context<Self>) -> Div {
-        let kind = self.assignment_kind;
-        let mut row =
-            div().p(px(SPACE_MD)).flex().items_center().gap(px(SPACE_XS)).child(activate(
-                super::controls::button_face("rule-kind", Tone::Secondary)
-                    .w(px(112.))
-                    .px(px(SPACE_SM))
-                    .justify_start()
-                    .text_size(px(CAPTION))
-                    .line_height(px(CAPTION_LINE))
-                    .child(icon(kind.glyph(), INK, ICON_SMALL))
-                    .child(kind.label())
-                    .tooltip(tip("Switch between an app ID and an executable name")),
-                !self.pending,
-                cx,
-                |this, _, cx| {
-                    this.assignment_kind = match this.assignment_kind {
-                        RuleKind::Desktop => RuleKind::Executable,
-                        RuleKind::Executable => RuleKind::Desktop,
-                    };
-                    cx.notify();
-                },
-            ));
+        let text = self
+            .assignment_name
+            .as_ref()
+            .map(|field| field.read(cx).value().trim().to_owned())
+            .unwrap_or_default();
+        let kind = self.rule_kind(&text);
+        let mut row = div().p(px(SPACE_MD)).flex().items_center().gap(px(SPACE_XS)).child(
+            identified("rule-kind")
+                .size(px(32.))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon(kind.glyph(), if text.is_empty() { FAINT } else { MUTED }, ICON_SMALL))
+                .tooltip(tip(match kind {
+                    RuleKind::Desktop => "Typed text is saved as an app ID",
+                    RuleKind::Executable => "Typed text is saved as an executable name",
+                })),
+        );
         if let Some(field) = &self.assignment_name {
             row = row.child(div().flex_1().min_w_0().child(field.clone()));
         }
@@ -720,7 +768,7 @@ impl Shell {
         text.map(|(color, text)| {
             div()
                 .px(px(SPACE_LG))
-                .pb(px(SPACE_MD))
+                .truncate()
                 .text_size(px(CAPTION))
                 .line_height(px(CAPTION_LINE))
                 .text_color(rgb(color))
@@ -826,6 +874,8 @@ mod tests {
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
         assert!(cx.debug_bounds("app-installed-0").is_none());
+        let filtered = cx.debug_bounds("channel-menu").expect("filtered menu");
+        assert_eq!(filtered.size, menu.size, "filtering changed the menu size");
         let outside = gpui::point(menu.left() - px(40.), menu.bottom() + px(40.));
         cx.simulate_click(outside, gpui::Modifiers::none());
         view.read_with(cx, |view, _| {
@@ -850,6 +900,20 @@ mod tests {
                 assert!(view.channel_name.is_none());
             });
         });
+    }
+
+    #[test]
+    fn typed_identities_choose_their_rule_kind_without_a_toggle() {
+        let mut shell = shell_with(Snapshot::empty());
+        // The fixture installs `org.test.Player`, which starts `player`.
+        assert!(shell.rule_kind("org.test.Player") == RuleKind::Desktop);
+        assert!(shell.rule_kind(" player ") == RuleKind::Executable);
+        assert!(shell.rule_kind("com.example.Unknown") == RuleKind::Desktop);
+        assert!(shell.rule_kind("unknown-tool") == RuleKind::Executable);
+        // A file chosen as an executable stays one even with a dot in its name.
+        shell.picked_rule = Some(("tool.bin".to_owned(), RuleKind::Executable));
+        assert!(shell.rule_kind("tool.bin") == RuleKind::Executable);
+        assert!(shell.rule_kind("tool.bin2") == RuleKind::Desktop);
     }
 
     #[test]

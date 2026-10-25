@@ -92,7 +92,8 @@ struct Shell {
     application_input: Option<librewave_core::SourceId>,
     channel_name: Option<gpui::Entity<text_field::TextField>>,
     assignment_name: Option<gpui::Entity<text_field::TextField>>,
-    assignment_kind: applications::RuleKind,
+    /// A rule identity chosen with the file picker, with the kind it was chosen as.
+    picked_rule: Option<(String, applications::RuleKind)>,
     installed_applications: applications::Installed,
     meters: Option<librewave_core::MeterFrame>,
     meter_error: Option<String>,
@@ -146,7 +147,7 @@ impl Shell {
             application_input: None,
             channel_name: None,
             assignment_name: None,
-            assignment_kind: applications::RuleKind::Desktop,
+            picked_rule: None,
             installed_applications: applications::Installed::NotRead,
             meters: None,
             meter_error: None,
@@ -600,7 +601,7 @@ mod tests {
             application_input: None,
             channel_name: None,
             assignment_name: None,
-            assignment_kind: applications::RuleKind::Desktop,
+            picked_rule: None,
             // Tests never read the host's desktop entries.
             installed_applications: applications::Installed::Ready(vec![
                 librewave_platform_linux::desktop_entries::InstalledApplication {
