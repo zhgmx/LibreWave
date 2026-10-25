@@ -3,6 +3,7 @@
 use super::controls::{
     Tone, action_button, activate, caption, icon, icon_button, identified, tabular, tip,
 };
+use super::gesture::{LevelControl, level_gesture};
 use super::theme::{
     BODY, BODY_LINE, DANGER, FAINT, FOCUS, HEADING, HEADING_LINE, ICON, ICON_SMALL, INK, LINE,
     MONITOR, MUTED, RADIUS, RAISED, RAISED_HOVER, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, WARNING,
@@ -129,7 +130,7 @@ impl Shell {
                     shown(headphone_of, config.headphone_volume),
                 );
                 panel
-                    .child(levels(config, shown, target, slidable, cx))
+                    .child(levels(config, shown, target, slidable, self.level_gesture, cx))
                     .child(processing(config, target, cx))
                     .when_some(
                         match write_access {
@@ -166,6 +167,7 @@ fn levels(
     (gain, headphone): (FixedPointValue, FixedPointValue),
     target: Target,
     slidable: bool,
+    gesture: Option<LevelControl>,
     cx: &mut Context<Shell>,
 ) -> Div {
     div()
@@ -191,6 +193,7 @@ fn levels(
             },
             target,
             slidable,
+            gesture,
             cx,
         ))
         .child(level_row(
@@ -212,12 +215,19 @@ fn levels(
             },
             target,
             slidable,
+            gesture,
             cx,
         ))
 }
 
 /// One hardware level: its mute button, name, value, range bar, and steppers.
-fn level_row(level: &Level, target: Target, slidable: bool, cx: &mut Context<Shell>) -> Div {
+fn level_row(
+    level: &Level,
+    target: Target,
+    slidable: bool,
+    gesture: Option<LevelControl>,
+    cx: &mut Context<Shell>,
+) -> Div {
     let down = stepped(level.value, -128, level.minimum, level.maximum).map(level.control);
     let up = stepped(level.value, 128, level.minimum, level.maximum).map(level.control);
     let ink = if level.muted { FAINT } else { INK };
@@ -262,7 +272,7 @@ fn level_row(level: &Level, target: Target, slidable: bool, cx: &mut Context<She
                                 .child(format!("{} dB", decibels(level.shown))),
                         ),
                 )
-                .child(level_slider(level, ink, target, slidable, cx)),
+                .child(level_slider(level, ink, target, slidable, gesture, cx)),
         )
         .child(
             div()
@@ -273,30 +283,35 @@ fn level_row(level: &Level, target: Target, slidable: bool, cx: &mut Context<She
         )
 }
 
-/// A pointer and key drag along a hardware level. Each position snaps to
-/// the 0.5 dB device step inside the reviewed range.
-#[derive(Clone)]
-struct LevelDrag {
-    key: &'static str,
-}
-
 const THUMB: f32 = 14.;
 
+/// A pointer and key slider along a hardware level. Each position snaps to
+/// the 0.5 dB device step inside the reviewed range.
 fn level_slider(
     level: &Level,
     ink: u32,
     target: Target,
     enabled: bool,
+    gesture: Option<LevelControl>,
     cx: &mut Context<Shell>,
 ) -> Stateful<Div> {
     let (minimum, maximum, control, key) = (level.minimum, level.maximum, level.control, level.key);
     let current = level.value;
     let shown = level.shown;
     let fraction = span_fraction(shown, minimum, maximum);
-    let bounds = std::rc::Rc::new(std::cell::Cell::new(None::<gpui::Bounds<gpui::Pixels>>));
-    let painted = std::rc::Rc::clone(&bounds);
     let edit = move |raw: Option<FixedPointValue>| {
         raw.map(|value| MixerEdit::Hardware { device: target.id, control: control(value) })
+    };
+    let gesture_control = LevelControl::Hardware(key);
+    let at = move |position: gpui::Point<gpui::Pixels>, area: gpui::Bounds<gpui::Pixels>| {
+        edit(level_at_pixel(
+            f32::from(position.x),
+            f32::from(area.left()),
+            f32::from(area.size.width),
+            minimum,
+            maximum,
+            current,
+        ))
     };
     let mut slider = identified(&format!("{key}-slider"))
         .w_full()
@@ -310,57 +325,23 @@ fn level_slider(
         .border_color(rgba(0))
         .children(slider_marks(fraction, ink, enabled))
         .child(
-            gpui::canvas(move |area, _, _| painted.set(Some(area)), |_, (), _, _| {})
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full(),
+            level_gesture(
+                gesture_control,
+                enabled,
+                gesture == Some(gesture_control),
+                cx.weak_entity(),
+                std::rc::Rc::new(at),
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
         );
     if !enabled {
         return slider;
     }
-    slider = slider
-        .cursor_pointer()
-        .focus_visible(|style| style.border_color(rgb(FOCUS)))
-        .on_drag(LevelDrag { key }, |_, _, _, cx| cx.new(|_| gpui::Empty))
-        .on_drag_move(cx.listener(
-            move |this, event: &gpui::DragMoveEvent<LevelDrag>, window, cx| {
-                if event.drag(cx).key != key {
-                    return;
-                }
-                let value = level_at_pixel(
-                    f32::from(event.event.position.x),
-                    f32::from(event.bounds.left()),
-                    f32::from(event.bounds.size.width),
-                    minimum,
-                    maximum,
-                    current,
-                );
-                if let Some(edit) = edit(value) {
-                    this.preview_fader(edit, window, cx);
-                }
-            },
-        ))
-        .on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
-                let Some(area) = bounds.get() else {
-                    return;
-                };
-                let value = level_at_pixel(
-                    f32::from(event.position.x),
-                    f32::from(area.left()),
-                    f32::from(area.size.width),
-                    minimum,
-                    maximum,
-                    current,
-                );
-                if let Some(edit) = edit(value) {
-                    this.preview_fader(edit, window, cx);
-                }
-            }),
-        )
-        .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+    slider = slider.focus_visible(|style| style.border_color(rgb(FOCUS))).on_key_down(cx.listener(
+        move |this, event: &gpui::KeyDownEvent, _, cx| {
             let value = match event.keystroke.key.as_str() {
                 "left" | "down" => stepped(shown, -128, minimum, maximum),
                 "right" | "up" => stepped(shown, 128, minimum, maximum),
@@ -372,7 +353,8 @@ fn level_slider(
             if let Some(edit) = edit(value) {
                 this.send_fader(edit, cx);
             }
-        }));
+        },
+    ));
     slider
 }
 

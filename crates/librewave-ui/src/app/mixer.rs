@@ -4,15 +4,13 @@ use super::controls::{
     Tone, activate, button_face, caption, card, icon, icon_button, icon_tile, identified, label,
     tabular, tip,
 };
+use super::gesture::{LevelControl, level_gesture};
 use super::theme::{
     CAPTION, DANGER, FAINT, FOCUS, HEADING, HEADING_LINE, ICON_SMALL, INK, LINE, MONITOR, MUTED,
     PANEL, RADIUS, RADIUS_CARD, RAISED, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, STREAM,
     alpha,
 };
-use gpui::{
-    Bounds, Context, Div, DragMoveEvent, FontWeight, MouseButton, Stateful, canvas, div,
-    prelude::*, px, relative, rgb, rgba,
-};
+use gpui::{Bounds, Context, Div, FontWeight, Stateful, div, prelude::*, px, relative, rgb, rgba};
 use librewave_core::{
     Command, FaderGain, MixRoute, MixTarget, MixerGeneration, MixerSourceSnapshot, Snapshot,
     SourceId, SourceRole,
@@ -132,12 +130,6 @@ impl gpui::Render for ChannelGhost {
             .child(icon("dots-six", MUTED, ICON_SMALL))
             .child(self.name.clone())
     }
-}
-
-#[derive(Clone)]
-struct FaderDrag {
-    source: SourceId,
-    target: MixTarget,
 }
 
 // Strips keep one width, so a longer name or source never moves its neighbors.
@@ -540,6 +532,7 @@ impl Shell {
                 shown,
                 if muted { FAINT } else { color },
                 open && !self.busy(),
+                self.level_gesture,
                 cx,
             ))
             .child(
@@ -672,6 +665,7 @@ impl Shell {
                 shown,
                 color,
                 controls_open,
+                self.level_gesture,
                 cx,
             ))
             .child(icon_button(
@@ -766,20 +760,20 @@ fn output_identity(
         )
 }
 
-#[derive(Clone)]
-struct OutputDrag {
-    target: MixTarget,
-}
 fn output_track(
     key: &str,
     target: MixTarget,
     shown: FaderGain,
     color: u32,
     enabled: bool,
+    gesture: Option<LevelControl>,
     cx: &mut Context<Shell>,
 ) -> Stateful<Div> {
-    let bounds = std::rc::Rc::new(std::cell::Cell::new(None::<Bounds<gpui::Pixels>>));
-    let painted = std::rc::Rc::clone(&bounds);
+    let control = LevelControl::Output(target);
+    let at = move |position: gpui::Point<gpui::Pixels>, area: Bounds<gpui::Pixels>| {
+        output_at_pixel(f32::from(position.x), f32::from(area.left()), f32::from(area.size.width))
+            .map(|fader| MixerEdit::Output { target, fader })
+    };
     let mut track = identified(key)
         .flex_1()
         .min_w(px(80.))
@@ -810,61 +804,36 @@ fn output_track(
             ),
         )
         .child(
-            canvas(move |area, _, _| painted.set(Some(area)), |_, (), _, _| {})
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full(),
+            level_gesture(
+                control,
+                enabled,
+                gesture == Some(control),
+                cx.weak_entity(),
+                std::rc::Rc::new(at),
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
         );
     if enabled {
-        track = track
-            .cursor_pointer()
-            .on_drag(OutputDrag { target }, |_, _, _, cx| cx.new(|_| gpui::Empty))
-            .on_drag_move(cx.listener(
-                move |this, event: &DragMoveEvent<OutputDrag>, window, cx| {
-                    if event.drag(cx).target != target {
-                        return;
-                    }
-                    if let Some(fader) = output_at_pixel(
-                        f32::from(event.event.position.x),
-                        f32::from(event.bounds.left()),
-                        f32::from(event.bounds.size.width),
-                    ) {
-                        this.preview_fader(MixerEdit::Output { target, fader }, window, cx);
-                    }
-                },
-            ))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
-                    if let Some(area) = bounds.get()
-                        && let Some(fader) = output_at_pixel(
-                            f32::from(event.position.x),
-                            f32::from(area.left()),
-                            f32::from(area.size.width),
-                        )
-                    {
-                        this.preview_fader(MixerEdit::Output { target, fader }, window, cx);
-                    }
-                }),
-            )
-            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
-                let fader = match event.keystroke.key.as_str() {
-                    "home" => Some(FaderGain::MIN),
-                    "end" => Some(FaderGain::MAX),
-                    "left" | "down" => {
-                        FaderGain::from_half_decibel_steps(shown.half_decibel_steps() - 1).ok()
-                    }
-                    "right" | "up" => {
-                        FaderGain::from_half_decibel_steps(shown.half_decibel_steps() + 1).ok()
-                    }
-                    _ => None,
-                };
-                if let Some(fader) = fader {
-                    cx.stop_propagation();
-                    this.send_fader(MixerEdit::Output { target, fader }, cx);
+        track = track.on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+            let fader = match event.keystroke.key.as_str() {
+                "home" => Some(FaderGain::MIN),
+                "end" => Some(FaderGain::MAX),
+                "left" | "down" => {
+                    FaderGain::from_half_decibel_steps(shown.half_decibel_steps() - 1).ok()
                 }
-            }));
+                "right" | "up" => {
+                    FaderGain::from_half_decibel_steps(shown.half_decibel_steps() + 1).ok()
+                }
+                _ => None,
+            };
+            if let Some(fader) = fader {
+                cx.stop_propagation();
+                this.send_fader(MixerEdit::Output { target, fader }, cx);
+            }
+        }));
     }
     track
 }
@@ -915,10 +884,14 @@ fn fader_track(
     shown: FaderGain,
     color: u32,
     enabled: bool,
+    gesture: Option<LevelControl>,
     cx: &mut Context<Shell>,
 ) -> Stateful<Div> {
-    let bounds = std::rc::Rc::new(std::cell::Cell::new(None::<Bounds<gpui::Pixels>>));
-    let painted_bounds = std::rc::Rc::clone(&bounds);
+    let control = LevelControl::Fader(source, target);
+    let at = move |position: gpui::Point<gpui::Pixels>, area: Bounds<gpui::Pixels>| {
+        fader_at_pixel(f32::from(position.y), f32::from(area.top()), f32::from(area.size.height))
+            .map(|fader| MixerEdit::Input(FaderEdit { source, target, fader }))
+    };
     let mut track = identified(key)
         .w(px(FADER_WIDTH))
         .flex_1()
@@ -934,51 +907,27 @@ fn fader_track(
         .focus_visible(|style| style.bg(rgb(RAISED)))
         .child(fader_rail(fader_fraction(shown), color))
         .child(
-            canvas(move |area, _, _| painted_bounds.set(Some(area)), |_, (), _, _| {})
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full(),
+            level_gesture(
+                control,
+                enabled,
+                gesture == Some(control),
+                cx.weak_entity(),
+                std::rc::Rc::new(at),
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
         );
     if enabled {
-        track = track
-            .cursor_pointer()
-            .on_drag(FaderDrag { source, target }, |_, _, _, cx| cx.new(|_| gpui::Empty))
-            .on_drag_move(cx.listener(move |this, event: &DragMoveEvent<FaderDrag>, window, cx| {
-                let drag = event.drag(cx);
-                if drag.source != source || drag.target != target {
-                    return;
-                }
-                if let Some(fader) = fader_at_pixel(
-                    f32::from(event.event.position.y),
-                    f32::from(event.bounds.top()),
-                    f32::from(event.bounds.size.height),
-                ) {
-                    this.preview_fader(FaderEdit { source, target, fader }, window, cx);
-                }
-            }))
-            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
-                if let Some(command) =
-                    route_key_command(source, target, route, generation, &event.keystroke.key)
-                {
-                    cx.stop_propagation();
-                    this.send(command, cx);
-                }
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
-                    if let Some(area) = bounds.get()
-                        && let Some(fader) = fader_at_pixel(
-                            f32::from(event.position.y),
-                            f32::from(area.top()),
-                            f32::from(area.size.height),
-                        )
-                    {
-                        this.preview_fader(FaderEdit { source, target, fader }, window, cx);
-                    }
-                }),
-            );
+        track = track.on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+            if let Some(command) =
+                route_key_command(source, target, route, generation, &event.keystroke.key)
+            {
+                cx.stop_propagation();
+                this.send(command, cx);
+            }
+        }));
     }
     track
 }

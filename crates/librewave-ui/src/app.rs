@@ -3,6 +3,7 @@ mod chrome;
 mod confirm;
 mod controls;
 mod device_art;
+mod gesture;
 mod hardware;
 mod meters;
 mod mixer;
@@ -122,7 +123,8 @@ struct Shell {
     in_flight_fader: Option<MixerEdit>,
     queued_fader: Option<MixerEdit>,
     linked_faders: std::collections::BTreeSet<librewave_core::SourceId>,
-    fader_window: Option<gpui::AnyWindowHandle>,
+    /// The level control that a pointer drag is moving.
+    level_gesture: Option<gesture::LevelControl>,
     /// The daemon IPC socket for status, mixer, and device requests.
     socket: std::path::PathBuf,
     poll_in_flight: bool,
@@ -180,7 +182,7 @@ impl Shell {
             in_flight_fader: None,
             queued_fader: None,
             linked_faders: std::collections::BTreeSet::new(),
-            fader_window: None,
+            level_gesture: None,
             socket: configured_socket_path(),
             poll_in_flight: false,
             request_epoch: 0,
@@ -238,6 +240,7 @@ impl Shell {
             restore_focus: window.focused(cx).or_else(|| self.settings_trigger_focus.clone()),
         };
         self.queued_fader = None;
+        self.cancel_level_gesture(cx);
         cx.stop_active_drag(window);
         modal.close_focus.focus(window, cx);
         self.settings_modal = Some(modal);
@@ -303,12 +306,8 @@ impl Shell {
                 if refresh_hardware {
                     this.poll_status(cx);
                 }
-                if !succeeded
-                    && this.in_flight_fader.is_some()
-                    && let Some(window) = this.fader_window
-                {
-                    // A closed window has no remaining pointer gesture.
-                    let _ = cx.update_window(window, |_, window, cx| cx.stop_active_drag(window));
+                if !succeeded && this.in_flight_fader.is_some() {
+                    this.cancel_level_gesture(cx);
                 }
                 if let Some(edit) = this.finish_fader(succeeded) {
                     this.send_fader(edit, cx);
@@ -362,17 +361,11 @@ impl Shell {
     }
 
     /// Follows a pointer drag on a level control.
-    fn preview_fader(
-        &mut self,
-        edit: impl Into<MixerEdit>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn preview_fader(&mut self, edit: impl Into<MixerEdit>, cx: &mut Context<Self>) {
         let edit = edit.into();
         if self.settings_modal.is_some() {
             return;
         }
-        self.fader_window = Some(window.window_handle());
         match &mut self.preview {
             Some(preview) if !preview.released => {
                 if preview.edit == edit {
@@ -476,10 +469,7 @@ impl Shell {
                     // A failed preview ends the drag without a commit.
                     this.preview = None;
                     let _ = this.apply_error(&error);
-                    if let Some(window) = this.fader_window {
-                        let _ =
-                            cx.update_window(window, |_, window, cx| cx.stop_active_drag(window));
-                    }
+                    this.cancel_level_gesture(cx);
                 }
                 this.pump_preview(cx);
                 cx.notify();
@@ -794,7 +784,7 @@ mod tests {
             in_flight_fader: None,
             queued_fader: None,
             linked_faders: std::collections::BTreeSet::new(),
-            fader_window: None,
+            level_gesture: None,
             // Tests never reach the session daemon.
             socket: std::env::temp_dir().join("librewave-ui-tests-no-daemon.sock"),
             poll_in_flight: false,
@@ -1457,6 +1447,58 @@ mod tests {
         );
         assert_eq!(shell.snapshot.as_ref().map(|snapshot| &snapshot.mixer), Some(&mixer));
     }
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
+    fn a_level_drag_follows_the_pointer_and_ends_on_release(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| {
+            let mut shell = shell_with(Snapshot::empty());
+            // An earlier preview is in flight, so the drag sends nothing.
+            shell.preview = Some(Preview {
+                edit: MixerEdit::Output { target: MixTarget::Stream, fader: FaderGain::UNITY },
+                dirty: false,
+                in_flight: true,
+                sent: None,
+                released: false,
+            });
+            shell
+        });
+        let fader = cx.debug_bounds("fader-1-monitor").expect("Microphone Monitor fader");
+        let top = gpui::point(fader.center().x, fader.top() + gpui::px(1.));
+        let control =
+            gesture::LevelControl::Fader(librewave_core::SourceId::new(1), MixTarget::Monitor);
+        cx.simulate_mouse_down(top, gpui::MouseButton::Left, gpui::Modifiers::none());
+        view.read_with(cx, |view, _| assert_eq!(view.level_gesture, Some(control)));
+        // The pointer can leave the control and the gesture still follows it.
+        let below = gpui::point(fader.center().x, fader.bottom() + gpui::px(200.));
+        cx.simulate_mouse_move(below, gpui::MouseButton::Left, gpui::Modifiers::none());
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.level_gesture, Some(control));
+            let edit = view.preview.as_ref().expect("preview").edit;
+            assert!(matches!(
+                edit,
+                MixerEdit::Input(FaderEdit { fader, .. }) if fader == FaderGain::MIN
+            ));
+        });
+        cx.simulate_mouse_up(below, gpui::MouseButton::Left, gpui::Modifiers::none());
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.level_gesture, None);
+            assert!(view.preview.as_ref().expect("preview").released);
+        });
+    }
+
+    #[cfg(feature = "gpui-tests")]
+    #[gpui::test]
+    fn a_failed_preview_ends_the_level_drag(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| shell_with(Snapshot::empty()));
+        let fader = cx.debug_bounds("fader-1-monitor").expect("Microphone Monitor fader");
+        // Tests have no daemon, so the first preview request fails.
+        cx.simulate_mouse_down(fader.center(), gpui::MouseButton::Left, gpui::Modifiers::none());
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.level_gesture, None);
+            assert!(view.preview.is_none());
+        });
+    }
+
     #[cfg(feature = "gpui-tests")]
     #[gpui::test]
     fn one_key_press_activates_a_button_once(cx: &mut gpui::TestAppContext) {
