@@ -7,8 +7,9 @@
 //! The wheel over a level control changes that level by 1 dB per notch.
 use super::{MixerEdit, Shell};
 use gpui::{
-    Bounds, Canvas, CursorStyle, DispatchPhase, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, WeakEntity, canvas,
+    AccessibleAction, Bounds, Canvas, CursorStyle, DispatchPhase, Div, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Orientation, Pixels, Point, Role, ScrollDelta, ScrollWheelEvent,
+    SharedString, Stateful, WeakEntity, canvas, prelude::*,
 };
 use librewave_core::{MixTarget, SourceId};
 use std::rc::Rc;
@@ -105,9 +106,19 @@ impl Shell {
         // Whole notches fit an i32: one event never scrolls that far.
         #[allow(clippy::cast_possible_truncation)]
         let notches = notches as i32;
-        if notches == 0 {
-            return;
+        if notches != 0 {
+            self.nudge_level(control, step, notches, cx);
         }
+    }
+
+    /// Moves a level by whole 1 dB steps from the value that it shows.
+    fn nudge_level(
+        &mut self,
+        control: LevelControl,
+        step: &LevelStep,
+        notches: i32,
+        cx: &mut gpui::Context<Self>,
+    ) {
         let shown = self.shown_edit().filter(|edit| edit_control(*edit) == Some(control));
         if let Some(edit) = step(shown, notches) {
             self.send_fader(edit, cx);
@@ -187,4 +198,44 @@ pub(super) fn level_gesture(
             }
         },
     )
+}
+
+/// What assistive technology reports for a level control.
+pub(super) struct LevelDescription {
+    pub(super) label: SharedString,
+    pub(super) decibels: f64,
+    pub(super) minimum: f64,
+    pub(super) maximum: f64,
+    pub(super) orientation: Orientation,
+}
+
+/// Exposes a level control as a slider. Assistive technology can move it by
+/// the same 1 dB steps as the wheel.
+pub(super) fn accessible_level(
+    element: Stateful<Div>,
+    control: LevelControl,
+    description: LevelDescription,
+    enabled: bool,
+    step: &Rc<LevelStep>,
+    shell: &WeakEntity<Shell>,
+) -> Stateful<Div> {
+    let mut element = element
+        .role(Role::Slider)
+        .aria_label(description.label)
+        .aria_orientation(description.orientation)
+        .aria_numeric_value(description.decibels)
+        .aria_min_numeric_value(description.minimum)
+        .aria_max_numeric_value(description.maximum)
+        .aria_numeric_value_step(1.);
+    if !enabled {
+        return element;
+    }
+    for (action, notches) in [(AccessibleAction::Increment, 1), (AccessibleAction::Decrement, -1)] {
+        let step = Rc::clone(step);
+        let shell = shell.clone();
+        element = element.on_a11y_action(action, move |_, _, cx| {
+            let _ = shell.update(cx, |this, cx| this.nudge_level(control, &*step, notches, cx));
+        });
+    }
+    element
 }

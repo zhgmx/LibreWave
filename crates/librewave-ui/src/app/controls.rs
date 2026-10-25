@@ -6,8 +6,8 @@ use super::theme::{
     SPACE_SM, alpha,
 };
 use gpui::{
-    AnyView, App, Context, Div, FontFeatures, FontWeight, Render, SharedString, Stateful, Svg,
-    Window, div, prelude::*, px, rgb, rgba, svg,
+    AnyView, App, Context, Div, FontFeatures, FontWeight, Render, Role, SharedString, Stateful,
+    Svg, Window, div, prelude::*, px, rgb, rgba, svg,
 };
 use std::rc::Rc;
 use std::sync::Arc;
@@ -97,14 +97,15 @@ pub(super) fn tip(
     move |_, cx| cx.new(|_| Tip(text.clone())).into()
 }
 
-/// Adds pointer and keyboard activation to a focusable control.
+/// Adds pointer and keyboard activation to a focusable control. Assistive
+/// technology sees it as a button.
 pub(super) fn activate(
     control: Stateful<Div>,
     enabled: bool,
     cx: &mut Context<Shell>,
     action: impl Fn(&mut Shell, &mut Window, &mut Context<Shell>) + 'static,
 ) -> Stateful<Div> {
-    let control = control.focusable().tab_index(0).tab_stop(enabled);
+    let control = control.focusable().tab_index(0).tab_stop(enabled).role(Role::Button);
     if !enabled {
         return control.opacity(0.4);
     }
@@ -177,7 +178,12 @@ pub(super) fn action_button(
     cx: &mut Context<Shell>,
     action: impl Fn(&mut Shell, &mut Window, &mut Context<Shell>) + 'static,
 ) -> Stateful<Div> {
-    activate(button_face(id, tone).child(label.to_owned()), enabled, cx, action)
+    activate(
+        button_face(id, tone).aria_label(label.to_owned()).child(label.to_owned()),
+        enabled,
+        cx,
+        action,
+    )
 }
 
 /// A button with a leading icon.
@@ -192,7 +198,10 @@ pub(super) fn labeled_icon_button(
 ) -> Stateful<Div> {
     let ink = tone_colors(tone).1;
     activate(
-        button_face(id, tone).child(icon(glyph, ink, ICON_SMALL)).child(label.to_owned()),
+        button_face(id, tone)
+            .aria_label(label.to_owned())
+            .child(icon(glyph, ink, ICON_SMALL))
+            .child(label.to_owned()),
         enabled,
         cx,
         action,
@@ -215,6 +224,7 @@ pub(super) fn icon_button(
         button_face(id, tone)
             .w(px(CONTROL))
             .p_0()
+            .aria_label(hint)
             .child(icon(glyph, ink, ICON_SMALL))
             .tooltip(tip(hint)),
         enabled,

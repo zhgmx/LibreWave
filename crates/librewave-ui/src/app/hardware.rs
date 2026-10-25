@@ -3,7 +3,7 @@
 use super::controls::{
     Tone, action_button, activate, caption, icon, icon_button, identified, tabular, tip,
 };
-use super::gesture::{LevelControl, level_gesture};
+use super::gesture::{LevelControl, LevelDescription, LevelStep, accessible_level, level_gesture};
 use super::theme::{
     BODY, BODY_LINE, DANGER, FAINT, FOCUS, HEADING, HEADING_LINE, ICON, ICON_SMALL, INK, LINE,
     MONITOR, MUTED, RADIUS, RAISED, RAISED_HOVER, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, WARNING,
@@ -325,7 +325,16 @@ fn level_slider(
         let raw = base.raw.saturating_add(notches.saturating_mul(256)).clamp(minimum, maximum);
         edit(stepped(FixedPointValue { raw, ..base }, 0, minimum, maximum))
     };
-    let mut slider = identified(&format!("{key}-slider"))
+    let step: std::rc::Rc<LevelStep> = std::rc::Rc::new(step);
+    let decibels = |raw: i32| f64::from(raw) / 256.;
+    let description = LevelDescription {
+        label: level.name.into(),
+        decibels: decibels(shown.raw),
+        minimum: decibels(minimum),
+        maximum: decibels(maximum),
+        orientation: gpui::Orientation::Horizontal,
+    };
+    let slider = identified(&format!("{key}-slider"))
         .w_full()
         .h(px(THUMB + 2.))
         .relative()
@@ -343,13 +352,15 @@ fn level_slider(
                 gesture == Some(gesture_control),
                 cx.weak_entity(),
                 std::rc::Rc::new(at),
-                std::rc::Rc::new(step),
+                std::rc::Rc::clone(&step),
             )
             .absolute()
             .top_0()
             .left_0()
             .size_full(),
         );
+    let mut slider =
+        accessible_level(slider, gesture_control, description, enabled, &step, &cx.weak_entity());
     if !enabled {
         return slider;
     }
@@ -525,9 +536,11 @@ fn toggle_tile(
         })
         .child(icon(glyph, if on { MONITOR } else { MUTED }, ICON))
         .child(name.to_owned());
-    activate(tile, target.writable, cx, move |this, _, cx| {
+    let tile = activate(tile, target.writable, cx, move |this, _, cx| {
         this.send(control_command(target, control(!on)), cx);
-    })
+    });
+    // An on and off setting, not a plain button, for assistive technology.
+    tile.role(gpui::Role::Switch).aria_label(name.to_owned()).aria_toggled(on.into())
 }
 
 fn step_button(

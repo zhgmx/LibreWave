@@ -4,7 +4,7 @@ use super::controls::{
     Tone, activate, button_face, caption, card, icon, icon_button, icon_tile, identified, label,
     tabular, tip,
 };
-use super::gesture::{LevelControl, level_gesture};
+use super::gesture::{LevelControl, LevelDescription, LevelStep, accessible_level, level_gesture};
 use super::scrollbar;
 use super::theme::{
     CAPTION, DANGER, FAINT, FOCUS, HEADING, HEADING_LINE, ICON_SMALL, INK, LINE, MONITOR, MUTED,
@@ -537,8 +537,9 @@ impl Shell {
             MixTarget::Monitor => source.controls.monitor(),
             MixTarget::Stream => source.controls.stream(),
         };
-        let (color, _, _) = mix_identity(target);
+        let (color, _, mix) = mix_identity(target);
         let key = format!("fader-{}-{target}", id.get());
+        let label = format!("{} {mix} level", source.name);
         let shown = self
             .shown_edit()
             .and_then(MixerEdit::input)
@@ -558,6 +559,7 @@ impl Shell {
             .gap(px(SPACE_MD))
             .child(fader_track(
                 &key,
+                label,
                 id,
                 target,
                 route,
@@ -814,6 +816,7 @@ fn output_track(
         };
         Some(MixerEdit::Output { target, fader: wheel_fader(base, notches) })
     };
+    let step: std::rc::Rc<LevelStep> = std::rc::Rc::new(step);
     let mut track = identified(key)
         .flex_1()
         .min_w(px(80.))
@@ -850,13 +853,22 @@ fn output_track(
                 gesture == Some(control),
                 cx.weak_entity(),
                 std::rc::Rc::new(at),
-                std::rc::Rc::new(step),
+                std::rc::Rc::clone(&step),
             )
             .absolute()
             .top_0()
             .left_0()
             .size_full(),
         );
+    let (_, _, mix) = mix_identity(target);
+    track = accessible_level(
+        track,
+        control,
+        fader_description(format!("{mix} mix level"), shown, gpui::Orientation::Horizontal),
+        enabled,
+        &step,
+        &cx.weak_entity(),
+    );
     if enabled {
         track = track.on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
             let fader = match event.keystroke.key.as_str() {
@@ -878,6 +890,22 @@ fn output_track(
     }
     track
 }
+/// The slider that assistive technology reports for a software level.
+fn fader_description(
+    label: String,
+    shown: FaderGain,
+    orientation: gpui::Orientation,
+) -> LevelDescription {
+    let decibels = |fader: FaderGain| f64::from(fader.half_decibel_steps()) / 2.;
+    LevelDescription {
+        label: label.into(),
+        decibels: decibels(shown),
+        minimum: decibels(FaderGain::MIN),
+        maximum: decibels(FaderGain::MAX),
+        orientation,
+    }
+}
+
 /// A fader level moved by wheel notches of 1 dB, inside the fader range.
 fn wheel_fader(base: FaderGain, notches: i32) -> FaderGain {
     let steps =
@@ -931,6 +959,7 @@ fn scale() -> Div {
 #[allow(clippy::too_many_arguments)]
 fn fader_track(
     key: &str,
+    label: String,
     source: SourceId,
     target: MixTarget,
     route: MixRoute,
@@ -953,6 +982,7 @@ fn fader_track(
         };
         Some(MixerEdit::Input(FaderEdit { source, target, fader: wheel_fader(base, notches) }))
     };
+    let step: std::rc::Rc<LevelStep> = std::rc::Rc::new(step);
     let mut track = identified(key)
         .w(px(FADER_WIDTH))
         .flex_1()
@@ -974,13 +1004,21 @@ fn fader_track(
                 gesture == Some(control),
                 cx.weak_entity(),
                 std::rc::Rc::new(at),
-                std::rc::Rc::new(step),
+                std::rc::Rc::clone(&step),
             )
             .absolute()
             .top_0()
             .left_0()
             .size_full(),
         );
+    track = accessible_level(
+        track,
+        control,
+        fader_description(label, shown, gpui::Orientation::Vertical),
+        enabled,
+        &step,
+        &cx.weak_entity(),
+    );
     if enabled {
         track = track.on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
             if let Some(command) =
