@@ -990,6 +990,56 @@ fn reconnect_keeps_physical_controls_instead_of_replaying_saved_levels() {
 }
 
 #[test]
+fn reconnect_puts_back_the_levels_from_before_the_disconnect() {
+    // ALSA writes its saved card volumes when the card reappears.
+    let mut alsa = wave3_config();
+    alsa.input_gain.raw = 4096;
+    alsa.headphone_volume.raw = -6016;
+    let mut before = alsa.clone();
+    before.input_gain.raw = 4726; // Set with the dial, between write steps.
+    before.headphone_volume.raw = -1536;
+    before.headphone_mute = true;
+    let mut restored = alsa.clone();
+    restored.headphone_volume = before.headphone_volume;
+    let mut both = restored.clone();
+    both.headphone_mute = true;
+    let mut h = harness(
+        DesiredState::default(),
+        alsa.clone(),
+        vec![ConnectionOutcome::Applied(restored), ConnectionOutcome::Applied(both.clone())],
+        vec![],
+    );
+    h.daemon.observe_controls(Instant::now());
+    let due = h.daemon.control_reads[&DeviceId(1)];
+    h.refreshes.borrow_mut().push_back(ConnectionRefreshOutcome::Changed(before.clone()));
+    h.daemon.observe_controls(due);
+    assert_eq!(h.daemon.snapshot().devices[0].admission.config(), Some(&before));
+    let due = h.daemon.control_reads[&DeviceId(1)];
+    h.refreshes
+        .borrow_mut()
+        .push_back(ConnectionRefreshOutcome::Failed(AdmissionError::Disconnected));
+    h.daemon.observe_controls(due);
+    assert!(h.daemon.connections.is_empty());
+    let retry = h.daemon.control_reads[&DeviceId(1)];
+    h.daemon.observe_controls(retry);
+    assert_eq!(
+        *h.calls.borrow(),
+        vec![
+            Wave3Control::HeadphoneLevel(before.headphone_volume),
+            Wave3Control::HeadphoneMute(true),
+        ],
+        "the off-grid dial gain is not rounded"
+    );
+    assert_eq!(h.daemon.snapshot().devices[0].admission.config(), Some(&both));
+    assert_eq!(*h.saves.borrow(), 0, "restored levels do not become managed state");
+
+    // A first connection in this daemon has nothing to put back.
+    let mut fresh = harness(DesiredState::default(), alsa, vec![], vec![]);
+    fresh.daemon.observe_controls(Instant::now());
+    assert!(fresh.calls.borrow().is_empty());
+}
+
+#[test]
 fn reconnect_restores_sparse_controls_and_locks_after_partial_failure() {
     let mut desired = DesiredState::default();
     desired.stage("1-8.3".to_owned(), Wave3Control::Clipguard(true)).expect("stage clipguard");

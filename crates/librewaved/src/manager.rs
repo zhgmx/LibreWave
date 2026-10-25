@@ -60,6 +60,10 @@ pub struct Daemon {
     next_defaults_recovery: Instant,
     next_control_inventory: Instant,
     control_reads: BTreeMap<DeviceId, Instant>,
+    /// The last configuration read from each connected topology.
+    last_observed: BTreeMap<String, Wave3ConfigSnapshot>,
+    /// The configuration of each topology when this daemon saw it disconnect.
+    before_disconnect: BTreeMap<String, Wave3ConfigSnapshot>,
 }
 
 type ConnectionFactory =
@@ -168,6 +172,8 @@ impl Daemon {
             next_defaults_recovery: Instant::now(),
             next_control_inventory: Instant::now(),
             control_reads: BTreeMap::new(),
+            last_observed: BTreeMap::new(),
+            before_disconnect: BTreeMap::new(),
             audio_endpoints: Box::new(librewave_platform_linux::desktop_defaults::audio_endpoints),
         })
     }
@@ -207,6 +213,8 @@ impl Daemon {
             next_defaults_recovery: Instant::now(),
             next_control_inventory: Instant::now(),
             control_reads: BTreeMap::new(),
+            last_observed: BTreeMap::new(),
+            before_disconnect: BTreeMap::new(),
         }
     }
 
@@ -799,6 +807,15 @@ impl Daemon {
             }
             Some(_) | None => RestoreResult::Ready(observed),
         };
+        // ALSA restores its saved card volumes when the card reappears. Put
+        // back the levels that the device had when this daemon saw it go.
+        let restore = match (restore, self.before_disconnect.remove(&topology)) {
+            (RestoreResult::Ready(observed), Some(before)) => {
+                let controls = levels_to_restore(&observed, &before);
+                Self::apply_controls(connection.as_mut(), observed, controls)
+            }
+            (restore, _) => restore,
+        };
         if matches!(restore, RestoreResult::Disconnected) {
             self.update_admission(
                 id,
@@ -813,6 +830,9 @@ impl Daemon {
             RestoreResult::Locked { config, reason } => (config, Some(reason)),
             RestoreResult::Disconnected => unreachable!("handled above"),
         };
+        if let (Some(config), None) = (&config, locked) {
+            self.last_observed.insert(topology.clone(), config.clone());
+        }
         let generation = self.next_device_generation(&topology)?;
         let write_access =
             locked.map_or(DeviceWriteAccess::Ready, |reason| DeviceWriteAccess::Locked { reason });
@@ -847,6 +867,18 @@ impl Daemon {
                 owned.connection.refresh(),
             )
         };
+        match &outcome {
+            ConnectionRefreshOutcome::Changed(config)
+            | ConnectionRefreshOutcome::Unchanged(config)
+                if locked.is_none() =>
+            {
+                self.last_observed.insert(topology.clone(), config.clone());
+            }
+            ConnectionRefreshOutcome::Failed(AdmissionError::Disconnected) => {
+                self.forget_connection(&topology);
+            }
+            _ => {}
+        }
         match outcome {
             ConnectionRefreshOutcome::Changed(config) => {
                 let generation = self.next_device_generation(&topology)?;
@@ -1213,12 +1245,28 @@ impl Daemon {
         )
     }
 
+    /// Keeps the last levels of a topology that this daemon saw disconnect.
+    fn forget_connection(&mut self, topology: &str) {
+        if let Some(config) = self.last_observed.remove(topology) {
+            self.before_disconnect.insert(topology.to_owned(), config);
+        }
+    }
+
     fn restore_desired(
         connection: &mut dyn ManagedWave3Connection,
-        mut observed: Wave3ConfigSnapshot,
+        observed: Wave3ConfigSnapshot,
         desired: &DesiredWave3Controls,
     ) -> RestoreResult {
-        for control in controls_to_restore(&observed, desired) {
+        let controls = controls_to_restore(&observed, desired);
+        Self::apply_controls(connection, observed, controls)
+    }
+
+    fn apply_controls(
+        connection: &mut dyn ManagedWave3Connection,
+        mut observed: Wave3ConfigSnapshot,
+        controls: Vec<Wave3Control>,
+    ) -> RestoreResult {
+        for control in controls {
             match connection.apply(control) {
                 ConnectionOutcome::Applied(config) | ConnectionOutcome::Unchanged(config) => {
                     observed = config;
@@ -1296,6 +1344,15 @@ impl Daemon {
             }
         }
         self.candidates = candidates;
+        let removed: Vec<String> = self
+            .connections
+            .iter()
+            .filter(|(id, _)| !self.candidates.contains_key(id))
+            .map(|(_, owned)| owned.topology.clone())
+            .collect();
+        for topology in &removed {
+            self.forget_connection(topology);
+        }
         self.connections.retain(|id, _| self.candidates.contains_key(id));
         self.state.replace(snapshot, origin)
     }
@@ -1443,6 +1500,30 @@ pub(crate) fn persist_mixer_profile<H: crate::audio::SupervisedAudioHost>(
         eprintln!("librewaved: saved profile awaits audio recovery: {error}");
     }
     Ok(())
+}
+
+/// The level controls that ALSA can overwrite on reconnect, where they
+/// differ from the levels before the disconnect. A level that is not on the
+/// write grid, such as a gain set with the dial, is not rounded. It stays as
+/// the device reports it.
+fn levels_to_restore(
+    observed: &Wave3ConfigSnapshot,
+    before: &Wave3ConfigSnapshot,
+) -> Vec<Wave3Control> {
+    [
+        (observed.input_gain != before.input_gain)
+            .then_some(Wave3Control::InputGain(before.input_gain)),
+        (observed.input_mute != before.input_mute)
+            .then_some(Wave3Control::MicrophoneMute(before.input_mute)),
+        (observed.headphone_volume != before.headphone_volume)
+            .then_some(Wave3Control::HeadphoneLevel(before.headphone_volume)),
+        (observed.headphone_mute != before.headphone_mute)
+            .then_some(Wave3Control::HeadphoneMute(before.headphone_mute)),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|control| control::validate_control(*control).is_ok())
+    .collect()
 }
 
 fn controls_to_restore(

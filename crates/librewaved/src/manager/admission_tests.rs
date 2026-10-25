@@ -194,7 +194,7 @@ fn disconnect_permission_failure_and_reconnect_require_fresh_owned_admission() {
     assert_eq!(bus.claims.get(), 0);
     assert_eq!(*h.connections.borrow(), 1);
     bus.deny.set(false);
-    bus.config.borrow_mut().input_gain.raw = 3938;
+    bus.config.borrow_mut().volume_select = librewave_core::VolumeSelection::Headphone;
     std::thread::sleep(Duration::from_millis(2050));
     h.daemon.supervise_audio(&mut audio, true);
     assert_eq!(audio.runtime(), MixerRuntimeState::Active);
