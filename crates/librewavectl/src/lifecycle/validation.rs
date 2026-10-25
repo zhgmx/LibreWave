@@ -77,7 +77,7 @@ pub(super) fn validate_manifest(manifest: &Manifest, paths: &InstallPaths) -> io
             return Err(invalid_data("manifest contains a duplicate owned path"));
         }
         if entry.path != paths.udev_rule
-            && entry.path != super::desktop::application_entry(paths)?
+            && !super::desktop::is_shared_path(&entry.path, paths)?
             && !allowed.iter().any(|root| entry.path.starts_with(root))
         {
             return Err(invalid_data(format!(
@@ -323,7 +323,7 @@ fn validate_snapshot(
         validate_parent_chain(saved, paths)?;
     }
     let destination_allowed = snapshot.destination == paths.udev_rule
-        || snapshot.destination == super::desktop::application_entry(paths)?
+        || super::desktop::is_shared_path(&snapshot.destination, paths)?
         || [&paths.data_root, &paths.state_root, &paths.config_root, &paths.bin_root]
             .iter()
             .any(|root| snapshot.destination.starts_with(root));

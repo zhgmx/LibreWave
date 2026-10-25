@@ -2,15 +2,28 @@ use super::{artifacts::quote_unit_value, engine::InstallPaths, model::DesktopCon
 use std::{io, path::PathBuf};
 
 pub(super) const UNIT: &str = "librewave-desktop.service";
-const ENTRY: &str = "io.github.zhgmx.LibreWave.desktop";
+/// The desktop ID. The client window uses the same application ID, so the
+/// desktop shows this entry's icon for it.
+const APPLICATION_ID: &str = "com.zhgmx.LibreWave";
+const ENTRY: &str = "com.zhgmx.LibreWave.desktop";
+const ICON: &str = include_str!("../../../../assets/librewave.svg");
+
+fn data_home(paths: &InstallPaths) -> io::Result<&std::path::Path> {
+    paths.data_root.parent().ok_or_else(|| io::Error::other("data root has no parent"))
+}
 
 pub(super) fn application_entry(paths: &InstallPaths) -> io::Result<PathBuf> {
-    Ok(paths
-        .data_root
-        .parent()
-        .ok_or_else(|| io::Error::other("data root has no parent"))?
-        .join("applications")
-        .join(ENTRY))
+    Ok(data_home(paths)?.join("applications").join(ENTRY))
+}
+
+/// The application icon in the user `hicolor` theme.
+pub(super) fn application_icon(paths: &InstallPaths) -> io::Result<PathBuf> {
+    Ok(data_home(paths)?.join(format!("icons/hicolor/scalable/apps/{APPLICATION_ID}.svg")))
+}
+
+/// Desktop artifacts that live outside the `LibreWave` roots.
+pub(super) fn is_shared_path(path: &std::path::Path, paths: &InstallPaths) -> io::Result<bool> {
+    Ok(path == application_entry(paths)? || path == application_icon(paths)?)
 }
 
 pub(super) fn files(
@@ -38,7 +51,7 @@ pub(super) fn files(
         "[Unit]\nDescription=LibreWave desktop and mixer startup\nAfter=graphical-session.target pipewire.service wireplumber.service\nWants=pipewire.service wireplumber.service\nPartOf=graphical-session.target\n\n[Service]\nType=exec\nExecStartPre={cli} start{suspend}\nExecStart={gui}\nEnvironment={environment}\nTimeoutStartSec=90\n"
     );
     let entry = format!(
-        "[Desktop Entry]\nType=Application\nName=LibreWave\nComment=Control the Wave microphone and software mixer\nExec=/usr/bin/systemctl --user start {UNIT}\nIcon=audio-card\nTerminal=false\nCategories=AudioVideo;Audio;\n"
+        "[Desktop Entry]\nType=Application\nName=LibreWave\nComment=Control the Wave microphone and software mixer\nExec=/usr/bin/systemctl --user start {UNIT}\nIcon={APPLICATION_ID}\nStartupWMClass={APPLICATION_ID}\nTerminal=false\nCategories=AudioVideo;Audio;\n"
     );
     let login = format!("{entry}Hidden={}\n", !config.autostart);
     Ok(vec![
@@ -50,6 +63,7 @@ pub(super) fn files(
         ),
         (application_entry(paths)?, entry, 0o644),
         (paths.config_root.join("autostart").join(ENTRY), login, 0o644),
+        (application_icon(paths)?, ICON.to_owned(), 0o644),
     ])
 }
 
@@ -237,6 +251,9 @@ mod tests {
             files[2].1.contains("Exec=/usr/bin/systemctl --user start librewave-desktop.service")
         );
         assert!(files[3].1.contains("Hidden=true"));
+        assert!(files[2].1.contains("Icon=com.zhgmx.LibreWave\n"));
+        assert_eq!(files[4].0, application_icon(&lifecycle.paths).expect("icon path"));
+        assert!(files[4].1.starts_with("<svg"));
         assert!(!unit.contains("ExecStop="));
     }
 }

@@ -49,7 +49,8 @@ pub fn run(view: LaunchView) {
                 title: Some("LibreWave".into()),
                 ..Default::default()
             }),
-            app_id: Some("dev.librewave.LibreWave".to_owned()),
+            // The installed desktop entry has this ID and the application icon.
+            app_id: Some("com.zhgmx.LibreWave".to_owned()),
             ..WindowOptions::default()
         };
         cx.open_window(options, move |window, cx| {
